@@ -386,6 +386,101 @@ test_portable_shard_union_and_coverage_guard() {
   pass "portable shard union, disjointness, and coverage guard hold"
 }
 
+test_portable_serial_halves_partition_the_lane() {
+  local serial h1 h2 overlap heavy
+  serial=$("$RUNNER" --list --lane portable-serial | LC_ALL=C sort)
+  h1=$("$RUNNER" --list --lane portable-serial-1 | LC_ALL=C sort)
+  h2=$("$RUNNER" --list --lane portable-serial-2 | LC_ALL=C sort)
+  [ -n "$h1" ] && [ -n "$h2" ] || fail "both portable serial halves must be non-empty"
+  overlap=$(comm -12 <(printf '%s\n' "$h1") <(printf '%s\n' "$h2") || true)
+  [ -z "$overlap" ] || fail "portable serial halves overlap: $overlap"
+  [ "$(printf '%s\n' "$h1" "$h2" | LC_ALL=C sort -u)" = "$serial" ] \
+    || fail "portable serial halves must union to the portable serial lane"
+  # The pinned heavies carry half the lane; losing one silently would unbalance
+  # CI without any coverage guard noticing, so assert the pin itself.
+  for heavy in tests/fm-pr-check-security.test.sh tests/fm-watch-triage.test.sh \
+    tests/fm-watcher-lock.test.sh tests/fm-secondmate-harness.test.sh \
+    tests/fm-bearings-snapshot.test.sh; do
+    printf '%s\n' "$h1" | grep -Fqx "$heavy" \
+      || fail "pinned heavy script missing from portable-serial-1: $heavy"
+  done
+  pass "portable serial halves partition the serial lane and keep the pinned heavies"
+}
+
+test_interrupt_writes_partial_timing_artifact() {
+  local tmp rc runner_pid waited
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-interrupt.XXXXXX")
+  mkdir -p "$tmp/tests"
+  cat >"$tmp/tests/a.test.sh" <<'SH'
+#!/usr/bin/env bash
+echo "ok - fast"
+SH
+  cat >"$tmp/tests/b.test.sh" <<'SH'
+#!/usr/bin/env bash
+# Long enough that the runner is reliably still inside it when we signal.
+sleep 60
+echo "ok - slow"
+SH
+  chmod +x "$tmp/tests/a.test.sh" "$tmp/tests/b.test.sh"
+  # exec so the recorded pid is the runner itself; signalling a wrapping subshell
+  # would kill the subshell and never reach the runner's interrupt handler.
+  (
+    cd "$ROOT" || exit 1
+    exec "$RUNNER" --json "$tmp/out.json" \
+      "$tmp/tests/a.test.sh" "$tmp/tests/b.test.sh" >"$tmp/out" 2>&1
+  ) &
+  runner_pid=$!
+  # Wait for the first script to be recorded, so the interrupt lands mid-suite
+  # rather than before any measurement exists.
+  waited=0
+  while [ "$waited" -lt 200 ]; do
+    grep -q 'FM_TEST_END .*a\.test\.sh' "$tmp/out" 2>/dev/null && break
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  grep -q 'FM_TEST_END .*a\.test\.sh' "$tmp/out" 2>/dev/null \
+    || { kill "$runner_pid" 2>/dev/null; rm -rf "$tmp"; fail "first script never completed"; }
+  kill -TERM "$runner_pid" 2>/dev/null
+  set +e
+  wait "$runner_pid"
+  rc=$?
+  set -e
+  [ "$rc" -eq 124 ] \
+    || { rm -rf "$tmp"; fail "interrupted run must exit 124 like timeout(1), got $rc"; }
+  [ -s "$tmp/out.json" ] \
+    || { rm -rf "$tmp"; fail "interrupted run must still write a timing artifact"; }
+  python3 -c '
+import json,sys
+doc=json.load(open(sys.argv[1]))
+assert doc["interrupted"] is True, "artifact must mark itself interrupted"
+paths=[s["path"] for s in doc["scripts"]]
+assert any(p.endswith("a.test.sh") for p in paths), "finished script must be recorded: %r" % paths
+assert not any(p.endswith("b.test.sh") for p in paths), "unfinished script must not be recorded: %r" % paths
+' "$tmp/out.json" || { rm -rf "$tmp"; fail "interrupted artifact shape wrong: $(cat "$tmp/out.json")"; }
+  rm -rf "$tmp"
+  pass "an interrupted run writes a partial timing artifact marked interrupted"
+}
+
+test_completed_run_is_not_marked_interrupted() {
+  local tmp
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-complete.XXXXXX")
+  mkdir -p "$tmp/tests"
+  cat >"$tmp/tests/a.test.sh" <<'SH'
+#!/usr/bin/env bash
+echo "ok - fast"
+SH
+  chmod +x "$tmp/tests/a.test.sh"
+  ( cd "$ROOT" && "$RUNNER" --json "$tmp/out.json" "$tmp/tests/a.test.sh" ) >"$tmp/out" 2>&1 \
+    || { rm -rf "$tmp"; fail "clean run failed: $(cat "$tmp/out")"; }
+  python3 -c '
+import json,sys
+doc=json.load(open(sys.argv[1]))
+assert doc["interrupted"] is False, "a completed run must not be marked interrupted"
+' "$tmp/out.json" || { rm -rf "$tmp"; fail "completed artifact wrongly marked interrupted"; }
+  rm -rf "$tmp"
+  pass "a completed run records interrupted=false"
+}
+
 test_jobs_requires_proven_isolated() {
   local tmp rc
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-jobs.XXXXXX")
@@ -579,6 +674,9 @@ test_gate_skip_accounting
 test_fail_on_gate_skip_token
 test_exclude_family
 test_portable_shard_union_and_coverage_guard
+test_portable_serial_halves_partition_the_lane
+test_interrupt_writes_partial_timing_artifact
+test_completed_run_is_not_marked_interrupted
 test_jobs_requires_proven_isolated
 test_jobs_parallel_scheduler_and_failure_propagation
 test_aggregate_json
