@@ -367,7 +367,6 @@ test_visual_evidence_contract_is_opt_in_and_complete() {
   local home id brief
   home="$TMP_ROOT/visual-evidence-home"
   write_registry "$home"
-  home=$(cd "$home" && pwd -P)
 
   # The contract renders for every ship delivery mode, since a change needs the
   # same evidence whether it lands through the pipeline, a direct PR, or locally.
@@ -409,13 +408,67 @@ test_visual_evidence_contract_is_opt_in_and_complete() {
       "$id: visual-evidence contract lost the generated-content medium"
     assert_grep "Capture browser surfaces with \`chrome-devtools-axi\`." "$brief" \
       "$id: visual-evidence contract lost the browser capture tool as a browser-scoped example"
-    # Non-PR modes need a durable home for the artifacts: the worktree is torn
-    # down, so the brief must name the data dir that outlives it.
-    assert_grep "in every non-PR mode the directory \`$home/data/$id/\` beside this brief" "$brief" \
-      "$id: visual-evidence contract left non-PR artifacts without a durable absolute location"
+    # The after carve-out is narrow and conditional: a still that cannot hold the
+    # change is not a licence to fall back to prose.
+    assert_grep "The single carve-out is a change no still capture can hold, meaning motion, timing, or a measurement" "$brief" \
+      "$id: visual-evidence contract lost the narrow motion/timing/measurement carve-out"
+    assert_grep "Name the form you used and why a still could not carry the claim." "$brief" \
+      "$id: visual-evidence carve-out did not require naming the artifact form and its justification"
+    assert_grep "\"I could not show it\" with nothing attached is not a carve-out; it is a missing after." "$brief" \
+      "$id: visual-evidence carve-out allowed an unattached claim to pass as an after"
+    # Rule 2 stands: prototypes and captures are built inside the worktree in one
+    # conventional self-ignoring scratch dir, never committed to the code branch.
+    assert_grep "Build every prototype and capture inside this worktree, under \`.fm-scratch/\`" "$brief" \
+      "$id: visual-evidence contract did not confine artifact production to the worktree"
+    assert_grep "write a single \`*\` line into \`.fm-scratch/.gitignore\`" "$brief" \
+      "$id: visual-evidence contract lost the self-ignoring scratch directory mechanism"
+    assert_grep "never commit it to your \`fm/$id\` branch" "$brief" \
+      "$id: visual-evidence contract let a scratch prototype land on the code branch"
+    assert_grep "append \`blocked: {why}\` and stop; that is an escalation, not a licence to write outside it" "$brief" \
+      "$id: visual-evidence contract turned an impossible capture into licence to write outside the worktree"
+    assert_no_grep "Those artifacts and the status file are the only things you write outside the worktree." "$brief" \
+      "$id: visual-evidence contract still carves an exception out of ship rule 2"
+    # Captures are delivered on a sibling orphan evidence ref, never on the code
+    # branch and never in a gist, and the ref is deleted when the work lands.
+    assert_grep "sibling orphan ref, \`fm/$id-evidence\`" "$brief" \
+      "$id: visual-evidence contract lost the sibling orphan evidence ref"
+    assert_grep "never in a gist, because a secret gist is unlisted rather than access-controlled" "$brief" \
+      "$id: visual-evidence contract lost the gist prohibition and its reason"
+    assert_grep "git switch --orphan fm/$id-evidence" "$brief" \
+      "$id: visual-evidence contract lost the orphan-ref mechanics"
+    assert_grep "one capture per claim with \`before\` or \`after\` in each filename, a \`README.md\` indexing them, and any script you wrote to produce them committed alongside" "$brief" \
+      "$id: visual-evidence contract lost the flat evidence-ref layout convention"
+    assert_grep "Commit with a message prefixed \`evidence:\`" "$brief" \
+      "$id: visual-evidence contract lost the evidence: commit prefix"
+    assert_grep "must be deleted once the" "$brief" \
+      "$id: visual-evidence contract left the evidence ref behind as a stale branch"
     assert_no_grep "EOF" "$brief" \
       "$id: visual-evidence brief leaked a heredoc EOF marker"
   done
+
+  # Delivery of the captures follows the project's delivery mode: the PR modes
+  # push the evidence ref and link it from the PR body, while local-only is
+  # defined by not pushing, so its evidence ref stays local.
+  for id in brief-visual-nm-e1 brief-visual-dpr-e2; do
+    brief="$home/data/$id/brief.md"
+    assert_grep "Push \`fm/$id-evidence\` to the same remote your code branch goes to" "$brief" \
+      "$id: visual-evidence contract did not push the evidence ref to the code branch's remote"
+    assert_grep "it is the only other ref you push, a sibling of your own branch and never the default branch" "$brief" \
+      "$id: visual-evidence contract left the evidence push at odds with the never-push-the-default-branch rule"
+    assert_grep "Reference each capture in the pull request body by its URL on that ref" "$brief" \
+      "$id: visual-evidence contract did not land the captures in the pull request body"
+    assert_grep "add those links to its body with \`gh-axi\` as soon as it exists" "$brief" \
+      "$id: visual-evidence contract gave no timing for a pull request opened by the pipeline"
+  done
+
+  id="brief-visual-lo-e3"
+  brief="$home/data/$id/brief.md"
+  assert_grep "This project ships local-only, so \`fm/$id-evidence\` stays local: never push it" "$brief" \
+    "$id: local-only visual-evidence contract did not keep the evidence ref local"
+  assert_grep "name the ref and the capture filenames in your \`ready in branch\` hand-back" "$brief" \
+    "$id: local-only visual-evidence contract did not point the hand-back at the evidence ref"
+  assert_no_grep "Push \`fm/$id-evidence\`" "$brief" \
+    "$id: local-only visual-evidence contract told the worker to push"
 
   # Absent by default: a brief for work with no user-visible surface must not
   # carry the contract, and unlike --herdr-lab it leaves no declaration behind.
@@ -434,6 +487,10 @@ test_visual_evidence_contract_is_opt_in_and_complete() {
     "$id: default ship brief carried a visual-evidence declaration or regeneration notice"
   assert_no_grep "screenshot" "$brief" \
     "$id: default ship brief bloated with screenshot instructions"
+  assert_no_grep ".fm-scratch" "$brief" \
+    "$id: default ship brief carried the visual-evidence scratch convention"
+  assert_no_grep "-evidence" "$brief" \
+    "$id: default ship brief carried the visual-evidence delivery convention"
 
   # Every scaffold still documents the flag through --help.
   local help
@@ -442,8 +499,12 @@ test_visual_evidence_contract_is_opt_in_and_complete() {
     "fm-brief.sh --help does not document --visual-evidence"
   assert_contains "$help" "The medium follows the surface" \
     "fm-brief.sh --help still documents the contract as browser-only"
-  assert_contains "$help" "data/<task-id>/ otherwise" \
-    "fm-brief.sh --help does not document where non-PR artifacts go"
+  assert_contains "$help" "self-ignoring .fm-scratch/ and are never committed to the code branch" \
+    "fm-brief.sh --help does not document where the artifacts are produced"
+  assert_contains "$help" "sibling orphan ref fm/<task-id>-evidence" \
+    "fm-brief.sh --help does not document where the captures are delivered"
+  assert_contains "$help" "deleted once the work lands because that ref never merges" \
+    "fm-brief.sh --help does not document the evidence-ref deletion requirement"
   pass "fm-brief.sh: --visual-evidence emits the full contract and is absent otherwise"
 }
 

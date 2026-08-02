@@ -34,11 +34,18 @@
 #   in the project's own design system, then a diagram; one tight capture per
 #   claim placed beside that claim; cropping and annotation down to the region
 #   that changed; and prose reserved for rationale, trade-offs, and open
-#   questions. The medium follows the surface - a browser view is a screenshot of
-#   the real route, CLI output is the real transcript of the real command, a
-#   generated file is its real content - so the contract fits non-browser
-#   surfaces too. Artifacts go in the PR description when the project opens a PR
-#   and in data/<task-id>/ otherwise, which outlives the worktree.
+#   questions. The after has one carve-out, for motion, timing, or a measurement
+#   no still capture can hold, which the worker must name and justify; an
+#   unattached "I could not show it" stays a missing after.
+#   The medium follows the surface (a browser view is a screenshot of the real
+#   route, CLI output is the real transcript of the real command, a generated file
+#   is its real content), so the contract fits non-browser surfaces too.
+#   Prototypes and captures are built inside the task worktree under a
+#   self-ignoring .fm-scratch/ and are never committed to the code branch; the
+#   captures are delivered on a sibling orphan ref fm/<task-id>-evidence, pushed
+#   to the code branch's remote and linked from the pull request body in the PR
+#   modes, kept local and named in the hand-back for local-only, never a gist,
+#   and deleted once the work lands because that ref never merges.
 #   Prototyping the after costs budget when the worker chooses and only repays a
 #   review round later, so the brief has to require it or no worker spends it.
 #   The flag is explicit because {TASK} is filled in after scaffolding, so the
@@ -391,20 +398,46 @@ DOD=${DOD%$'\n'}
 # surrounding brief byte-identical to a brief scaffolded without the flag.
 VISUAL_EVIDENCE_SECTION=""
 if [ "$VISUAL_EVIDENCE" -eq 1 ]; then
+case "$MODE" in
+  local-only)
+    IFS= read -r -d '' VISUAL_EVIDENCE_DELIVERY <<EOF || true
+This project ships local-only, so \`fm/$ID-evidence\` stays local: never push it, and name the ref and the capture filenames in your \`ready in branch\` hand-back so the reviewer can check it out.
+The evidence ref never merges, so no branch cleanup removes it: say in that hand-back that \`fm/$ID-evidence\` must be deleted once the work lands, and delete it yourself if you are still working then.
+EOF
+    ;;
+  *)
+    IFS= read -r -d '' VISUAL_EVIDENCE_DELIVERY <<EOF || true
+Push \`fm/$ID-evidence\` to the same remote your code branch goes to, so it inherits that repository's access control; it is the only other ref you push, a sibling of your own branch and never the default branch.
+Reference each capture in the pull request body by its URL on that ref, and when the pull request is opened for you, add those links to its body with \`gh-axi\` as soon as it exists.
+The evidence ref never merges, so no branch cleanup removes it: state in the pull request body that \`fm/$ID-evidence\` must be deleted once the pull request lands, and delete it yourself if you are still working then.
+EOF
+    ;;
+esac
+VISUAL_EVIDENCE_DELIVERY=${VISUAL_EVIDENCE_DELIVERY%$'\n'}
 IFS= read -r -d '' VISUAL_EVIDENCE_SECTION <<EOF || true
 # Visual evidence - show the change, do not describe it
 This task changes a user-visible surface, so every claim about how it looks must arrive as a capture of the real thing, not as prose.
 The medium follows the surface: a browser view is captured as a screenshot of the real page at the real route, terminal or CLI output as the real transcript of the real command, a generated file or payload as its real content.
-Produce the artifacts below as you work and put them where this change is reviewed: the PR description when this project opens a PR, and in every non-PR mode the directory \`$DATA/$ID/\` beside this brief, which outlives your worktree the way a scout report does.
-Those artifacts and the status file are the only things you write outside the worktree.
 
 1. **Before is a capture of the real surface as it stands today.** Run the project, reach the affected surface, and capture it: the real page at the real route, the real command with its real output, the real generated content. A written description of the current look is never a before. The one exception is a surface that does not exist yet - say so in a line and go straight to the after.
 2. **After is always an artifact, never prose alone.** In order of preference: a capture of the change running in a throwaway prototype; a mock rendered in the project's own design system; a diagram. If prototyping the after looks too expensive, that is evidence the change is under-specified - settle what it should be first. It is not an exemption.
+   The single carve-out is a change no still capture can hold, meaning motion, timing, or a measurement, and then a recording or the measured result is the artifact. Name the form you used and why a still could not carry the claim. "I could not show it" with nothing attached is not a carve-out; it is a missing after.
 3. **One tight capture per claim, placed beside the claim it evidences.** Do not dump a single full-page image or an entire transcript at the top and leave the reader to map it back onto the text.
 4. **Crop and annotate down to the region that changed.** A full-page image offered as proof that one element moved, or a whole log offered as proof of one changed line, makes the reviewer do the diffing.
 5. **Prose is reserved for what cannot be shown** - rationale, trade-offs, and open questions.
 
+## Producing the artifacts
+Build every prototype and capture inside this worktree, under \`.fm-scratch/\`: create the directory and write a single \`*\` line into \`.fm-scratch/.gitignore\`, which hides the whole directory from git without touching the project's own ignore file.
+A prototype is scratch: never commit it to your \`fm/$ID\` branch, and expect it to die with this worktree.
 Capture browser surfaces with \`chrome-devtools-axi\`.
+If you conclude an artifact cannot be produced without writing outside this worktree, append \`blocked: {why}\` and stop; that is an escalation, not a licence to write outside it.
+
+## Delivering the captures
+The captures are delivered on a sibling orphan ref, \`fm/$ID-evidence\` - never on your code branch, and never in a gist, because a secret gist is unlisted rather than access-controlled and anyone holding the link can read it.
+Commit your code work first, then run \`git switch --orphan fm/$ID-evidence\`: your tracked files clear while \`.fm-scratch/\` survives, so copy the captures out of it to the ref root.
+Keep that root flat - one capture per claim with \`before\` or \`after\` in each filename, a \`README.md\` indexing them, and any script you wrote to produce them committed alongside.
+Commit with a message prefixed \`evidence:\`, then run \`git switch fm/$ID\` and carry on with the code work.
+$VISUAL_EVIDENCE_DELIVERY
 EOF
 # The leading newline opens the blank line before the heading, and the trailing
 # newline read -r -d '' preserved closes the blank line before "# Project memory".
