@@ -48,11 +48,15 @@
 #   status file, scoped to this task and nothing else.
 #   Each artifact is linked by its path beside the claim it evidences - in the
 #   pull request body as soon as it exists, whoever opened it, or in the hand-back
-#   when the mode opens none - and the prose must carry that claim on its own,
-#   because a reviewer who is not on this machine cannot open the file: for
-#   upstream-facing work the artifacts are the captain's verification rather than
-#   the upstream reviewer's, which is an accepted limitation and the reason
-#   captures go to no other host.
+#   when the mode opens none. The link is the home-relative path
+#   data/<task-id>/evidence/<file>, never the absolute path the copy step needs,
+#   so a body that may be published carries no account name or home layout; and
+#   because the pipeline owns a body it opened and a rerun republishes it, the
+#   links are re-checked and re-added before the task reports done.
+#   The prose must carry that claim on its own, because a reviewer who is not on
+#   this machine cannot open the file: for upstream-facing work the artifacts are
+#   the captain's verification rather than the upstream reviewer's, which is an
+#   accepted limitation and the reason captures go to no other host.
 #   Prototyping the after costs budget when the worker chooses and only repays a
 #   review round later, so the brief has to require it or no worker spends it.
 #   The flag is explicit because {TASK} is filled in after scaffolding, so the
@@ -170,7 +174,16 @@ shell_quote() {
 }
 
 STATUS_FILE=$(shell_quote "$STATE/$ID.status")
+# Two forms of the evidence directory. The absolute one is for local commands
+# that have to resolve; the home-relative one is the only form a brief may put
+# into a shareable surface, so no pull request body can carry the operator's
+# account name or home layout. The fallback keeps that property when the data
+# root is configured outside the home.
 EVIDENCE_DIR=$(shell_quote "$DATA/$ID/evidence")
+EVIDENCE_REL="${DATA#"$FM_HOME"/}/$ID/evidence"
+case "$EVIDENCE_REL" in
+  /*) EVIDENCE_REL="${DATA##*/}/$ID/evidence" ;;
+esac
 
 if [ "$KIND" = secondmate ]; then
 SECONDMATE_PROJECTS=""
@@ -435,7 +448,9 @@ If you conclude an artifact cannot be produced without writing outside this work
 ## Delivering the artifacts
 Copy every artifact you present out of \`.fm-scratch/\` into this task's own evidence directory, which outlives this worktree: run \`mkdir -p $EVIDENCE_DIR\` and copy them there, keeping the layout flat with one file per claim.
 Link each artifact by its path beside the claim it evidences - in the pull request body when this project opens one, in the summary you hand back when it does not - never as a block at the bottom.
+Write that path in the home-relative form \`$EVIDENCE_REL/{file}\`, never the absolute path you just gave \`mkdir\`: a pull request body can be published, and the absolute form would put this machine's account name and home layout in it.
 When the pull request is opened for you, add those links to its body with \`gh-axi\` as soon as it exists; when you open it yourself, write them into the body you author; when there is no pull request, name this directory in the hand-back you return.
+Treat that as check-then-repair rather than a one-shot edit: the pipeline owns a body it opened and a rerun or any other republish overwrites what you wrote, so read the body back with \`gh-axi\`, confirm every link is still present before you report this task done, and add them again if they are gone.
 Adding those links is not a code edit and not a findings fix, so it is not the hand-editing that an active validation run forbids.
 Write each claim so the prose carries it on its own: a path is opaque to a reader who cannot open the file, so the sentence states what changed and the artifact confirms it. That is not prose standing in for an after; the artifact stays mandatory.
 Accept the one limitation rather than working around it: a reviewer who is not on this machine cannot open these files, so for work whose pull request goes to a public upstream the artifacts are the captain's verification rather than the upstream reviewer's, and the self-carrying prose above is what keeps that pull request readable for both.

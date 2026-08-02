@@ -438,12 +438,30 @@ test_visual_evidence_contract_is_opt_in_and_complete() {
       "$id: visual-evidence contract lost per-claim colocation of the artifact paths"
     assert_grep "never as a block at the bottom" "$brief" \
       "$id: visual-evidence contract allowed an artifact block at the bottom"
+    # The link that lands in a publishable body is the home-relative path, so the
+    # absolute path stays confined to the local mkdir that has to resolve.
+    assert_grep "Write that path in the home-relative form \`data/$id/evidence/{file}\`" "$brief" \
+      "$id: visual-evidence contract did not name the home-relative link form"
+    assert_grep "never the absolute path you just gave \`mkdir\`" "$brief" \
+      "$id: visual-evidence contract left the absolute path as the link written into a shared surface"
+    assert_grep "would put this machine's account name and home layout in it" "$brief" \
+      "$id: visual-evidence contract lost the reason a published body must not carry the absolute path"
+    assert_grep "run \`mkdir -p '$home/data/$id/evidence'\`" "$brief" \
+      "$id: visual-evidence contract lost the absolute path from the local mkdir that must resolve"
     # Who authors the pull request body, and when the links go in, for a mode
     # whose pipeline opens the pull request on the worker's behalf.
     assert_grep "When the pull request is opened for you, add those links to its body with \`gh-axi\` as soon as it exists" "$brief" \
       "$id: visual-evidence contract gave no owner or timing for a pull request body opened for the worker"
     assert_grep "when you open it yourself, write them into the body you author; when there is no pull request, name this directory in the hand-back you return" "$brief" \
       "$id: visual-evidence contract left the self-opened and no-pull-request cases unstated"
+    # A rerun republishes a pipeline-owned body, so the links are verified again
+    # at the done gate rather than written once and assumed to survive.
+    assert_grep "Treat that as check-then-repair rather than a one-shot edit" "$brief" \
+      "$id: visual-evidence contract added the links once and never re-checked them"
+    assert_grep "a rerun or any other republish overwrites what you wrote" "$brief" \
+      "$id: visual-evidence contract did not say a rerun can drop the links it required"
+    assert_grep "confirm every link is still present before you report this task done, and add them again if they are gone" "$brief" \
+      "$id: visual-evidence contract left the links unverified at the done gate"
     assert_grep "Adding those links is not a code edit and not a findings fix, so it is not the hand-editing that an active validation run forbids." "$brief" \
       "$id: visual-evidence contract reads as licence to hand-edit during an active validation run"
     assert_grep "Write each claim so the prose carries it on its own" "$brief" \
@@ -480,32 +498,48 @@ test_visual_evidence_contract_is_opt_in_and_complete() {
 
   # Absent by default: a brief for work with no user-visible surface must not
   # carry the contract, and unlike --herdr-lab it leaves no declaration behind.
-  # This case gets its own home and an id free of the searched-for words, so the
-  # negative assertions cannot match a rendered fixture path or branch name.
-  local plain_home
+  # Every brief interpolates two host paths nobody here controls - the checkout
+  # ($FM_ROOT, in the project-memory section) and the firstmate home ($FM_HOME,
+  # under the status-file line) - so a bare-word absence assertion run against the
+  # rendered brief would false-fail whenever a checkout or home directory name
+  # happens to contain "evidence" or "screenshot", and would blame the generator
+  # for content it never emitted. The absence assertions therefore read a copy
+  # with those two paths replaced, and two self-checks below keep the scrub honest.
+  local plain_home plain_rendered plain_brief
   plain_home="$TMP_ROOT/no-contract-home"
   write_registry "$plain_home"
   id="brief-default-ship-e4"
   FM_HOME="$plain_home" "$ROOT/bin/fm-brief.sh" "$id" no-registry-proj >/dev/null 2>&1
   brief="$plain_home/data/$id/brief.md"
   assert_present "$brief" "$id: default ship brief was not scaffolded"
-  assert_no_grep "Visual evidence" "$brief" \
+  plain_rendered=$(cat "$brief")
+  plain_rendered=${plain_rendered//"$ROOT"/FM-CHECKOUT-PATH}
+  plain_rendered=${plain_rendered//"$plain_home"/FM-HOME-PATH}
+  plain_brief="$TMP_ROOT/no-contract-brief-host-paths-scrubbed.md"
+  printf '%s\n' "$plain_rendered" > "$plain_brief"
+  assert_no_grep "$ROOT" "$plain_brief" \
+    "$id: checkout path survived the scrub, so the absence assertions are coupled to its directory name"
+  assert_no_grep "$plain_home" "$plain_brief" \
+    "$id: firstmate home path survived the scrub, so the absence assertions are coupled to its directory name"
+  assert_no_grep "Visual evidence" "$plain_brief" \
     "$id: default ship brief carried the visual-evidence contract"
-  assert_no_grep "visual-evidence" "$brief" \
+  assert_no_grep "visual-evidence" "$plain_brief" \
     "$id: default ship brief carried a visual-evidence declaration or regeneration notice"
-  assert_no_grep "screenshot" "$brief" \
+  assert_no_grep "screenshot" "$plain_brief" \
     "$id: default ship brief bloated with screenshot instructions"
-  assert_no_grep ".fm-scratch" "$brief" \
+  assert_no_grep ".fm-scratch" "$plain_brief" \
     "$id: default ship brief carried the visual-evidence scratch convention"
-  assert_no_grep "evidence" "$brief" \
+  assert_no_grep "evidence" "$plain_brief" \
     "$id: default ship brief carried the visual-evidence delivery convention"
   # Rule 2 is byte-identical to the unflagged shape: the carve-out is opt-in too.
   assert_grep "2. Stay inside this worktree; modify nothing outside it." "$brief" \
     "$id: default ship brief lost ship rule 2"
-  assert_no_grep "The single exception is this task's own" "$brief" \
+  assert_no_grep "The single exception is this task's own" "$plain_brief" \
     "$id: default ship brief carried the rule 2 carve-out without the flag"
-  assert_no_grep "add those links to its body" "$brief" \
+  assert_no_grep "add those links to its body" "$plain_brief" \
     "$id: default ship brief carried the visual-evidence pull-request-body clause"
+  assert_no_grep "check-then-repair" "$plain_brief" \
+    "$id: default ship brief carried the visual-evidence link re-check clause"
 
   # Every scaffold still documents the flag through --help.
   local help
@@ -522,6 +556,10 @@ test_visual_evidence_contract_is_opt_in_and_complete() {
     "fm-brief.sh --help does not document the rule 2 carve-out the flag adds"
   assert_contains "$help" "pull request body as soon as it exists, whoever opened it" \
     "fm-brief.sh --help does not document when the per-claim links reach the pull request body"
+  assert_contains "$help" "data/<task-id>/evidence/<file>, never the absolute path the copy step needs" \
+    "fm-brief.sh --help does not document that the link is home-relative rather than absolute"
+  assert_contains "$help" "links are re-checked and re-added before the task reports done" \
+    "fm-brief.sh --help does not document that a republished pull request body is repaired"
   assert_not_contains "$help" "-evidence ref" \
     "fm-brief.sh --help still documents the withdrawn evidence ref"
   pass "fm-brief.sh: --visual-evidence emits the full contract and is absent otherwise"
