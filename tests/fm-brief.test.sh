@@ -874,10 +874,12 @@ test_browser_teardown_contract() {
   for id in brief-browser-ship brief-browser-scout; do
     brief="$home/data/$id/brief.md"
     assert_present "$brief" "$id: brief was not scaffolded"
-    assert_grep "first navigate to \`about:blank\`, then close the browser" "$brief" \
-      "$id: brief must instruct parking the browser before closing it"
+    assert_grep "run \`chrome-devtools-axi open about:blank\`, then \`chrome-devtools-axi stop\`" "$brief" \
+      "$id: brief must name the concrete park-then-stop commands"
+    assert_grep "\`closepage\` leaves Chrome running" "$brief" \
+      "$id: brief must warn that closepage is not a substitute for stop"
     assert_grep "Park first because it is the half that survives failure" "$brief" \
-      "$id: brief must explain why parking comes before closing"
+      "$id: brief must explain why parking comes before stopping"
   done
   pass "fm-brief.sh: browser work ends by parking on about:blank, then closing"
 }
