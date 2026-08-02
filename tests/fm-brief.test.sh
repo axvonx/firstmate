@@ -860,7 +860,7 @@ test_scout_and_secondmate_scaffold() {
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
 
-# Ship and scout briefs both tell the worker to park the browser before closing it.
+# Ship and scout briefs both tell the worker to park the browser, and only to park it.
 test_browser_teardown_contract() {
   local home brief
   home="$TMP_ROOT/browser-teardown-home"
@@ -874,14 +874,14 @@ test_browser_teardown_contract() {
   for id in brief-browser-ship brief-browser-scout; do
     brief="$home/data/$id/brief.md"
     assert_present "$brief" "$id: brief was not scaffolded"
-    assert_grep "run \`chrome-devtools-axi open about:blank\`, then \`chrome-devtools-axi stop\`" "$brief" \
-      "$id: brief must name the concrete park-then-stop commands"
-    assert_grep "\`closepage\` leaves Chrome running" "$brief" \
-      "$id: brief must warn that closepage is not a substitute for stop"
-    assert_grep "Park first because it is the half that survives failure" "$brief" \
-      "$id: brief must explain why parking comes before stopping"
+    assert_grep "park the browser with \`chrome-devtools-axi open about:blank\`" "$brief" \
+      "$id: brief must name the concrete park command"
+    assert_grep "Do not close or stop the browser" "$brief" \
+      "$id: brief must forbid tearing down the shared browser session"
+    assert_grep "every actor shares the default chrome-devtools-axi session" "$brief" \
+      "$id: brief must explain why it stops at parking"
   done
-  pass "fm-brief.sh: browser work ends by parking on about:blank, then closing"
+  pass "fm-brief.sh: browser work ends by parking on about:blank, never stopping"
 }
 
 test_script_parses

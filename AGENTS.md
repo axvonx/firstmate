@@ -157,7 +157,7 @@ A lock-refused session must not spawn, steer, merge, drain the wake queue, repai
 Bootstrap detects first, asks for consent, and installs only after the captain approves in the current session.
 Do not dispatch until the required tools are present and GitHub authentication is good.
 Use `gh-axi` for GitHub, `chrome-devtools-axi` for browser work, and `lavish-axi` for structured decisions or reports; consult current help rather than memorizing flags.
-When browser work is finished, run `chrome-devtools-axi open about:blank`, then `chrome-devtools-axi stop`; parking first is the half that survives failure, because an abandoned page keeps rendering at full CPU indefinitely.
+When browser work is finished, park the browser with `chrome-devtools-axi open about:blank` - an abandoned page renders at full CPU indefinitely and about:blank measures 0.0% - but never `stop` it, since every actor shares the default session and stopping kills the crew's browsers too.
 A silent bootstrap section needs no action; for any printed actionable diagnostic line, load `bootstrap-diagnostics` and follow its owner procedure.
 `BOOTSTRAP_INFO:` lines are completed no-action facts and do not require loading a skill.
 `secondmate-provisioning` owns startup secondmate sync, liveness, and inherited local-material convergence.
