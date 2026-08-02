@@ -62,9 +62,7 @@ Running `--lane portable-serial` locally still executes the whole remainder on o
 The split is a pinned assignment table in `list_portable_serial_pinned` plus a stable CRC of the basename for everything not pinned.
 The pinned table is longest-processing-time over the measured heavyweights, which carry ~1043 s of the lane's ~1174 s; the hash spreads the remaining small scripts.
 
-The hash is the part that matters over time.
-The lane grows by roughly 1.4 scripts and 30 s per day, and a rule that sends every unpinned script to the same half would walk that half into its time budget within about a week - a reset clock, not a fix.
-Hashing the basename puts new scripts in both halves, so growth is shared and the halves stay comparable without anyone maintaining a duration table.
+Hashing the basename puts new scripts in both halves, so growth is shared rather than piling onto one half.
 A stale balance only skews wall clock; it cannot drop a script, because both halves are computed from the same residual and the coverage guard proves they partition it.
 
 Counts below are as of this commit; durations are the per-script measurements from the 2026-08-02 CI artifact, applied to the current assignment.
@@ -75,8 +73,80 @@ Counts below are as of this commit; durations are the per-script measurements fr
 | `portable-serial-2` | 39 | ~592 s |
 | imbalance | | ~16 s (1.3%) |
 
-Scripts added since that artifact are unmeasured and are not counted in the durations.
+Scripts added since that artifact are unmeasured and are not counted in the durations (12 in half 1, 14 in half 2).
 Re-derive both columns from a recent `fm-test-timing-portable-serial-*` artifact when rebalancing.
+
+#### This split resets the clock, it does not stop it
+
+The lane grows by roughly 1.4 scripts and 30 s per day, measured over the twelve-day trend below.
+Splitting it halves the rate each half sees, to about 15 s per day, but the growth does not stop and neither half has a rebalance trigger.
+Against the 780 s budget:
+
+- half 1: (780 - 577) / 15 = **~13.5 days**
+- half 2: (780 - 592) / 15 = **~12.5 days**
+
+So this buys roughly **13 days** of headroom from 2026-08-02, putting the projected first overrun around **2026-08-15**.
+The hash changes *which* half trips and stops one half absorbing everything, but both halves now approach the budget together, so the next remedy is a third host or a real speedup - not another rebalance.
+Do not read the current 1.3% imbalance as durable headroom.
+
+#### Half assignment as of this commit
+
+Durations are the 2026-08-02 CI artifact (PR1 / PR2 columns); the `half` column is recomputed from `list_portable_serial_pinned` plus `portable_serial_half_for` in `bin/fm-test-run.sh` and supersedes any earlier copy of this table.
+21 of these 45 rows changed half in the CRC rebalance.
+
+| # | script | PR1 | PR2 | half |
+|--:|---|--:|--:|:--:|
+| 1 | fm-pr-check-security.test.sh | 205.6s | 210.2s | 1 |
+| 2 | fm-watch-triage.test.sh | 127.3s | 128.9s | 2 |
+| 3 | fm-watcher-lock.test.sh | 98.6s | 99.2s | 2 |
+| 4 | fm-secondmate-harness.test.sh | 88.3s | 88.8s | 1 |
+| 5 | fm-bearings-snapshot.test.sh | 61.9s | 61.9s | 2 |
+| 6 | fm-claude-stop-autoarm.test.sh | 60.5s | 60.6s | 2 |
+| 7 | fm-procevent.test.sh | 48.5s | 48.6s | 1 |
+| 8 | fm-vendor-auth-probe.test.sh | 42.8s | 42.8s | 1 |
+| 9 | fm-spawn-dispatch-profile.test.sh | 41.5s | 41.6s | 1 |
+| 10 | fm-session-start.test.sh | 38.8s | 41.6s | 2 |
+| 11 | fm-afk-inject-e2e.test.sh | 33.7s | 33.7s | 2 |
+| 12 | fm-secondmate-safety.test.sh | 24.8s | 24.9s | 2 |
+| 13 | fm-wake-queue.test.sh | 24.2s | 23.7s | 1 |
+| 14 | fm-public-followup.test.sh | 23.7s | 24.2s | 1 |
+| 15 | fm-teardown.test.sh | 23.6s | 23.7s | 2 |
+| 16 | fm-bootstrap.test.sh | 22.5s | 22.8s | 2 |
+| 17 | fm-pi-watch-extension.test.sh | 17.1s | 16.9s | 1 |
+| 18 | fm-backend.test.sh | 16.5s | 16.5s | 1 |
+| 19 | fm-daemon.test.sh | 15.5s | 15.5s | 2 |
+| 20 | fm-fleet-sync.test.sh | 15.1s | 15.0s | 2 |
+| 21 | fm-busy-adapter-wiring.test.sh | 14.1s | 14.1s | 1 |
+| 22 | fm-kimi-harness.test.sh | 12.7s | 12.7s | 1 |
+| 23 | fm-secondmate-sync.test.sh | 12.5s | 12.5s | 2 |
+| 24 | fm-backend-orca.test.sh | 12.3s | 12.4s | 2 |
+| 25 | fm-pending-reply.test.sh | 7.6s | 7.7s | 1 |
+| 26 | fm-tangle-guard.test.sh | 7.3s | 7.3s | 1 |
+| 27 | fm-secondmate-liveness.test.sh | 6.9s | 6.9s | 2 |
+| 28 | fm-turnend-guard.test.sh | 6.2s | 6.2s | 1 |
+| 29 | fm-fleet-snapshot-view.test.sh | 6.1s | 6.2s | 2 |
+| 30 | fm-herdr-session-cleanup.test.sh | 5.0s | 5.0s | 1 |
+| 31 | fm-secondmate-lifecycle-e2e.test.sh | 4.9s | 4.9s | 2 |
+| 32 | fm-spawn-worktree-settle.test.sh | 4.6s | 4.6s | 1 |
+| 33 | fm-backend-zellij.test.sh | 4.3s | 4.4s | 1 |
+| 34 | fm-startup-memory-budget.test.sh | 4.3s | 4.4s | 2 |
+| 35 | fm-wake-daemon-lifecycle-e2e.test.sh | 4.3s | 4.3s | 1 |
+| 36 | fm-watch-checkpoint.test.sh | 4.0s | 4.0s | 2 |
+| 37 | fm-shared-captain-inheritance.test.sh | 3.6s | 3.6s | 2 |
+| 38 | fm-guard-stale-banner.test.sh | 3.0s | 3.1s | 2 |
+| 39 | fm-backlog-handoff.test.sh | 2.9s | 2.9s | 2 |
+| 40 | fm-gate-refuse.test.sh | 2.9s | 2.9s | 2 |
+| 41 | fm-backend-cmux.test.sh | 2.4s | 2.4s | 2 |
+| 42 | fm-send-secondmate-marker.test.sh | 2.2s | 2.2s | 2 |
+| 43 | fm-update.test.sh | 2.0s | 2.0s | 2 |
+| 44 | fm-afk-return.test.sh | 1.1s | 1.1s | 1 |
+| 45 | fm-teardown-endpoint-safety.test.sh | 1.1s | 1.1s | 1 |
+
+Lane totals on that artifact: PR1 1174 s, PR2 1185 s.
+The 26 scripts not listed are unmeasured or sub-second; `tests/fm-ci-run-serial-lane.test.sh`, added by this change, lands in half 1.
+Regenerate the `half` column with `bin/fm-test-run.sh --list --lane portable-serial-1` and `--lane portable-serial-2`.
+
+Twelve-day trend behind the growth rate, three CI runs sampled per day, median wall / script count: day -11 13.4m/53, day -10 14.4m/56, day -9 14.1m/59, day -8 15.0m/59, day -7 14.8m/61, day -6 16.3m/61, day -5 16.5m/63, day -4 16.9m/63, day -3 17.5m/62, day -2 18.2m/67, day -1 19.0m/69, day 0 19.4m/69.
 
 ### Time budget
 
