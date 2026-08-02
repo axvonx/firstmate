@@ -50,8 +50,8 @@ Default it off, and enable it only on the captain's explicit instruction.
 Confirm the source URL, local project name, delivery mode, and autonomy posture.
 Clone into `projects/<name>` and add the registry entry only after the destination is known to be unused.
 A `no-mistakes` project must have an `origin` remote and must complete the initialization procedure below.
-A `direct-PR` project needs an `origin` remote but skips no-mistakes initialization.
-A `local-only` project may have no remote and skips no-mistakes initialization.
+A `direct-PR` project needs an `origin` remote and skips no-mistakes initialization, but still completes the forge branch-cleanup step below.
+A `local-only` project may have no remote and skips initialization entirely.
 
 ## Create a project
 
@@ -68,12 +68,28 @@ The captain's request to create that local project authorizes this local initial
 Run no-mistakes initialization only for `no-mistakes` projects:
 
 ```sh
-cd projects/<name> && no-mistakes init && no-mistakes doctor
+(cd projects/<name> && no-mistakes init && no-mistakes doctor)
 ```
 
+Run it in that subshell so the working directory stays at the fleet root, which the relative path in the next step needs.
 Initialization configures the local gate and does not vendor a no-mistakes skill into the project.
 Do not create a commit merely because initialization ran.
 If doctor reports an environment, authentication, or daemon problem, resolve that blocker before dispatching work and never restart the shared daemon from a project operation.
+
+Then, from the fleet root, arm forge branch cleanup for every `no-mistakes` and `direct-PR` project, because both land through a PR:
+
+```sh
+bin/fm-project-branch-cleanup.sh projects/<name>
+```
+
+Firstmate deletes a task's local branch at cleanup and prunes a local branch once its upstream is gone, but only the forge can delete the merged remote branch, and until it does the local prune never triggers either.
+A `local-only` project has no forge step and skips this.
+The script's header owns its exact outcomes; treat a `BRANCH_CLEANUP_BLOCKED:` line as an actionable diagnostic rather than a failed add, because a repository the captain's account cannot administer, such as a read-only upstream reached through a fork, is a normal case.
+Relay that blocker with the concrete reason, then continue the add.
+Relay each `BRANCH_CLEANUP_INFO:` advisory as well, because an advisory names posture the armed setting does not cover rather than a completed no-action fact.
+Enabling squash-only merges is a stronger change than branch cleanup, so the script reports the repository's merge posture, including a repository that does not allow the squash merge the merge step uses by default, and never changes a merge method; propose that separately and obtain the captain's explicit decision before touching merge methods.
+
+Re-run this step by hand when the captain wants an already-added project brought up to the current initialization contract; existing projects are otherwise unaffected.
 
 ## Remove
 
