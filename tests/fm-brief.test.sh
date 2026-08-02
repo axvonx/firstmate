@@ -438,6 +438,14 @@ test_visual_evidence_contract_is_opt_in_and_complete() {
       "$id: visual-evidence contract lost per-claim colocation of the artifact paths"
     assert_grep "never as a block at the bottom" "$brief" \
       "$id: visual-evidence contract allowed an artifact block at the bottom"
+    # Who authors the pull request body, and when the links go in, for a mode
+    # whose pipeline opens the pull request on the worker's behalf.
+    assert_grep "When the pull request is opened for you, add those links to its body with \`gh-axi\` as soon as it exists" "$brief" \
+      "$id: visual-evidence contract gave no owner or timing for a pull request body opened for the worker"
+    assert_grep "when you open it yourself, write them into the body you author; when there is no pull request, name this directory in the hand-back you return" "$brief" \
+      "$id: visual-evidence contract left the self-opened and no-pull-request cases unstated"
+    assert_grep "Adding those links is not a code edit and not a findings fix, so it is not the hand-editing that an active validation run forbids." "$brief" \
+      "$id: visual-evidence contract reads as licence to hand-edit during an active validation run"
     assert_grep "Write each claim so the prose carries it on its own" "$brief" \
       "$id: visual-evidence contract left the prose unreadable to anyone who cannot open the files"
     assert_grep "That is not prose standing in for an after; the artifact stays mandatory." "$brief" \
@@ -496,6 +504,8 @@ test_visual_evidence_contract_is_opt_in_and_complete() {
     "$id: default ship brief lost ship rule 2"
   assert_no_grep "The single exception is this task's own" "$brief" \
     "$id: default ship brief carried the rule 2 carve-out without the flag"
+  assert_no_grep "add those links to its body" "$brief" \
+    "$id: default ship brief carried the visual-evidence pull-request-body clause"
 
   # Every scaffold still documents the flag through --help.
   local help
@@ -510,6 +520,8 @@ test_visual_evidence_contract_is_opt_in_and_complete() {
     "fm-brief.sh --help does not document where the artifacts are delivered"
   assert_contains "$help" "single exception to" \
     "fm-brief.sh --help does not document the rule 2 carve-out the flag adds"
+  assert_contains "$help" "pull request body as soon as it exists, whoever opened it" \
+    "fm-brief.sh --help does not document when the per-claim links reach the pull request body"
   assert_not_contains "$help" "-evidence ref" \
     "fm-brief.sh --help still documents the withdrawn evidence ref"
   pass "fm-brief.sh: --visual-evidence emits the full contract and is absent otherwise"
