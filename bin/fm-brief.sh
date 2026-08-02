@@ -42,10 +42,15 @@
 #   is its real content), so the contract fits non-browser surfaces too.
 #   Prototypes and captures are built inside the task worktree under a
 #   self-ignoring .fm-scratch/ and are never committed to the code branch; the
-#   captures are delivered on a sibling orphan ref fm/<task-id>-evidence, pushed
-#   to the code branch's remote and linked from the pull request body in the PR
-#   modes, kept local and named in the hand-back for local-only, never a gist,
-#   and deleted once the work lands because that ref never merges.
+#   artifacts that are presented are copied to this task's own record directory,
+#   data/<task-id>/evidence/, which the flag also names as the single exception to
+#   the brief's stay-inside-the-worktree rule 2 - the same class of write as the
+#   status file, scoped to this task and nothing else.
+#   Each artifact is linked by its path beside the claim it evidences, and the
+#   prose must carry that claim on its own, because a reviewer who is not on this
+#   machine cannot open the file: for upstream-facing work the artifacts are the
+#   captain's verification rather than the upstream reviewer's, which is an
+#   accepted limitation and the reason captures go to no other host.
 #   Prototyping the after costs budget when the worker chooses and only repays a
 #   review round later, so the brief has to require it or no worker spends it.
 #   The flag is explicit because {TASK} is filled in after scaffolding, so the
@@ -163,6 +168,7 @@ shell_quote() {
 }
 
 STATUS_FILE=$(shell_quote "$STATE/$ID.status")
+EVIDENCE_DIR=$(shell_quote "$DATA/$ID/evidence")
 
 if [ "$KIND" = secondmate ]; then
 SECONDMATE_PROJECTS=""
@@ -396,24 +402,16 @@ DOD=${DOD%$'\n'}
 # Opt-in visual-evidence contract. It stays empty unless --visual-evidence was
 # passed, and it carries its own leading newline so an omitted section leaves the
 # surrounding brief byte-identical to a brief scaffolded without the flag.
+RULE2='2. Stay inside this worktree; modify nothing outside it.'
 VISUAL_EVIDENCE_SECTION=""
 if [ "$VISUAL_EVIDENCE" -eq 1 ]; then
-case "$MODE" in
-  local-only)
-    IFS= read -r -d '' VISUAL_EVIDENCE_DELIVERY <<EOF || true
-This project ships local-only, so \`fm/$ID-evidence\` stays local: never push it, and name the ref and the capture filenames in your \`ready in branch\` hand-back so the reviewer can check it out.
-The evidence ref never merges, so no branch cleanup removes it: say in that hand-back that \`fm/$ID-evidence\` must be deleted once the work lands, and delete it yourself if you are still working then.
+IFS= read -r -d '' RULE2 <<EOF || true
+2. Stay inside this worktree; modify nothing outside it.
+   The single exception is this task's own visual-evidence directory \`$EVIDENCE_DIR\` in the firstmate home, described under Visual evidence below.
+   That is the same class of write, to the same home, as the status file you append to in rule 4: every brief already writes that one file outside its worktree.
+   It authorizes nothing else - not another task's record directory, not that home's shared files, not any other path.
 EOF
-    ;;
-  *)
-    IFS= read -r -d '' VISUAL_EVIDENCE_DELIVERY <<EOF || true
-Push \`fm/$ID-evidence\` to the same remote your code branch goes to, so it inherits that repository's access control; it is the only other ref you push, a sibling of your own branch and never the default branch.
-Reference each capture in the pull request body by its URL on that ref, and when the pull request is opened for you, add those links to its body with \`gh-axi\` as soon as it exists.
-The evidence ref never merges, so no branch cleanup removes it: state in the pull request body that \`fm/$ID-evidence\` must be deleted once the pull request lands, and delete it yourself if you are still working then.
-EOF
-    ;;
-esac
-VISUAL_EVIDENCE_DELIVERY=${VISUAL_EVIDENCE_DELIVERY%$'\n'}
+RULE2=${RULE2%$'\n'}
 IFS= read -r -d '' VISUAL_EVIDENCE_SECTION <<EOF || true
 # Visual evidence - show the change, do not describe it
 This task changes a user-visible surface, so every claim about how it looks must arrive as a capture of the real thing, not as prose.
@@ -430,14 +428,14 @@ The medium follows the surface: a browser view is captured as a screenshot of th
 Build every prototype and capture inside this worktree, under \`.fm-scratch/\`: create the directory and write a single \`*\` line into \`.fm-scratch/.gitignore\`, which hides the whole directory from git without touching the project's own ignore file.
 A prototype is scratch: never commit it to your \`fm/$ID\` branch, and expect it to die with this worktree.
 Capture browser surfaces with \`chrome-devtools-axi\`.
-If you conclude an artifact cannot be produced without writing outside this worktree, append \`blocked: {why}\` and stop; that is an escalation, not a licence to write outside it.
+If you conclude an artifact cannot be produced without writing outside this worktree and its evidence directory, append \`blocked: {why}\` and stop; that is an escalation, not a licence to write anywhere else.
 
-## Delivering the captures
-The captures are delivered on a sibling orphan ref, \`fm/$ID-evidence\` - never on your code branch, and never in a gist, because a secret gist is unlisted rather than access-controlled and anyone holding the link can read it.
-Commit your code work first, then run \`git switch --orphan fm/$ID-evidence\`: your tracked files clear while \`.fm-scratch/\` survives, so copy the captures out of it to the ref root.
-Keep that root flat - one capture per claim with \`before\` or \`after\` in each filename, a \`README.md\` indexing them, and any script you wrote to produce them committed alongside.
-Commit with a message prefixed \`evidence:\`, then run \`git switch fm/$ID\` and carry on with the code work.
-$VISUAL_EVIDENCE_DELIVERY
+## Delivering the artifacts
+Copy every artifact you present out of \`.fm-scratch/\` into this task's own evidence directory, which outlives this worktree: run \`mkdir -p $EVIDENCE_DIR\` and copy them there, keeping the layout flat with one file per claim.
+Link each artifact by its path beside the claim it evidences - in the pull request body when this project opens one, in the summary you hand back when it does not - never as a block at the bottom.
+Write each claim so the prose carries it on its own: a path is opaque to a reader who cannot open the file, so the sentence states what changed and the artifact confirms it. That is not prose standing in for an after; the artifact stays mandatory.
+Accept the one limitation rather than working around it: a reviewer who is not on this machine cannot open these files, so for work whose pull request goes to a public upstream the artifacts are the captain's verification rather than the upstream reviewer's, and the self-carrying prose above is what keeps that pull request readable for both.
+That is also why the artifacts go nowhere else, not to a gist and not to any other host: a secret gist is unlisted rather than access-controlled, so anyone holding the link could read captures of a private product.
 EOF
 # The leading newline opens the blank line before the heading, and the trailing
 # newline read -r -d '' preserved closes the blank line before "# Project memory".
@@ -463,7 +461,7 @@ If the top-level path is the primary checkout or not the worktree you were launc
 
 # Rules
 $RULE1
-2. Stay inside this worktree; modify nothing outside it.
+$RULE2
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
