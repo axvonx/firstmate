@@ -5,15 +5,8 @@
 # owner/repository and PR number are passed to gh-axi as separate arguments.
 #
 # Merge method defaults to --squash when the caller passes none of --squash,
-# --merge, --rebase, or --method after the optional -- separator, and
-# --delete-branch is added unless the caller already passed it. The forge's
-# delete_branch_on_merge setting (armed by bin/fm-project-branch-cleanup.sh)
-# removes only head branches that live in the base repository, so an
-# upstream-contribution PR whose head is on a fork needs the merge itself to ask
-# for the deletion. gh deletes no local branch here because --repo is always
-# given, so teardown's landed-work test still sees the branch it checks.
-# Extra args must not include --repo or -R because the repository comes only
-# from the URL.
+# --merge, --rebase, or --method after the optional -- separator. Extra args
+# must not include --repo or -R because the repository comes only from the URL.
 # Usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra gh-axi pr merge args>]
 set -eu
 
@@ -56,16 +49,6 @@ caller_has_merge_method() {
   return 1
 }
 
-caller_has_delete_branch() {
-  local arg
-  for arg in "$@"; do
-    case "$arg" in
-      --delete-branch|--delete-branch=*) return 0 ;;
-    esac
-  done
-  return 1
-}
-
 reject_repo_overrides() {
   local arg
   for arg in "$@"; do
@@ -95,10 +78,7 @@ grep -qxF "pr=$URL" "$META" || {
 
 merge_args=()
 if ! caller_has_merge_method "$@"; then
-  merge_args+=(--squash)
-fi
-if ! caller_has_delete_branch "$@"; then
-  merge_args+=(--delete-branch)
+  merge_args=(--squash)
 fi
 
 gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" "${merge_args[@]+"${merge_args[@]}"}" "$@"

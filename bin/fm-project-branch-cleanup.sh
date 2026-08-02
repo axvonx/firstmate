@@ -12,21 +12,25 @@
 #
 # Usage: fm-project-branch-cleanup.sh <project-path>
 #
-# The setting is armed on the repository a PR merges INTO - the same repository
-# bin/fm-pr-merge.sh addresses from the PR URL - so the two paths cannot
-# disagree about which repository is a project's forge. When the clone resolves
-# to a fork, that base repository is the fork's parent. GitHub deletes only head
-# branches that live in the base repository, so this setting can never clean up
-# a branch pushed to a fork; the fork shape is reported rather than papered over,
-# and bin/fm-pr-merge.sh asks for its deletion with --delete-branch instead.
+# The setting is armed on the repository gh resolves for the clone, and only on
+# that one. When the clone is a fork, a pull request merged into the fork's
+# parent is governed by the setting on the parent instead; that shape is reported
+# and the parent is never edited, because plenty of parents cannot be
+# administered by the account that cloned them.
+#
+# GitHub deletes only a head branch that lives in the repository the pull request
+# merged into, so a head branch pushed to a fork is not cleaned up by this chain
+# at all. That gap is left to separate work.
 #
 # Exactly one result line is printed to stdout:
 #   BRANCH_CLEANUP: already on for <owner/repo>
 #   BRANCH_CLEANUP: enabled for <owner/repo>
 #   BRANCH_CLEANUP_BLOCKED: <owner/repo|path>: <reason>
-# and, when the clone resolves to a fork, or the repository also allows merge
-# commits or rebase merges, one advisory line each:
-#   BRANCH_CLEANUP_INFO: <owner/repo> is a fork of <owner/repo>; ...
+# and, when the clone is a fork, or the repository also allows merge commits or
+# rebase merges, one advisory line each:
+#   BRANCH_CLEANUP_INFO: <owner/repo> is a fork of <owner/repo>; a pull request
+#   merged into the parent is governed by the setting on the parent, which this
+#   script does not change
 #   BRANCH_CLEANUP_INFO: <owner/repo> also allows <methods>; squash-only merges
 #   are a separate decision and are not changed here
 #
@@ -106,49 +110,30 @@ VIEW_FIELDS=nameWithOwner,parent,deleteBranchOnMerge,mergeCommitAllowed,rebaseMe
 VIEW_QUERY='[.nameWithOwner, (if .parent then (.parent.owner.login // "") + "/" + (.parent.name // "") else "-" end), (.deleteBranchOnMerge|tostring), (.mergeCommitAllowed|tostring), (.rebaseMergeAllowed|tostring)] | @tsv'
 
 read_settings() {
-  gh_in_project repo view "$@" --json "$VIEW_FIELDS" -q "$VIEW_QUERY"
-}
-
-# Tab is IFS whitespace, so an empty field would collapse into its neighbour and
-# shift every value after it; the query emits "-" for a repository with no
-# parent rather than an empty field.
-parse_settings() {
-  IFS=$'\t' read -r REPO PARENT ON MERGE_OK REBASE_OK <<EOF
-$1
-EOF
-  return 0
+  gh_in_project repo view --json "$VIEW_FIELDS" -q "$VIEW_QUERY"
 }
 
 if ! view=$(read_settings); then
   blocked "$PROJ" "$(gh_error)"
 fi
-parse_settings "$view"
+# Tab is IFS whitespace, so an empty field would collapse into its neighbour and
+# shift every value after it; the query emits "-" for a repository with no
+# parent rather than an empty field.
+IFS=$'\t' read -r REPO PARENT ON MERGE_OK REBASE_OK <<EOF
+$view
+EOF
 [ -n "${REPO:-}" ] \
   || blocked "$PROJ" "the GitHub CLI did not report a repository for this clone"
 
-# A clone that resolves to a fork contributes to the fork's parent, so the
-# parent is the repository a PR merges into and the only one whose setting
-# decides the merged branch's fate.
-FORK=
-case "${PARENT:-}" in
-  ?*/?*)
-    FORK=$REPO
-    if ! view=$(read_settings "$PARENT"); then
-      blocked "$PARENT" "$(gh_error)"
-    fi
-    parse_settings "$view"
-    [ -n "${REPO:-}" ] \
-      || blocked "$PARENT" "the GitHub CLI did not report the repository $FORK is a fork of"
-    ;;
-esac
-TARGET=$REPO
-
-# The advisories are printed for every outcome that identified the repository,
-# so a blocked cleanup still tells the captain what the posture is.
-report_fork_shape() {
-  [ -n "$FORK" ] || return 0
-  printf 'BRANCH_CLEANUP_INFO: %s is a fork of %s, so the setting armed on %s never deletes a head branch pushed to the fork; bin/fm-pr-merge.sh passes --delete-branch to ask for its deletion at merge time\n' \
-    "$FORK" "$TARGET" "$TARGET"
+# The advisories are printed for every outcome that identified the repository, so
+# a blocked cleanup still tells the captain what the posture is.
+report_fork_parent() {
+  case "${PARENT:-}" in
+    ?*/?*) ;;
+    *) return 0 ;;
+  esac
+  printf 'BRANCH_CLEANUP_INFO: %s is a fork of %s; a pull request merged into %s is governed by the setting on %s, which this script does not change\n' \
+    "$REPO" "$PARENT" "$PARENT" "$PARENT"
 }
 
 report_merge_methods() {
@@ -161,27 +146,29 @@ report_merge_methods() {
   fi
   [ -n "$methods" ] || return 0
   printf 'BRANCH_CLEANUP_INFO: %s also allows %s; squash-only merges are a separate decision and are not changed here\n' \
-    "$TARGET" "$methods"
+    "$REPO" "$methods"
 }
-report_fork_shape
+report_fork_parent
 report_merge_methods
 
 if [ "${ON:-}" = true ]; then
-  printf 'BRANCH_CLEANUP: already on for %s\n' "$TARGET"
+  printf 'BRANCH_CLEANUP: already on for %s\n' "$REPO"
   exit 0
 fi
 
-if ! gh_in_project repo edit "$TARGET" --delete-branch-on-merge >/dev/null; then
-  blocked "$TARGET" "$(gh_error)"
+if ! gh_in_project repo edit "$REPO" --delete-branch-on-merge >/dev/null; then
+  blocked "$REPO" "$(gh_error)"
 fi
 
 # Verify rather than trust the edit's exit status: the setting is what matters,
 # and a re-read is the only evidence that it took.
-if ! view=$(read_settings "$TARGET"); then
-  blocked "$TARGET" "the setting could not be confirmed: $(gh_error)"
+if ! view=$(read_settings); then
+  blocked "$REPO" "the setting could not be confirmed: $(gh_error)"
 fi
-parse_settings "$view"
+IFS=$'\t' read -r _ _ ON _ _ <<EOF
+$view
+EOF
 [ "${ON:-}" = true ] \
-  || blocked "$TARGET" "the setting did not take effect"
+  || blocked "$REPO" "the setting did not take effect"
 
-printf 'BRANCH_CLEANUP: enabled for %s\n' "$TARGET"
+printf 'BRANCH_CLEANUP: enabled for %s\n' "$REPO"

@@ -11,7 +11,7 @@
 #   (e) an edit that silently does not take is reported as blocked
 #   (f) other allowed merge methods are reported, never changed
 #   (g) usage and precondition errors exit 2, a nested directory included
-#   (h) a fork clone arms the repository its PRs merge into, and says so
+#   (h) a fork clone arms its own repository and names the parent it leaves alone
 #   (i) a gh warning on a zero exit is never parsed as repository data
 set -u
 
@@ -26,10 +26,9 @@ TMP_ROOT=$(fm_test_tmproot fm-project-branch-cleanup-tests)
 # behavior is driven by files the test writes, and which logs every invocation.
 #
 # The mock's view answer is read fresh from state/delete-on-merge on every call,
-# so a successful edit can flip it exactly the way the real forge would. A view
-# with no repository argument answers for the clone's own repository and carries
-# state/parent, the way gh reports a fork; a view naming a repository answers for
-# that repository, which by construction is the base one and has no parent.
+# so a successful edit can flip it exactly the way the real forge would. It
+# answers for the clone's own repository and carries state/parent, the way gh
+# reports a fork.
 make_case() {
   local name=$1 case_dir
   case_dir="$TMP_ROOT/$name"
@@ -49,13 +48,10 @@ state='$case_dir/state'
 printf '%s\n' "\$*" >> "\$state/gh.log"
 case "\${1:-} \${2:-}" in
   "repo view")
-    repo=\${3:-}
-    parent='-'
-    case "\$repo" in
-      ''|--*) repo=\$(cat "\$state/clone-repo"); parent=\$(cat "\$state/parent") ;;
-    esac
     [ -s "\$state/view-warning" ] && cat "\$state/view-warning" >&2
-    printf '%s\t%s\t%s\t%s\t%s\n' "\$repo" "\$parent" \\
+    printf '%s\t%s\t%s\t%s\t%s\n' \\
+      "\$(cat "\$state/clone-repo")" \\
+      "\$(cat "\$state/parent")" \\
       "\$(cat "\$state/delete-on-merge")" \\
       "\$(cat "\$state/merge-commit")" \\
       "\$(cat "\$state/rebase-merge")"
@@ -194,7 +190,7 @@ test_other_merge_methods_are_reported_not_changed() {
   pass "a repository's other merge methods are reported and left alone"
 }
 
-test_fork_clone_arms_the_pr_base_repository() {
+test_fork_clone_arms_itself_and_reports_the_parent() {
   local case_dir rc out
   case_dir=$(make_case fork-clone)
   printf 'a-user/a-repo\n' > "$case_dir/state/clone-repo"
@@ -205,15 +201,17 @@ test_fork_clone_arms_the_pr_base_repository() {
   out=$(cat "$case_dir/stdout")
 
   expect_code 0 "$rc" "fork-clone"
-  assert_contains "$out" 'BRANCH_CLEANUP: enabled for an-org/a-repo' \
-    "a fork clone must arm the repository its PRs merge into"
-  assert_grep 'repo edit an-org/a-repo --delete-branch-on-merge' "$case_dir/state/gh.log" \
-    "the edit must address the base repository"
-  assert_no_grep 'repo edit a-user/a-repo' "$case_dir/state/gh.log" \
-    "the fork's own setting decides nothing and must not be edited"
+  assert_contains "$out" 'BRANCH_CLEANUP: enabled for a-user/a-repo' \
+    "a fork clone must arm the repository it resolves to, which it can administer"
+  assert_grep 'repo edit a-user/a-repo --delete-branch-on-merge' "$case_dir/state/gh.log" \
+    "the edit must address the clone's own repository"
+  assert_no_grep 'repo edit an-org/a-repo' "$case_dir/state/gh.log" \
+    "a parent the account may not administer must never be edited"
   assert_contains "$out" 'BRANCH_CLEANUP_INFO: a-user/a-repo is a fork of an-org/a-repo' \
-    "a head branch living outside the armed repository must be reported, not implied away"
-  pass "a fork clone arms its PR base repository and reports the fork's head branches"
+    "the fork shape must be reported so the parent is not mistaken for armed"
+  assert_contains "$out" 'governed by the setting on an-org/a-repo, which this script does not change' \
+    "the advisory must say who governs a pull request merged into the parent"
+  pass "a fork clone arms its own repository and reports the parent it leaves alone"
 }
 
 test_gh_warning_on_success_is_not_parsed_as_data() {
@@ -266,6 +264,6 @@ test_no_permission_reports_and_does_not_fail
 test_missing_gh_reports_and_does_not_fail
 test_edit_that_does_not_take_is_blocked
 test_other_merge_methods_are_reported_not_changed
-test_fork_clone_arms_the_pr_base_repository
+test_fork_clone_arms_itself_and_reports_the_parent
 test_gh_warning_on_success_is_not_parsed_as_data
 test_usage_and_precondition_errors

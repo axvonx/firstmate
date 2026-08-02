@@ -83,7 +83,6 @@ bin/fm-project-branch-cleanup.sh projects/<name>
 
 Firstmate deletes a task's local branch at cleanup and prunes a local branch once its upstream is gone, but only the forge can delete the merged remote branch, and until it does the local prune never triggers either.
 A `local-only` project has no forge step and skips this.
-The setting is armed on the repository the project's PRs merge into, which for a clone that resolves to a fork is the fork's parent, so relay the repository the script names rather than assuming it is the clone's own.
 The script's header owns its exact outcomes; treat a `BRANCH_CLEANUP_BLOCKED:` line as an actionable diagnostic rather than a failed add, because a repository the captain's account cannot administer, such as a read-only upstream reached through a fork, is a normal case.
 Relay that blocker with the concrete reason, then continue the add.
 Enabling squash-only merges is a stronger change than branch cleanup, so the script reports a repository's other merge methods and never changes them; propose that separately and obtain the captain's explicit decision before touching merge methods.
