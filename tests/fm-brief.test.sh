@@ -367,6 +367,7 @@ test_visual_evidence_contract_is_opt_in_and_complete() {
   local home id brief
   home="$TMP_ROOT/visual-evidence-home"
   write_registry "$home"
+  home=$(cd "$home" && pwd -P)
 
   # The contract renders for every ship delivery mode, since a change needs the
   # same evidence whether it lands through the pipeline, a direct PR, or locally.
@@ -377,26 +378,41 @@ test_visual_evidence_contract_is_opt_in_and_complete() {
     assert_present "$brief" "$id: --visual-evidence brief was not scaffolded"
     assert_grep "# Visual evidence - show the change, do not describe it" "$brief" \
       "$id: visual-evidence brief missing its section heading"
-    assert_grep "Before is a screenshot of the real page at the real route" "$brief" \
-      "$id: visual-evidence contract lost the real-page before requirement"
-    assert_grep "A written description of the current look is not a before." "$brief" \
+    assert_grep "Before is a capture of the real surface as it stands today" "$brief" \
+      "$id: visual-evidence contract lost the real-surface before requirement"
+    assert_grep "the real page at the real route, the real command with its real output, the real generated content" "$brief" \
+      "$id: visual-evidence contract lost the per-surface before media"
+    assert_grep "A written description of the current look is never a before." "$brief" \
       "$id: visual-evidence contract allowed a prose before"
+    assert_grep "The one exception is a surface that does not exist yet" "$brief" \
+      "$id: visual-evidence contract demanded a before for a surface that cannot be captured"
     assert_grep "After is always an artifact, never prose alone" "$brief" \
       "$id: visual-evidence contract lost the artifact-after requirement"
-    assert_grep "a screenshot of the change running in a throwaway prototype; a mock rendered in the project's own design system; a diagram" "$brief" \
+    assert_grep "a capture of the change running in a throwaway prototype; a mock rendered in the project's own design system; a diagram" "$brief" \
       "$id: visual-evidence contract lost the ordered after-artifact preference"
     assert_grep "that is evidence the change is under-specified" "$brief" \
       "$id: visual-evidence contract lost the under-specified consequence"
     assert_grep "It is not an exemption." "$brief" \
       "$id: visual-evidence contract offered a cost-based exemption"
-    assert_grep "One tight screenshot per claim, placed beside the claim it evidences" "$brief" \
+    assert_grep "One tight capture per claim, placed beside the claim it evidences" "$brief" \
       "$id: visual-evidence contract lost per-claim colocation"
-    assert_grep "Do not dump a single full-page image at the top" "$brief" \
+    assert_grep "Do not dump a single full-page image or an entire transcript at the top" "$brief" \
       "$id: visual-evidence contract allowed a page dump at the top"
     assert_grep "Crop and annotate down to the region that changed" "$brief" \
       "$id: visual-evidence contract lost the crop-and-annotate requirement"
     assert_grep "Prose is reserved for what cannot be shown" "$brief" \
       "$id: visual-evidence contract lost the prose-is-for-the-unshowable rule"
+    # The medium follows the surface, so a CLI or file surface is capturable too.
+    assert_grep "terminal or CLI output as the real transcript of the real command" "$brief" \
+      "$id: visual-evidence contract is browser-only and unsatisfiable for a CLI surface"
+    assert_grep "a generated file or payload as its real content" "$brief" \
+      "$id: visual-evidence contract lost the generated-content medium"
+    assert_grep "Capture browser surfaces with \`chrome-devtools-axi\`." "$brief" \
+      "$id: visual-evidence contract lost the browser capture tool as a browser-scoped example"
+    # Non-PR modes need a durable home for the artifacts: the worktree is torn
+    # down, so the brief must name the data dir that outlives it.
+    assert_grep "in every non-PR mode the directory \`$home/data/$id/\` beside this brief" "$brief" \
+      "$id: visual-evidence contract left non-PR artifacts without a durable absolute location"
     assert_no_grep "EOF" "$brief" \
       "$id: visual-evidence brief leaked a heredoc EOF marker"
   done
@@ -424,6 +440,10 @@ test_visual_evidence_contract_is_opt_in_and_complete() {
   help=$("$ROOT/bin/fm-brief.sh" --help)
   assert_contains "$help" "--visual-evidence adds the visual-evidence contract" \
     "fm-brief.sh --help does not document --visual-evidence"
+  assert_contains "$help" "The medium follows the surface" \
+    "fm-brief.sh --help still documents the contract as browser-only"
+  assert_contains "$help" "data/<task-id>/ otherwise" \
+    "fm-brief.sh --help does not document where non-PR artifacts go"
   pass "fm-brief.sh: --visual-evidence emits the full contract and is absent otherwise"
 }
 

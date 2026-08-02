@@ -472,7 +472,7 @@ Every ship brief must retain the worktree-isolation assertion and stop if launch
 If a ship task touches firstmate's shared tracked material, explicitly require `firstmate-coding-guidelines` before editing.
 If a task will drive Herdr lifecycle behavior, scaffold with `--herdr-lab`; if that need appears after an unguarded scaffold, stop and regenerate rather than adding commands by hand.
 The generated Herdr contract must use a named non-`default` isolated lab and its guarded helper for every lifecycle action.
-If a ship task changes a user-visible surface, scaffold with `--visual-evidence` so the brief requires before-and-after visual artifacts instead of prose.
+If a ship task changes a user-visible surface - browser, terminal, or generated output alike - scaffold with `--visual-evidence` so the brief requires captured before-and-after artifacts instead of prose.
 
 Load `secondmate-provisioning` before creating or using a charter brief and preserve its idle-by-default and marked-return-channel contracts.
 Status appends are sparse supervisor-actionable events, not routine progress; `bin/fm-classify-lib.sh` owns keyed open and resolved semantics.

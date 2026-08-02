@@ -28,14 +28,19 @@
 #   without it carry a loud declaration so an omitted contract cannot be silent.
 #   --visual-evidence adds the visual-evidence contract to a ship brief, for work
 #   that changes a user-visible surface. The generated contract requires: a
-#   "before" that is a screenshot of the real page at the real route; an "after"
-#   that is always an artifact, preferring a screenshot of the change running in a
-#   throwaway prototype, then a mock rendered in the project's own design system,
-#   then a diagram; one tight screenshot per claim placed beside that claim;
-#   cropping and annotation down to the region that changed; and prose reserved
-#   for rationale, trade-offs, and open questions. Prototyping the after costs
-#   budget when the worker chooses and only repays a review round later, so the
-#   brief has to require it or no worker spends it.
+#   "before" that is a capture of the real surface as it stands today, unless the
+#   surface does not exist yet; an "after" that is always an artifact, preferring
+#   a capture of the change running in a throwaway prototype, then a mock rendered
+#   in the project's own design system, then a diagram; one tight capture per
+#   claim placed beside that claim; cropping and annotation down to the region
+#   that changed; and prose reserved for rationale, trade-offs, and open
+#   questions. The medium follows the surface - a browser view is a screenshot of
+#   the real route, CLI output is the real transcript of the real command, a
+#   generated file is its real content - so the contract fits non-browser
+#   surfaces too. Artifacts go in the PR description when the project opens a PR
+#   and in data/<task-id>/ otherwise, which outlives the worktree.
+#   Prototyping the after costs budget when the worker chooses and only repays a
+#   review round later, so the brief has to require it or no worker spends it.
 #   The flag is explicit because {TASK} is filled in after scaffolding, so the
 #   scaffold cannot tell whether the work is visual. It is ship-only, and omitting
 #   it emits nothing at all: unlike Herdr lifecycle isolation, a missing visual
@@ -386,18 +391,20 @@ DOD=${DOD%$'\n'}
 # surrounding brief byte-identical to a brief scaffolded without the flag.
 VISUAL_EVIDENCE_SECTION=""
 if [ "$VISUAL_EVIDENCE" -eq 1 ]; then
-IFS= read -r -d '' VISUAL_EVIDENCE_SECTION <<'EOF' || true
+IFS= read -r -d '' VISUAL_EVIDENCE_SECTION <<EOF || true
 # Visual evidence - show the change, do not describe it
-This task changes a user-visible surface, so every claim about how it looks must arrive as an artifact, not as prose.
-Produce the artifacts below as you work and put them where this change is reviewed: the PR description when this project opens a PR, otherwise the summary you hand back.
+This task changes a user-visible surface, so every claim about how it looks must arrive as a capture of the real thing, not as prose.
+The medium follows the surface: a browser view is captured as a screenshot of the real page at the real route, terminal or CLI output as the real transcript of the real command, a generated file or payload as its real content.
+Produce the artifacts below as you work and put them where this change is reviewed: the PR description when this project opens a PR, and in every non-PR mode the directory \`$DATA/$ID/\` beside this brief, which outlives your worktree the way a scout report does.
+Those artifacts and the status file are the only things you write outside the worktree.
 
-1. **Before is a screenshot of the real page at the real route.** Run the project, navigate to the affected view, and capture what is there today. A written description of the current look is not a before.
-2. **After is always an artifact, never prose alone.** In order of preference: a screenshot of the change running in a throwaway prototype; a mock rendered in the project's own design system; a diagram. If prototyping the after looks too expensive, that is evidence the change is under-specified - settle what it should be first. It is not an exemption.
-3. **One tight screenshot per claim, placed beside the claim it evidences.** Do not dump a single full-page image at the top and leave the reader to map it back onto the text.
-4. **Crop and annotate down to the region that changed.** A full-page image offered as proof that one element moved makes the reviewer do the diffing.
+1. **Before is a capture of the real surface as it stands today.** Run the project, reach the affected surface, and capture it: the real page at the real route, the real command with its real output, the real generated content. A written description of the current look is never a before. The one exception is a surface that does not exist yet - say so in a line and go straight to the after.
+2. **After is always an artifact, never prose alone.** In order of preference: a capture of the change running in a throwaway prototype; a mock rendered in the project's own design system; a diagram. If prototyping the after looks too expensive, that is evidence the change is under-specified - settle what it should be first. It is not an exemption.
+3. **One tight capture per claim, placed beside the claim it evidences.** Do not dump a single full-page image or an entire transcript at the top and leave the reader to map it back onto the text.
+4. **Crop and annotate down to the region that changed.** A full-page image offered as proof that one element moved, or a whole log offered as proof of one changed line, makes the reviewer do the diffing.
 5. **Prose is reserved for what cannot be shown** - rationale, trade-offs, and open questions.
 
-Capture screenshots with `chrome-devtools-axi`.
+Capture browser surfaces with \`chrome-devtools-axi\`.
 EOF
 # The leading newline opens the blank line before the heading, and the trailing
 # newline read -r -d '' preserved closes the blank line before "# Project memory".
