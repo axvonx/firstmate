@@ -363,6 +363,86 @@ test_herdr_lab_omission_is_loud_for_ship_and_scout() {
   pass "fm-brief.sh: ship and scout scaffolds make omitted Herdr intent fail-visible"
 }
 
+test_visual_evidence_contract_is_opt_in_and_complete() {
+  local home id brief
+  home="$TMP_ROOT/visual-evidence-home"
+  write_registry "$home"
+
+  # The contract renders for every ship delivery mode, since a change needs the
+  # same evidence whether it lands through the pipeline, a direct PR, or locally.
+  for id_proj in "brief-visual-nm-e1:no-registry-proj" "brief-visual-dpr-e2:direct-proj" "brief-visual-lo-e3:local-proj"; do
+    id=${id_proj%%:*}
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" "${id_proj##*:}" --visual-evidence >/dev/null 2>&1
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$id: --visual-evidence brief was not scaffolded"
+    assert_grep "# Visual evidence - show the change, do not describe it" "$brief" \
+      "$id: visual-evidence brief missing its section heading"
+    assert_grep "Before is a screenshot of the real page at the real route" "$brief" \
+      "$id: visual-evidence contract lost the real-page before requirement"
+    assert_grep "A written description of the current look is not a before." "$brief" \
+      "$id: visual-evidence contract allowed a prose before"
+    assert_grep "After is always an artifact, never prose alone" "$brief" \
+      "$id: visual-evidence contract lost the artifact-after requirement"
+    assert_grep "a screenshot of the change running in a throwaway prototype; a mock rendered in the project's own design system; a diagram" "$brief" \
+      "$id: visual-evidence contract lost the ordered after-artifact preference"
+    assert_grep "that is evidence the change is under-specified" "$brief" \
+      "$id: visual-evidence contract lost the under-specified consequence"
+    assert_grep "It is not an exemption." "$brief" \
+      "$id: visual-evidence contract offered a cost-based exemption"
+    assert_grep "One tight screenshot per claim, placed beside the claim it evidences" "$brief" \
+      "$id: visual-evidence contract lost per-claim colocation"
+    assert_grep "Do not dump a single full-page image at the top" "$brief" \
+      "$id: visual-evidence contract allowed a page dump at the top"
+    assert_grep "Crop and annotate down to the region that changed" "$brief" \
+      "$id: visual-evidence contract lost the crop-and-annotate requirement"
+    assert_grep "Prose is reserved for what cannot be shown" "$brief" \
+      "$id: visual-evidence contract lost the prose-is-for-the-unshowable rule"
+    assert_no_grep "EOF" "$brief" \
+      "$id: visual-evidence brief leaked a heredoc EOF marker"
+  done
+
+  # Absent by default: a brief for work with no user-visible surface must not
+  # carry the contract, and unlike --herdr-lab it leaves no declaration behind.
+  # This case gets its own home and an id free of the searched-for words, so the
+  # negative assertions cannot match a rendered fixture path or branch name.
+  local plain_home
+  plain_home="$TMP_ROOT/no-contract-home"
+  write_registry "$plain_home"
+  id="brief-default-ship-e4"
+  FM_HOME="$plain_home" "$ROOT/bin/fm-brief.sh" "$id" no-registry-proj >/dev/null 2>&1
+  brief="$plain_home/data/$id/brief.md"
+  assert_present "$brief" "$id: default ship brief was not scaffolded"
+  assert_no_grep "Visual evidence" "$brief" \
+    "$id: default ship brief carried the visual-evidence contract"
+  assert_no_grep "visual-evidence" "$brief" \
+    "$id: default ship brief carried a visual-evidence declaration or regeneration notice"
+  assert_no_grep "screenshot" "$brief" \
+    "$id: default ship brief bloated with screenshot instructions"
+
+  # Every scaffold still documents the flag through --help.
+  local help
+  help=$("$ROOT/bin/fm-brief.sh" --help)
+  assert_contains "$help" "--visual-evidence adds the visual-evidence contract" \
+    "fm-brief.sh --help does not document --visual-evidence"
+  pass "fm-brief.sh: --visual-evidence emits the full contract and is absent otherwise"
+}
+
+test_visual_evidence_is_ship_only() {
+  local home status
+  home="$TMP_ROOT/visual-evidence-misuse-home"
+  mkdir -p "$home/data"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" visual-scout someproj --scout --visual-evidence >/dev/null 2>&1; status=$?
+  expect_code 1 "$status" "--visual-evidence on a scout brief must fail"
+  assert_absent "$home/data/visual-scout/brief.md" "rejected scout --visual-evidence still wrote a brief"
+
+  FM_HOME="$home" FM_SECONDMATE_CHARTER=ops \
+    "$ROOT/bin/fm-brief.sh" visual-mate --secondmate --no-projects --visual-evidence >/dev/null 2>&1; status=$?
+  expect_code 1 "$status" "--visual-evidence on a secondmate charter must fail"
+  assert_absent "$home/data/visual-mate/brief.md" "rejected secondmate --visual-evidence still wrote a brief"
+  pass "fm-brief.sh: --visual-evidence is ship-only and rejects misuse without writing a brief"
+}
+
 test_secondmate_no_projects_charter() {
   local home brief status
   home="$TMP_ROOT/no-projects-home"
@@ -643,6 +723,8 @@ test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout
 test_herdr_lab_contract_applies_to_scouts_but_not_secondmates
+test_visual_evidence_contract_is_opt_in_and_complete
+test_visual_evidence_is_ship_only
 test_secondmate_no_projects_charter
 test_secondmate_marked_request_reporting_contract
 test_secondmate_directory_paths_are_absolute_and_output_is_stable

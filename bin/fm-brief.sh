@@ -6,7 +6,7 @@
 # description, acceptance criteria, and context, and may adjust other sections
 # when the task genuinely deviates (e.g. working an existing external PR instead
 # of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> [--scout] [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> [--scout] [--herdr-lab] [--visual-evidence]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
@@ -26,6 +26,21 @@
 #   The flag must be explicit because {TASK} is filled after scaffolding and the
 #   caller-supplied repo string cannot reliably identify this repo. Briefs made
 #   without it carry a loud declaration so an omitted contract cannot be silent.
+#   --visual-evidence adds the visual-evidence contract to a ship brief, for work
+#   that changes a user-visible surface. The generated contract requires: a
+#   "before" that is a screenshot of the real page at the real route; an "after"
+#   that is always an artifact, preferring a screenshot of the change running in a
+#   throwaway prototype, then a mock rendered in the project's own design system,
+#   then a diagram; one tight screenshot per claim placed beside that claim;
+#   cropping and annotation down to the region that changed; and prose reserved
+#   for rationale, trade-offs, and open questions. Prototyping the after costs
+#   budget when the worker chooses and only repays a review round later, so the
+#   brief has to require it or no worker spends it.
+#   The flag is explicit because {TASK} is filled in after scaffolding, so the
+#   scaffold cannot tell whether the work is visual. It is ship-only, and omitting
+#   it emits nothing at all: unlike Herdr lifecycle isolation, a missing visual
+#   contract costs a review round, not safety, so briefs for work with no
+#   user-visible surface must not carry a declaration.
 # For ship tasks, the definition of done is shaped by the project's delivery mode
 # (data/projects.md via fm-project-mode.sh; see the project-management skill
 # and AGENTS.md task lifecycle):
@@ -93,6 +108,7 @@ else
 fi
 KIND=ship
 HERDR_LAB=0
+VISUAL_EVIDENCE=0
 NO_PROJECTS=0
 POS=()
 for a in "$@"; do
@@ -100,6 +116,7 @@ for a in "$@"; do
     --scout) KIND=scout ;;
     --secondmate) KIND=secondmate ;;
     --herdr-lab) HERDR_LAB=1 ;;
+    --visual-evidence) VISUAL_EVIDENCE=1 ;;
     --no-projects) NO_PROJECTS=1 ;;
     *) POS+=("$a") ;;
   esac
@@ -108,6 +125,13 @@ ID=${POS[0]}
 
 if [ "$KIND" = secondmate ] && [ "$HERDR_LAB" -eq 1 ]; then
   echo "error: --herdr-lab applies only to crewmate ship or scout briefs" >&2
+  exit 1
+fi
+
+# Ship-only: the contract is about how a change is shown for review, and only a
+# ship brief delivers a change. A scout already owes evidence through its report.
+if [ "$VISUAL_EVIDENCE" -eq 1 ] && [ "$KIND" != ship ]; then
+  echo "error: --visual-evidence applies only to crewmate ship briefs" >&2
   exit 1
 fi
 
@@ -357,6 +381,29 @@ esac
 # briefs stay byte-identical to the historical Bash 5 output.
 DOD=${DOD%$'\n'}
 
+# Opt-in visual-evidence contract. It stays empty unless --visual-evidence was
+# passed, and it carries its own leading newline so an omitted section leaves the
+# surrounding brief byte-identical to a brief scaffolded without the flag.
+VISUAL_EVIDENCE_SECTION=""
+if [ "$VISUAL_EVIDENCE" -eq 1 ]; then
+IFS= read -r -d '' VISUAL_EVIDENCE_SECTION <<'EOF' || true
+# Visual evidence - show the change, do not describe it
+This task changes a user-visible surface, so every claim about how it looks must arrive as an artifact, not as prose.
+Produce the artifacts below as you work and put them where this change is reviewed: the PR description when this project opens a PR, otherwise the summary you hand back.
+
+1. **Before is a screenshot of the real page at the real route.** Run the project, navigate to the affected view, and capture what is there today. A written description of the current look is not a before.
+2. **After is always an artifact, never prose alone.** In order of preference: a screenshot of the change running in a throwaway prototype; a mock rendered in the project's own design system; a diagram. If prototyping the after looks too expensive, that is evidence the change is under-specified - settle what it should be first. It is not an exemption.
+3. **One tight screenshot per claim, placed beside the claim it evidences.** Do not dump a single full-page image at the top and leave the reader to map it back onto the text.
+4. **Crop and annotate down to the region that changed.** A full-page image offered as proof that one element moved makes the reviewer do the diffing.
+5. **Prose is reserved for what cannot be shown** - rationale, trade-offs, and open questions.
+
+Capture screenshots with `chrome-devtools-axi`.
+EOF
+# The leading newline opens the blank line before the heading, and the trailing
+# newline read -r -d '' preserved closes the blank line before "# Project memory".
+VISUAL_EVIDENCE_SECTION=$'\n'${VISUAL_EVIDENCE_SECTION}
+fi
+
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
@@ -398,7 +445,7 @@ $RULE1
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
-
+$VISUAL_EVIDENCE_SECTION
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.
 Record only project knowledge useful to almost every future session.
