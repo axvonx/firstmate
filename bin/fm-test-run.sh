@@ -59,6 +59,12 @@
 #   FM_TEST_SUMMARY_FAMILY family=<name> count=<n> duration_ms=<n> failed=<n>
 #   FM_TEST_SLOWEST rank=<k> script=<path> duration_ms=<n>
 #
+# After --aggregate-json (stdout, one line):
+#   FM_TEST_AGGREGATE lanes=<n> total=<n> failed=<n> skipped_gate=<n> critical_path_duration_ms=<n> interrupted=<true|false>
+#   interrupted=true means at least one input lane artifact was flushed by a
+#   time-bounded stop, so the totals are truncated rather than complete; the
+#   aggregate also warns with the interrupted lanes named.
+#
 # Exit status is non-zero if any selected script exits non-zero or a configured
 # --fail-on-gate-skip token appears. Other gate skips (first meaningful line
 # matching ^skip:) remain successful and are counted as skipped_gate.

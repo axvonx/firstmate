@@ -545,6 +545,14 @@ test_jobs_requires_proven_isolated() {
   pass "--jobs refuses non-proven / stateful selections"
 }
 
+# Load-sensitive by construction: the fixtures below prove slot refill by racing
+# a 0.5s script against a 0.05s one, so on a machine under heavy load (many
+# concurrent agents, memory pressure) the fast fixture can start after the slow
+# one finishes and "scheduler waited for oldest worker" or "jobs=2 must refill
+# the first completed slot" fails without the runner having regressed. Tracked
+# for a load-independent rewrite as backlog item fm-scheduler-test-load-sensitivity;
+# do not read a failure here as evidence about the code under test until the
+# machine's load at the time has been checked.
 test_jobs_parallel_scheduler_and_failure_propagation() {
   local tmp repo runner evidence fake_bin a b c d rc begin_n end_n
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-jobs-sched.XXXXXX")
