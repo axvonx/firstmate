@@ -860,6 +860,28 @@ test_scout_and_secondmate_scaffold() {
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
 
+# Ship and scout briefs both tell the worker to park the browser before closing it.
+test_browser_teardown_contract() {
+  local home brief
+  home="$TMP_ROOT/browser-teardown-home"
+  write_registry "$home"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-browser-ship no-registry-proj >/dev/null 2>&1 \
+    || fail "fm-brief.sh ship scaffold exited non-zero"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-browser-scout no-registry-proj --scout >/dev/null 2>&1 \
+    || fail "fm-brief.sh scout scaffold exited non-zero"
+
+  for id in brief-browser-ship brief-browser-scout; do
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$id: brief was not scaffolded"
+    assert_grep "first navigate to \`about:blank\`, then close the browser" "$brief" \
+      "$id: brief must instruct parking the browser before closing it"
+    assert_grep "Park first because it is the half that survives failure" "$brief" \
+      "$id: brief must explain why parking comes before closing"
+  done
+  pass "fm-brief.sh: browser work ends by parking on about:blank, then closing"
+}
+
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
@@ -879,3 +901,4 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
+test_browser_teardown_contract
