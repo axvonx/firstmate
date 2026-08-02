@@ -179,7 +179,7 @@ It additionally verifies that `portable-serial-1` and `portable-serial-2` partit
 
 ## Timing artifacts
 
-Portable shards, the portable serial lane, and the Herdr lane upload runner-generated timing JSON.
+Portable shards, each portable serial half, and the Herdr lane upload runner-generated timing JSON.
 `bin/fm-test-run.sh --aggregate-json` creates the combined summary artifact.
 `.github/workflows/ci.yml` owns the exact artifact names and aggregation wiring.
 
@@ -193,7 +193,8 @@ Portable shards, the portable serial lane, and the Herdr lane upload runner-gene
 | Job | timeout-minutes | Rationale |
 |---|---:|---|
 | portable parallel 1/2 | 10 | The measured shard sums are about three minutes and the timeout is a hang tripwire. |
-| portable serial | 20 | The serial remainder needs a larger hang tripwire. |
+| portable serial 1/2 | 15 | Each measured half is about ten minutes, so this is a hang tripwire with roughly 50% headroom. `FM_SERIAL_BUDGET_SECONDS` (780) trips first, inside the step. |
 | Herdr | 40 | The real-Herdr lane keeps its dedicated timeout. |
 
 Timeouts are hang tripwires rather than expected healthy durations.
+For the serial halves the job cap is the outer backstop only: the in-step budget above is what a normal overrun hits, because a job cancellation is the failure mode this lane deliberately avoids.

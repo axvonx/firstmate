@@ -62,6 +62,10 @@
 # Exit status is non-zero if any selected script exits non-zero or a configured
 # --fail-on-gate-skip token appears. Other gate skips (first meaningful line
 # matching ^skip:) remain successful and are counted as skipped_gate.
+# On INT/TERM the run stops, flushes any --json artifact for the scripts that
+# finished (marked "interrupted": true, so it is not a complete measurement),
+# and exits 124 like timeout(1) so a caller can tell a time-bounded stop from a
+# test failure. bin/fm-ci-run-serial-lane.sh relies on both.
 #
 # Family labels, the changed-file map, and production portable-shard composition
 # live in this script only (one owner). The proven-isolated candidate set remains
