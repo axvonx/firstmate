@@ -212,8 +212,8 @@ test_fork_clone_arms_itself_and_reports_the_parent() {
     "the fork shape must be reported so the parent is not mistaken for armed"
   assert_contains "$out" 'governed by the setting on an-org/a-repo, which this script does not change' \
     "the advisory must say who governs a pull request merged into the parent"
-  assert_contains "$out" 'a head branch pushed to a-user/a-repo is deleted by neither that setting nor the gh --delete-branch flag' \
-    "the relayed line must name the head branches that nothing deletes"
+  assert_contains "$out" 'a head branch pushed to a-user/a-repo for a pull request merged into an-org/a-repo is deleted by neither that setting nor the gh --delete-branch flag' \
+    "the relayed line must name the head branches that nothing deletes, scoped to the merges that leave them"
   assert_contains "$out" 'removed by hand until separate work lands' \
     "the relayed line must say who is left holding that cleanup"
   pass "a fork clone arms its own repository and reports the parent and the uncovered head branches"
