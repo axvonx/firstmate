@@ -6,7 +6,7 @@
 # description, acceptance criteria, and context, and may adjust other sections
 # when the task genuinely deviates (e.g. working an existing external PR instead
 # of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> [--scout] [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> [--scout] [--herdr-lab] [--visual-evidence]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
@@ -26,6 +26,46 @@
 #   The flag must be explicit because {TASK} is filled after scaffolding and the
 #   caller-supplied repo string cannot reliably identify this repo. Briefs made
 #   without it carry a loud declaration so an omitted contract cannot be silent.
+#   --visual-evidence adds the visual-evidence contract to a ship brief, for work
+#   that changes a user-visible surface. The generated contract requires: a
+#   "before" that is a capture of the real surface as it stands today, unless the
+#   surface does not exist yet; an "after" that is always an artifact, preferring
+#   a capture of the change running in a throwaway prototype, then a mock rendered
+#   in the project's own design system, then a diagram; one tight capture per
+#   claim placed beside that claim; cropping and annotation down to the region
+#   that changed; and prose reserved for rationale, trade-offs, and open
+#   questions. The after has one carve-out, for motion, timing, or a measurement
+#   no still capture can hold, which the worker must name and justify; an
+#   unattached "I could not show it" stays a missing after.
+#   The medium follows the surface (a browser view is a screenshot of the real
+#   route, CLI output is the real transcript of the real command, a generated file
+#   is its real content), so the contract fits non-browser surfaces too.
+#   Prototypes and captures are built inside the task worktree under a
+#   self-ignoring .fm-scratch/ and are never committed to the code branch; the
+#   artifacts that are presented are copied to this task's own record directory,
+#   data/<task-id>/evidence/, which the flag also names as the single exception to
+#   the brief's stay-inside-the-worktree rule 2 - the same class of write as the
+#   status file, scoped to this task and nothing else.
+#   Each artifact is linked by its path beside the claim it evidences - in the
+#   pull request body as soon as it exists, whoever opened it, or in the hand-back
+#   when the mode opens none. The link is the home-relative path
+#   data/<task-id>/evidence/<file>, never the absolute path the copy step needs,
+#   so a body that may be published carries no account name or home layout. Links
+#   are appended to an existing body rather than replacing it, because a project
+#   can require a signature or a section there that a replacement drops; and
+#   because the pipeline owns a body it opened and a rerun republishes it, the
+#   links are re-checked and re-added before the task reports done.
+#   The prose must carry that claim on its own, because a reviewer who is not on
+#   this machine cannot open the file: for upstream-facing work the artifacts are
+#   the captain's verification rather than the upstream reviewer's, which is an
+#   accepted limitation and the reason captures go to no other host.
+#   Prototyping the after costs budget when the worker chooses and only repays a
+#   review round later, so the brief has to require it or no worker spends it.
+#   The flag is explicit because {TASK} is filled in after scaffolding, so the
+#   scaffold cannot tell whether the work is visual. It is ship-only, and omitting
+#   it emits nothing at all: unlike Herdr lifecycle isolation, a missing visual
+#   contract costs a review round, not safety, so briefs for work with no
+#   user-visible surface must not carry a declaration.
 # For ship tasks, the definition of done is shaped by the project's delivery mode
 # (data/projects.md via fm-project-mode.sh; see the project-management skill
 # and AGENTS.md task lifecycle):
@@ -93,6 +133,7 @@ else
 fi
 KIND=ship
 HERDR_LAB=0
+VISUAL_EVIDENCE=0
 NO_PROJECTS=0
 POS=()
 for a in "$@"; do
@@ -100,6 +141,7 @@ for a in "$@"; do
     --scout) KIND=scout ;;
     --secondmate) KIND=secondmate ;;
     --herdr-lab) HERDR_LAB=1 ;;
+    --visual-evidence) VISUAL_EVIDENCE=1 ;;
     --no-projects) NO_PROJECTS=1 ;;
     *) POS+=("$a") ;;
   esac
@@ -108,6 +150,13 @@ ID=${POS[0]}
 
 if [ "$KIND" = secondmate ] && [ "$HERDR_LAB" -eq 1 ]; then
   echo "error: --herdr-lab applies only to crewmate ship or scout briefs" >&2
+  exit 1
+fi
+
+# Ship-only: the contract is about how a change is shown for review, and only a
+# ship brief delivers a change. A scout already owes evidence through its report.
+if [ "$VISUAL_EVIDENCE" -eq 1 ] && [ "$KIND" != ship ]; then
+  echo "error: --visual-evidence applies only to crewmate ship briefs" >&2
   exit 1
 fi
 
@@ -127,6 +176,16 @@ shell_quote() {
 }
 
 STATUS_FILE=$(shell_quote "$STATE/$ID.status")
+# Two forms of the evidence directory. The absolute one is for local commands
+# that have to resolve; the home-relative one is the only form a brief may put
+# into a shareable surface, so no pull request body can carry the operator's
+# account name or home layout. The fallback keeps that property when the data
+# root is configured outside the home.
+EVIDENCE_DIR=$(shell_quote "$DATA/$ID/evidence")
+EVIDENCE_REL="${DATA#"$FM_HOME"/}/$ID/evidence"
+case "$EVIDENCE_REL" in
+  /*) EVIDENCE_REL="${DATA##*/}/$ID/evidence" ;;
+esac
 
 if [ "$KIND" = secondmate ]; then
 SECONDMATE_PROJECTS=""
@@ -357,6 +416,53 @@ esac
 # briefs stay byte-identical to the historical Bash 5 output.
 DOD=${DOD%$'\n'}
 
+# Opt-in visual-evidence contract. It stays empty unless --visual-evidence was
+# passed, and it carries its own leading newline so an omitted section leaves the
+# surrounding brief byte-identical to a brief scaffolded without the flag.
+RULE2='2. Stay inside this worktree; modify nothing outside it.'
+VISUAL_EVIDENCE_SECTION=""
+if [ "$VISUAL_EVIDENCE" -eq 1 ]; then
+IFS= read -r -d '' RULE2 <<EOF || true
+2. Stay inside this worktree; modify nothing outside it.
+   The single exception is this task's own visual-evidence directory \`$EVIDENCE_DIR\` in the firstmate home, described under Visual evidence below.
+   That is the same class of write, to the same home, as the status file you append to in rule 4: every brief already writes that one file outside its worktree.
+   It authorizes nothing else - not another task's record directory, not that home's shared files, not any other path.
+EOF
+RULE2=${RULE2%$'\n'}
+IFS= read -r -d '' VISUAL_EVIDENCE_SECTION <<EOF || true
+# Visual evidence - show the change, do not describe it
+This task changes a user-visible surface, so every claim about how it looks must arrive as a capture of the real thing, not as prose.
+The medium follows the surface: a browser view is captured as a screenshot of the real page at the real route, terminal or CLI output as the real transcript of the real command, a generated file or payload as its real content.
+
+1. **Before is a capture of the real surface as it stands today.** Run the project, reach the affected surface, and capture it: the real page at the real route, the real command with its real output, the real generated content. A written description of the current look is never a before. The one exception is a surface that does not exist yet - say so in a line and go straight to the after.
+2. **After is always an artifact, never prose alone.** In order of preference: a capture of the change running in a throwaway prototype; a mock rendered in the project's own design system; a diagram. If prototyping the after looks too expensive, that is evidence the change is under-specified - settle what it should be first. It is not an exemption.
+   The single carve-out is a change no still capture can hold, meaning motion, timing, or a measurement, and then a recording or the measured result is the artifact. Name the form you used and why a still could not carry the claim. "I could not show it" with nothing attached is not a carve-out; it is a missing after.
+3. **One tight capture per claim, placed beside the claim it evidences.** Do not dump a single full-page image or an entire transcript at the top and leave the reader to map it back onto the text.
+4. **Crop and annotate down to the region that changed.** A full-page image offered as proof that one element moved, or a whole log offered as proof of one changed line, makes the reviewer do the diffing.
+5. **Prose is reserved for what cannot be shown** - rationale, trade-offs, and open questions.
+
+## Producing the artifacts
+Build every prototype and capture inside this worktree, under \`.fm-scratch/\`: create the directory and write a single \`*\` line into \`.fm-scratch/.gitignore\`, which hides the whole directory from git without touching the project's own ignore file.
+A prototype is scratch: never commit it to your \`fm/$ID\` branch, and expect it to die with this worktree.
+Capture browser surfaces with \`chrome-devtools-axi\`.
+If you conclude an artifact cannot be produced without writing outside this worktree and its evidence directory, append \`blocked: {why}\` and stop; that is an escalation, not a licence to write anywhere else.
+
+## Delivering the artifacts
+Copy every artifact you present out of \`.fm-scratch/\` into this task's own evidence directory, which outlives this worktree: run \`mkdir -p $EVIDENCE_DIR\` and copy them there, keeping the layout flat with one file per claim.
+Link each artifact by its path beside the claim it evidences - in the pull request body when this project opens one, in the summary you hand back when it does not - never as a block at the bottom.
+Write that path in the home-relative form \`$EVIDENCE_REL/{file}\`, never the absolute path you just gave \`mkdir\`: a pull request body can be published, and the absolute form would put this machine's account name and home layout in it.
+When the pull request is opened for you, add those links to its body with \`gh-axi\` as soon as it exists, appending to the body it already has and preserving every line of it rather than replacing it, because a project can require a signature or a section in that body and a replacement drops it and fails a required check; when you open it yourself, write them into the body you author; when there is no pull request, name this directory in the hand-back you return.
+Treat that as check-then-repair rather than a one-shot edit: the pipeline owns a body it opened and a rerun or any other republish overwrites what you wrote, so read the body back with \`gh-axi\`, confirm every link is still present before you report this task done, and add them again if they are gone.
+Adding those links is not a code edit and not a findings fix, so it is not the hand-editing that an active validation run forbids.
+Write each claim so the prose carries it on its own: a path is opaque to a reader who cannot open the file, so the sentence states what changed and the artifact confirms it. That is not prose standing in for an after; the artifact stays mandatory.
+Accept the one limitation rather than working around it: a reviewer who is not on this machine cannot open these files, so for work whose pull request goes to a public upstream the artifacts are the captain's verification rather than the upstream reviewer's, and the self-carrying prose above is what keeps that pull request readable for both.
+That is also why the artifacts go nowhere else, not to a gist and not to any other host: a secret gist is unlisted rather than access-controlled, so anyone holding the link could read captures of a private product.
+EOF
+# The leading newline opens the blank line before the heading, and the trailing
+# newline read -r -d '' preserved closes the blank line before "# Project memory".
+VISUAL_EVIDENCE_SECTION=$'\n'${VISUAL_EVIDENCE_SECTION}
+fi
+
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
@@ -376,7 +482,7 @@ If the top-level path is the primary checkout or not the worktree you were launc
 
 # Rules
 $RULE1
-2. Stay inside this worktree; modify nothing outside it.
+$RULE2
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
@@ -398,7 +504,7 @@ $RULE1
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
-
+$VISUAL_EVIDENCE_SECTION
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.
 Record only project knowledge useful to almost every future session.

@@ -363,6 +363,234 @@ test_herdr_lab_omission_is_loud_for_ship_and_scout() {
   pass "fm-brief.sh: ship and scout scaffolds make omitted Herdr intent fail-visible"
 }
 
+test_visual_evidence_contract_is_opt_in_and_complete() {
+  local home id brief
+  home="$TMP_ROOT/visual-evidence-home"
+  write_registry "$home"
+
+  # The contract renders for every ship delivery mode, since a change needs the
+  # same evidence whether it lands through the pipeline, a direct PR, or locally.
+  for id_proj in "brief-visual-nm-e1:no-registry-proj" "brief-visual-dpr-e2:direct-proj" "brief-visual-lo-e3:local-proj"; do
+    id=${id_proj%%:*}
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" "${id_proj##*:}" --visual-evidence >/dev/null 2>&1
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$id: --visual-evidence brief was not scaffolded"
+    assert_grep "# Visual evidence - show the change, do not describe it" "$brief" \
+      "$id: visual-evidence brief missing its section heading"
+    assert_grep "Before is a capture of the real surface as it stands today" "$brief" \
+      "$id: visual-evidence contract lost the real-surface before requirement"
+    assert_grep "the real page at the real route, the real command with its real output, the real generated content" "$brief" \
+      "$id: visual-evidence contract lost the per-surface before media"
+    assert_grep "A written description of the current look is never a before." "$brief" \
+      "$id: visual-evidence contract allowed a prose before"
+    assert_grep "The one exception is a surface that does not exist yet" "$brief" \
+      "$id: visual-evidence contract demanded a before for a surface that cannot be captured"
+    assert_grep "After is always an artifact, never prose alone" "$brief" \
+      "$id: visual-evidence contract lost the artifact-after requirement"
+    assert_grep "a capture of the change running in a throwaway prototype; a mock rendered in the project's own design system; a diagram" "$brief" \
+      "$id: visual-evidence contract lost the ordered after-artifact preference"
+    assert_grep "that is evidence the change is under-specified" "$brief" \
+      "$id: visual-evidence contract lost the under-specified consequence"
+    assert_grep "It is not an exemption." "$brief" \
+      "$id: visual-evidence contract offered a cost-based exemption"
+    assert_grep "One tight capture per claim, placed beside the claim it evidences" "$brief" \
+      "$id: visual-evidence contract lost per-claim colocation"
+    assert_grep "Do not dump a single full-page image or an entire transcript at the top" "$brief" \
+      "$id: visual-evidence contract allowed a page dump at the top"
+    assert_grep "Crop and annotate down to the region that changed" "$brief" \
+      "$id: visual-evidence contract lost the crop-and-annotate requirement"
+    assert_grep "Prose is reserved for what cannot be shown" "$brief" \
+      "$id: visual-evidence contract lost the prose-is-for-the-unshowable rule"
+    # The medium follows the surface, so a CLI or file surface is capturable too.
+    assert_grep "terminal or CLI output as the real transcript of the real command" "$brief" \
+      "$id: visual-evidence contract is browser-only and unsatisfiable for a CLI surface"
+    assert_grep "a generated file or payload as its real content" "$brief" \
+      "$id: visual-evidence contract lost the generated-content medium"
+    assert_grep "Capture browser surfaces with \`chrome-devtools-axi\`." "$brief" \
+      "$id: visual-evidence contract lost the browser capture tool as a browser-scoped example"
+    # The after carve-out is narrow and conditional: a still that cannot hold the
+    # change is not a licence to fall back to prose.
+    assert_grep "The single carve-out is a change no still capture can hold, meaning motion, timing, or a measurement" "$brief" \
+      "$id: visual-evidence contract lost the narrow motion/timing/measurement carve-out"
+    assert_grep "Name the form you used and why a still could not carry the claim." "$brief" \
+      "$id: visual-evidence carve-out did not require naming the artifact form and its justification"
+    assert_grep "\"I could not show it\" with nothing attached is not a carve-out; it is a missing after." "$brief" \
+      "$id: visual-evidence carve-out allowed an unattached claim to pass as an after"
+    # Rule 2 stands: prototypes and captures are built inside the worktree in one
+    # conventional self-ignoring scratch dir, never committed to the code branch.
+    assert_grep "Build every prototype and capture inside this worktree, under \`.fm-scratch/\`" "$brief" \
+      "$id: visual-evidence contract did not confine artifact production to the worktree"
+    assert_grep "write a single \`*\` line into \`.fm-scratch/.gitignore\`" "$brief" \
+      "$id: visual-evidence contract lost the self-ignoring scratch directory mechanism"
+    assert_grep "never commit it to your \`fm/$id\` branch" "$brief" \
+      "$id: visual-evidence contract let a scratch prototype land on the code branch"
+    assert_grep "append \`blocked: {why}\` and stop; that is an escalation, not a licence to write anywhere else" "$brief" \
+      "$id: visual-evidence contract turned an impossible capture into licence to write anywhere else"
+    assert_no_grep "Those artifacts and the status file are the only things you write outside the worktree." "$brief" \
+      "$id: visual-evidence contract still carves an unnamed exception out of ship rule 2"
+    # The artifacts presented go to this task's own record directory, which
+    # outlives the worktree, and nowhere else.
+    assert_grep "Copy every artifact you present out of \`.fm-scratch/\` into this task's own evidence directory" "$brief" \
+      "$id: visual-evidence contract lost the record-directory delivery destination"
+    assert_grep "run \`mkdir -p '$home/data/$id/evidence'\` and copy them there" "$brief" \
+      "$id: visual-evidence contract did not name the task's own absolute evidence directory"
+    assert_grep "Link each artifact by its path beside the claim it evidences" "$brief" \
+      "$id: visual-evidence contract lost per-claim colocation of the artifact paths"
+    assert_grep "never as a block at the bottom" "$brief" \
+      "$id: visual-evidence contract allowed an artifact block at the bottom"
+    # The link that lands in a publishable body is the home-relative path, so the
+    # absolute path stays confined to the local mkdir that has to resolve.
+    assert_grep "Write that path in the home-relative form \`data/$id/evidence/{file}\`" "$brief" \
+      "$id: visual-evidence contract did not name the home-relative link form"
+    assert_grep "never the absolute path you just gave \`mkdir\`" "$brief" \
+      "$id: visual-evidence contract left the absolute path as the link written into a shared surface"
+    assert_grep "would put this machine's account name and home layout in it" "$brief" \
+      "$id: visual-evidence contract lost the reason a published body must not carry the absolute path"
+    assert_grep "run \`mkdir -p '$home/data/$id/evidence'\`" "$brief" \
+      "$id: visual-evidence contract lost the absolute path from the local mkdir that must resolve"
+    # Who authors the pull request body, and when the links go in, for a mode
+    # whose pipeline opens the pull request on the worker's behalf.
+    assert_grep "When the pull request is opened for you, add those links to its body with \`gh-axi\` as soon as it exists" "$brief" \
+      "$id: visual-evidence contract gave no owner or timing for a pull request body opened for the worker"
+    assert_grep "when you open it yourself, write them into the body you author; when there is no pull request, name this directory in the hand-back you return" "$brief" \
+      "$id: visual-evidence contract left the self-opened and no-pull-request cases unstated"
+    # A body that already exists may carry a signature or section a required check
+    # greps for, so the edit is an append and never a replacement.
+    assert_grep "appending to the body it already has and preserving every line of it" "$brief" \
+      "$id: visual-evidence contract let the worker replace a pull request body instead of appending to it"
+    assert_grep "a project can require a signature or a section in that body" "$brief" \
+      "$id: visual-evidence contract gave no reason a replaced body fails a required check"
+    # A rerun republishes a pipeline-owned body, so the links are verified again
+    # at the done gate rather than written once and assumed to survive.
+    assert_grep "Treat that as check-then-repair rather than a one-shot edit" "$brief" \
+      "$id: visual-evidence contract added the links once and never re-checked them"
+    assert_grep "a rerun or any other republish overwrites what you wrote" "$brief" \
+      "$id: visual-evidence contract did not say a rerun can drop the links it required"
+    assert_grep "confirm every link is still present before you report this task done, and add them again if they are gone" "$brief" \
+      "$id: visual-evidence contract left the links unverified at the done gate"
+    assert_grep "Adding those links is not a code edit and not a findings fix, so it is not the hand-editing that an active validation run forbids." "$brief" \
+      "$id: visual-evidence contract reads as licence to hand-edit during an active validation run"
+    assert_grep "Write each claim so the prose carries it on its own" "$brief" \
+      "$id: visual-evidence contract left the prose unreadable to anyone who cannot open the files"
+    assert_grep "That is not prose standing in for an after; the artifact stays mandatory." "$brief" \
+      "$id: visual-evidence contract let self-carrying prose weaken the artifact requirement"
+    assert_grep "a reviewer who is not on this machine cannot open these files" "$brief" \
+      "$id: visual-evidence contract papered over the accepted limitation of a local artifact home"
+    assert_grep "not to a gist and not to any other host" "$brief" \
+      "$id: visual-evidence contract lost the no-other-host prohibition"
+    assert_grep "a secret gist is unlisted rather than access-controlled" "$brief" \
+      "$id: visual-evidence contract lost the reason a gist is not an artifact home"
+    # The withdrawn evidence-ref mechanism must not come back in any form.
+    assert_no_grep "fm/$id-evidence" "$brief" \
+      "$id: visual-evidence contract still carries the withdrawn sibling evidence ref"
+    assert_no_grep "git switch --orphan" "$brief" \
+      "$id: visual-evidence contract still carries the withdrawn orphan-ref mechanics"
+    assert_no_grep "evidence:" "$brief" \
+      "$id: visual-evidence contract still carries the withdrawn evidence commit prefix"
+    assert_no_grep "must be deleted" "$brief" \
+      "$id: visual-evidence contract still carries the withdrawn ref-deletion requirement"
+    # Rule 2 keeps its absolute opening and gains exactly one named exception.
+    assert_grep "2. Stay inside this worktree; modify nothing outside it." "$brief" \
+      "$id: visual-evidence brief weakened the opening of ship rule 2"
+    assert_grep "The single exception is this task's own visual-evidence directory \`'$home/data/$id/evidence'\`" "$brief" \
+      "$id: ship rule 2 did not name the one authorized write outside the worktree"
+    assert_grep "the same class of write, to the same home, as the status file you append to in rule 4" "$brief" \
+      "$id: ship rule 2 carve-out lost the status-file precedent that bounds it"
+    assert_grep "It authorizes nothing else - not another task's record directory, not that home's shared files, not any other path." "$brief" \
+      "$id: ship rule 2 carve-out did not bound its own scope"
+    assert_no_grep "EOF" "$brief" \
+      "$id: visual-evidence brief leaked a heredoc EOF marker"
+  done
+
+  # Absent by default: a brief for work with no user-visible surface must not
+  # carry the contract, and unlike --herdr-lab it leaves no declaration behind.
+  # Every brief interpolates two host paths nobody here controls - the checkout
+  # ($FM_ROOT, in the project-memory section) and the firstmate home ($FM_HOME,
+  # under the status-file line) - so a bare-word absence assertion run against the
+  # rendered brief would false-fail whenever a checkout or home directory name
+  # happens to contain "evidence" or "screenshot", and would blame the generator
+  # for content it never emitted. The absence assertions therefore read a copy
+  # with those two paths replaced, and two self-checks below keep the scrub honest.
+  local plain_home plain_rendered plain_brief
+  plain_home="$TMP_ROOT/no-contract-home"
+  write_registry "$plain_home"
+  id="brief-default-ship-e4"
+  FM_HOME="$plain_home" "$ROOT/bin/fm-brief.sh" "$id" no-registry-proj >/dev/null 2>&1
+  brief="$plain_home/data/$id/brief.md"
+  assert_present "$brief" "$id: default ship brief was not scaffolded"
+  plain_rendered=$(cat "$brief")
+  plain_rendered=${plain_rendered//"$ROOT"/FM-CHECKOUT-PATH}
+  plain_rendered=${plain_rendered//"$plain_home"/FM-HOME-PATH}
+  plain_brief="$TMP_ROOT/no-contract-brief-host-paths-scrubbed.md"
+  printf '%s\n' "$plain_rendered" > "$plain_brief"
+  assert_no_grep "$ROOT" "$plain_brief" \
+    "$id: checkout path survived the scrub, so the absence assertions are coupled to its directory name"
+  assert_no_grep "$plain_home" "$plain_brief" \
+    "$id: firstmate home path survived the scrub, so the absence assertions are coupled to its directory name"
+  assert_no_grep "Visual evidence" "$plain_brief" \
+    "$id: default ship brief carried the visual-evidence contract"
+  assert_no_grep "visual-evidence" "$plain_brief" \
+    "$id: default ship brief carried a visual-evidence declaration or regeneration notice"
+  assert_no_grep "screenshot" "$plain_brief" \
+    "$id: default ship brief bloated with screenshot instructions"
+  assert_no_grep ".fm-scratch" "$plain_brief" \
+    "$id: default ship brief carried the visual-evidence scratch convention"
+  assert_no_grep "evidence" "$plain_brief" \
+    "$id: default ship brief carried the visual-evidence delivery convention"
+  # Rule 2 is byte-identical to the unflagged shape: the carve-out is opt-in too.
+  assert_grep "2. Stay inside this worktree; modify nothing outside it." "$brief" \
+    "$id: default ship brief lost ship rule 2"
+  assert_no_grep "The single exception is this task's own" "$plain_brief" \
+    "$id: default ship brief carried the rule 2 carve-out without the flag"
+  assert_no_grep "add those links to its body" "$plain_brief" \
+    "$id: default ship brief carried the visual-evidence pull-request-body clause"
+  assert_no_grep "check-then-repair" "$plain_brief" \
+    "$id: default ship brief carried the visual-evidence link re-check clause"
+  assert_no_grep "appending to the body it already has" "$plain_brief" \
+    "$id: default ship brief carried the visual-evidence append-not-replace clause"
+
+  # Every scaffold still documents the flag through --help.
+  local help
+  help=$("$ROOT/bin/fm-brief.sh" --help)
+  assert_contains "$help" "--visual-evidence adds the visual-evidence contract" \
+    "fm-brief.sh --help does not document --visual-evidence"
+  assert_contains "$help" "The medium follows the surface" \
+    "fm-brief.sh --help still documents the contract as browser-only"
+  assert_contains "$help" "self-ignoring .fm-scratch/ and are never committed to the code branch" \
+    "fm-brief.sh --help does not document where the artifacts are produced"
+  assert_contains "$help" "data/<task-id>/evidence/" \
+    "fm-brief.sh --help does not document where the artifacts are delivered"
+  assert_contains "$help" "single exception to" \
+    "fm-brief.sh --help does not document the rule 2 carve-out the flag adds"
+  assert_contains "$help" "pull request body as soon as it exists, whoever opened it" \
+    "fm-brief.sh --help does not document when the per-claim links reach the pull request body"
+  assert_contains "$help" "data/<task-id>/evidence/<file>, never the absolute path the copy step needs" \
+    "fm-brief.sh --help does not document that the link is home-relative rather than absolute"
+  assert_contains "$help" "appended to an existing body rather than replacing it" \
+    "fm-brief.sh --help does not document that the links append to an existing pull request body"
+  assert_contains "$help" "links are re-checked and re-added before the task reports done" \
+    "fm-brief.sh --help does not document that a republished pull request body is repaired"
+  assert_not_contains "$help" "-evidence ref" \
+    "fm-brief.sh --help still documents the withdrawn evidence ref"
+  pass "fm-brief.sh: --visual-evidence emits the full contract and is absent otherwise"
+}
+
+test_visual_evidence_is_ship_only() {
+  local home status
+  home="$TMP_ROOT/visual-evidence-misuse-home"
+  mkdir -p "$home/data"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" visual-scout someproj --scout --visual-evidence >/dev/null 2>&1; status=$?
+  expect_code 1 "$status" "--visual-evidence on a scout brief must fail"
+  assert_absent "$home/data/visual-scout/brief.md" "rejected scout --visual-evidence still wrote a brief"
+
+  FM_HOME="$home" FM_SECONDMATE_CHARTER=ops \
+    "$ROOT/bin/fm-brief.sh" visual-mate --secondmate --no-projects --visual-evidence >/dev/null 2>&1; status=$?
+  expect_code 1 "$status" "--visual-evidence on a secondmate charter must fail"
+  assert_absent "$home/data/visual-mate/brief.md" "rejected secondmate --visual-evidence still wrote a brief"
+  pass "fm-brief.sh: --visual-evidence is ship-only and rejects misuse without writing a brief"
+}
+
 test_secondmate_no_projects_charter() {
   local home brief status
   home="$TMP_ROOT/no-projects-home"
@@ -643,6 +871,8 @@ test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout
 test_herdr_lab_contract_applies_to_scouts_but_not_secondmates
+test_visual_evidence_contract_is_opt_in_and_complete
+test_visual_evidence_is_ship_only
 test_secondmate_no_projects_charter
 test_secondmate_marked_request_reporting_contract
 test_secondmate_directory_paths_are_absolute_and_output_is_stable
