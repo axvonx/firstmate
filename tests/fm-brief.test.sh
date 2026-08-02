@@ -454,6 +454,12 @@ test_visual_evidence_contract_is_opt_in_and_complete() {
       "$id: visual-evidence contract gave no owner or timing for a pull request body opened for the worker"
     assert_grep "when you open it yourself, write them into the body you author; when there is no pull request, name this directory in the hand-back you return" "$brief" \
       "$id: visual-evidence contract left the self-opened and no-pull-request cases unstated"
+    # A body that already exists may carry a signature or section a required check
+    # greps for, so the edit is an append and never a replacement.
+    assert_grep "appending to the body it already has and preserving every line of it" "$brief" \
+      "$id: visual-evidence contract let the worker replace a pull request body instead of appending to it"
+    assert_grep "a project can require a signature or a section in that body" "$brief" \
+      "$id: visual-evidence contract gave no reason a replaced body fails a required check"
     # A rerun republishes a pipeline-owned body, so the links are verified again
     # at the done gate rather than written once and assumed to survive.
     assert_grep "Treat that as check-then-repair rather than a one-shot edit" "$brief" \
@@ -540,6 +546,8 @@ test_visual_evidence_contract_is_opt_in_and_complete() {
     "$id: default ship brief carried the visual-evidence pull-request-body clause"
   assert_no_grep "check-then-repair" "$plain_brief" \
     "$id: default ship brief carried the visual-evidence link re-check clause"
+  assert_no_grep "appending to the body it already has" "$plain_brief" \
+    "$id: default ship brief carried the visual-evidence append-not-replace clause"
 
   # Every scaffold still documents the flag through --help.
   local help
@@ -558,6 +566,8 @@ test_visual_evidence_contract_is_opt_in_and_complete() {
     "fm-brief.sh --help does not document when the per-claim links reach the pull request body"
   assert_contains "$help" "data/<task-id>/evidence/<file>, never the absolute path the copy step needs" \
     "fm-brief.sh --help does not document that the link is home-relative rather than absolute"
+  assert_contains "$help" "appended to an existing body rather than replacing it" \
+    "fm-brief.sh --help does not document that the links append to an existing pull request body"
   assert_contains "$help" "links are re-checked and re-added before the task reports done" \
     "fm-brief.sh --help does not document that a republished pull request body is repaired"
   assert_not_contains "$help" "-evidence ref" \
