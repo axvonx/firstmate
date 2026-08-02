@@ -85,6 +85,7 @@ Firstmate deletes a task's local branch at cleanup and prunes a local branch onc
 A `local-only` project has no forge step and skips this.
 The script's header owns its exact outcomes; treat a `BRANCH_CLEANUP_BLOCKED:` line as an actionable diagnostic rather than a failed add, because a repository the captain's account cannot administer, such as a read-only upstream reached through a fork, is a normal case.
 Relay that blocker with the concrete reason, then continue the add.
+Relay each `BRANCH_CLEANUP_INFO:` advisory as well, because an advisory names posture the armed setting does not cover rather than a completed no-action fact.
 Enabling squash-only merges is a stronger change than branch cleanup, so the script reports a repository's other merge methods and never changes them; propose that separately and obtain the captain's explicit decision before touching merge methods.
 
 Re-run this step by hand when the captain wants an already-added project brought up to the current initialization contract; existing projects are otherwise unaffected.
