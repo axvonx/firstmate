@@ -76,7 +76,7 @@ Counts below are as of this commit; durations are the per-script measurements fr
 The 577 s / 592 s figures are the sums of the 45 rows in the per-script table below (576.5 s and 592.3 s exactly).
 26 of the 71 residual scripts are not in that table (12 in half 1, 14 in half 2), and they break down as:
 
-- **25 measured, ~5.4 s in total across both halves.** The 2026-08-02 artifact timed them; they are the sub-second tail, and the artifact's lane total of 1174 s minus the 1168.8 s of listed rows leaves 5.2 s for them. They are excluded from the 577/592 sums, so each half's true cost is a couple of seconds higher.
+- **25 measured, ~5 s in total across both halves.** The 2026-08-02 artifact timed them; they are the sub-second tail, and subtracting the ~1169 s of listed rows from the artifact's 1174 s lane total leaves the same ~5 s. They are excluded from the 577/592 sums, so each half's true cost is a couple of seconds higher.
 - **1 unmeasured.** `tests/fm-ci-run-serial-lane.test.sh`, added by this change, in half 1. The artifact covered 70 scripts and the residual is now 71.
 
 So the uncertainty in the split is one new script plus ~5 s of known sub-second work - not 26 scripts of unknown cost.
@@ -109,7 +109,7 @@ Provenance, so a reader knows which figures were checked rather than carried for
 | counts 32 / 39 / 71, unlisted 12 / 14 | counted from `--list --lane portable-serial{,-1,-2}` on this commit |
 | 576.5 s / 592.3 s per-half sums | summed from the PR1 column of this table |
 | trip-day arithmetic and 2026-08-15 | derived from those sums, shown inline above |
-| PR1 / PR2 per-script durations, ~5.4 s tail, 1174 s / 1185 s lane totals, growth rate | carried from the 2026-08-02 CI artifact, not re-measured here |
+| PR1 / PR2 per-script durations, ~5 s tail, 1174 s / 1185 s lane totals, growth rate | carried from the 2026-08-02 CI artifact, not re-measured here |
 
 | # | script | PR1 | PR2 | half |
 |--:|---|--:|--:|:--:|
