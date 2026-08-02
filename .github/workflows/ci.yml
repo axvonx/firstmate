@@ -110,9 +110,16 @@ jobs:
   # migration), and two jobs are two hosts. Each half still runs strictly
   # serially, so nothing races that did not race before. Composition owner:
   # bin/fm-test-run.sh (docs/fm-test-portable-shards.md).
-  tests-portable-serial-1:
-    name: Behavior portable serial 1
+  tests-portable-serial:
+    name: Behavior portable serial ${{ matrix.half }}
     runs-on: ubuntu-latest
+    strategy:
+      # One setup, two halves: duplicating these steps is how the two halves
+      # silently drift apart. fail-fast off because each half is an independent
+      # result - one failing is no reason to lose the other's timing artifact.
+      fail-fast: false
+      matrix:
+        half: [1, 2]
     # Measured half is ~10 min wall. Cap is a hang tripwire with roughly 50%
     # headroom, not the expected healthy end of the lane. FM_SERIAL_BUDGET_SECONDS
     # below must stay under it so an overrun is a self-describing step failure
@@ -142,56 +149,18 @@ jobs:
           set -eu
           npm install -g tasks-axi
           tasks-axi --version
-      - name: Run portable serial half 1
+      - name: Run portable serial half ${{ matrix.half }}
         run: |
           set -eu
-          bin/fm-ci-run-serial-lane.sh portable-serial-1
-      - name: Upload portable serial 1 timing artifact
+          bin/fm-ci-run-serial-lane.sh "portable-serial-$HALF"
+        env:
+          HALF: ${{ matrix.half }}
+      - name: Upload portable serial ${{ matrix.half }} timing artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: fm-test-timing-portable-serial-1
-          path: ${{ runner.temp }}/fm-test/fm-test-timing-portable-serial-1.json
-          if-no-files-found: warn
-
-  tests-portable-serial-2:
-    name: Behavior portable serial 2
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    env:
-      FM_SERIAL_BUDGET_SECONDS: 780
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-      - name: Install pinned ShellCheck
-        run: |
-          set -eu
-          bin/fm-install-shellcheck.sh "$RUNNER_TEMP/bin"
-          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
-      - name: Require tmux for e2e tests
-        run: |
-          set -eu
-          command -v tmux >/dev/null || {
-            echo "::error::tmux is required for real afk injection e2e coverage"
-            exit 1
-          }
-          tmux -V
-      - name: Install tasks-axi for backlog-handoff delegation
-        run: |
-          set -eu
-          npm install -g tasks-axi
-          tasks-axi --version
-      - name: Run portable serial half 2
-        run: |
-          set -eu
-          bin/fm-ci-run-serial-lane.sh portable-serial-2
-      - name: Upload portable serial 2 timing artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: fm-test-timing-portable-serial-2
-          path: ${{ runner.temp }}/fm-test/fm-test-timing-portable-serial-2.json
+          name: fm-test-timing-portable-serial-${{ matrix.half }}
+          path: ${{ runner.temp }}/fm-test/fm-test-timing-portable-serial-${{ matrix.half }}.json
           if-no-files-found: warn
 
   # Required real-Herdr lane: pinned install, serial real-herdr-gated family,
@@ -319,8 +288,7 @@ jobs:
     needs:
       - tests-portable-parallel-1
       - tests-portable-parallel-2
-      - tests-portable-serial-1
-      - tests-portable-serial-2
+      - tests-portable-serial
       - tests-herdr
     if: always()
     steps:

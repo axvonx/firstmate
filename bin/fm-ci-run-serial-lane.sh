@@ -20,7 +20,8 @@
 #   FM_SERIAL_BUDGET_SECONDS  hard bound for the suite, in seconds (default 780).
 #                             Keep it below the job's timeout-minutes so this
 #                             bound, not the job cancellation, is what fires.
-#   RUNNER_TEMP               CI scratch directory (default: a local ./.fm-ci-tmp)
+#   RUNNER_TEMP               CI scratch directory (default: a local ./.fm-ci-tmp,
+#                             which .gitignore keeps out of `git status`)
 #
 # Exit status:
 #   0    the lane passed
@@ -61,20 +62,44 @@ rc=0
 timeout --kill-after=30s "$BUDGET" \
   bin/fm-test-run.sh --lane "$LANE" --json "$JSON_PATH" || rc=$?
 
+# Failures recorded in the flushed artifact before the stop, or "unknown" when
+# no readable artifact landed. The annotation must never claim "no assertion
+# failed" on a run where assertions DID fail: that is a false statement in the
+# surface someone reads under time pressure.
+failed_before_stop() {
+  [ -s "$JSON_PATH" ] || { printf 'unknown\n'; return 0; }
+  command -v python3 >/dev/null 2>&1 || { printf 'unknown\n'; return 0; }
+  python3 - "$JSON_PATH" <<'PY' 2>/dev/null || printf 'unknown\n'
+import json, sys
+try:
+    doc = json.load(open(sys.argv[1], encoding="utf-8"))
+    print(int((doc.get("summary") or {}).get("failed")))
+except Exception:
+    print("unknown")
+PY
+}
+
 if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
   if [ "$BUDGET" -ge 60 ]; then
     budget_text="$((BUDGET / 60))m"
   else
     budget_text="${BUDGET}s"
   fi
+  failed=$(failed_before_stop)
+  case "$failed" in
+    0) verdict='No assertion failed in the scripts that completed before the stop.' ;;
+    unknown) verdict='No timing artifact was readable, so whether any assertion failed before the stop is UNKNOWN - read the step log.' ;;
+    *) verdict="WARNING: $failed script(s) had ALREADY FAILED before the stop, so this run carries real test failures as well - fix those too." ;;
+  esac
   printf '::error title=Serial lane %s exceeded its time budget::' "$LANE"
   printf 'The suite ran past its %s budget and was stopped. ' "$budget_text"
-  printf 'This is a TIME BUDGET OVERRUN, not a failing test. '
-  printf 'No assertion failed. Download the %s timing artifact for the ' "fm-test-timing-$LANE"
+  printf 'The step failure itself is a TIME BUDGET OVERRUN, not a test result. '
+  printf '%s ' "$verdict"
+  printf 'Download the %s timing artifact for the ' "fm-test-timing-$LANE"
   printf 'per-script durations measured before the stop, then rebalance the '
   printf 'serial halves in bin/fm-test-run.sh or raise the budget deliberately.\n'
-  printf 'fm-ci-run-serial-lane: lane %s exceeded %ss; treat as a budget overrun, not a test failure\n' \
-    "$LANE" "$BUDGET" >&2
+  printf 'fm-ci-run-serial-lane: lane %s exceeded %ss (failures before stop: %s)\n' \
+    "$LANE" "$BUDGET" "$failed" >&2
   exit 1
 fi
 

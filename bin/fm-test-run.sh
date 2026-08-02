@@ -247,30 +247,60 @@ EOF
 # it. This buys wall clock without relaxing the isolation contract that keeps
 # these scripts out of the proven-isolated parallel shards.
 #
-# Balance is a pinned heavy list plus an automatic remainder, not a duration
-# table: these five measured heavyweights carry half the lane on their own
-# (582s against 592s on the 2026-08-02 CI artifact, within 1% of the best
-# possible two-way split), and every other script - including every newly added
-# one - falls into serial-2 automatically. A stale balance only skews wall
-# clock; it can never drop a script, because the union is computed from the
-# residual itself. Rebalance by moving a name across this list when the timing
-# artifact shows the halves drifting apart.
-list_portable_serial_heavy() {
+# Balance is a pinned assignment table plus a stable hash for everything else.
+# The pinned table is longest-processing-time over the measured heavyweights of
+# the 2026-08-02 CI artifact, which carry 1043s of the lane's 1174s; the ~131s of
+# small scripts below them are assigned by a CRC of the basename. Measured split
+# with this table: half 1 ~577s over 32 scripts, half 2 ~592s over 39 scripts.
+# The hash is the load-bearing part: the lane grows by ~1.4 scripts a
+# day and an unpinned script would otherwise always land in the same half, so
+# the half that absorbs growth would drift into its time budget on its own. A
+# hash splits new scripts across BOTH halves without anyone maintaining a
+# duration table.
+#
+# A stale balance only skews wall clock; it can never drop a script, because
+# both halves are computed from the same residual and --check-coverage proves
+# they partition it. Rebalance by moving a name between columns here (or by
+# pinning a script that has grown heavy) when the timing artifact shows the
+# halves drifting apart.
+list_portable_serial_pinned() {
   cat <<'EOF'
-tests/fm-pr-check-security.test.sh
-tests/fm-watch-triage.test.sh
-tests/fm-watcher-lock.test.sh
-tests/fm-secondmate-harness.test.sh
-tests/fm-bearings-snapshot.test.sh
+1	tests/fm-pr-check-security.test.sh
+1	tests/fm-secondmate-harness.test.sh
+1	tests/fm-procevent.test.sh
+1	tests/fm-vendor-auth-probe.test.sh
+1	tests/fm-spawn-dispatch-profile.test.sh
+1	tests/fm-wake-queue.test.sh
+1	tests/fm-public-followup.test.sh
+1	tests/fm-pi-watch-extension.test.sh
+1	tests/fm-backend.test.sh
+1	tests/fm-kimi-harness.test.sh
+2	tests/fm-watch-triage.test.sh
+2	tests/fm-watcher-lock.test.sh
+2	tests/fm-bearings-snapshot.test.sh
+2	tests/fm-claude-stop-autoarm.test.sh
+2	tests/fm-session-start.test.sh
+2	tests/fm-afk-inject-e2e.test.sh
+2	tests/fm-secondmate-safety.test.sh
+2	tests/fm-teardown.test.sh
+2	tests/fm-bootstrap.test.sh
+2	tests/fm-daemon.test.sh
+2	tests/fm-fleet-sync.test.sh
 EOF
 }
 
-is_portable_serial_heavy() {
-  local want=$1 s
-  while IFS= read -r s; do
-    [ "$s" = "$want" ] && return 0
-  done < <(list_portable_serial_heavy)
-  return 1
+# Which CI half a serial script belongs to. Pinned first, then a CRC of the
+# basename so unpinned scripts distribute deterministically across both halves.
+portable_serial_half_for() {
+  local want=$1 half path sum rest
+  while IFS=$'\t' read -r half path; do
+    [ "$path" = "$want" ] || continue
+    printf '%s\n' "$half"
+    return 0
+  done < <(list_portable_serial_pinned)
+  read -r sum rest < <(printf '%s' "${want##*/}" | cksum)
+  : "$rest"
+  printf '%s\n' "$((sum % 2 + 1))"
 }
 
 # Single owner of the serial residual: everything in the complete suite that is
@@ -381,7 +411,7 @@ select_proven_isolated() {
 }
 
 select_lane() {
-  local want=$1 s base fam found=0
+  local want=$1 s base fam half found=0
   case "$want" in
     portable-parallel-1)
       while IFS= read -r s; do
@@ -404,18 +434,11 @@ select_lane() {
         found=1
       done < <(list_portable_serial_all)
       ;;
-    portable-serial-1)
+    portable-serial-1|portable-serial-2)
+      half=${want##*-}
       while IFS= read -r s; do
         [ -n "$s" ] || continue
-        is_portable_serial_heavy "$s" || continue
-        add_script "$s"
-        found=1
-      done < <(list_portable_serial_all)
-      ;;
-    portable-serial-2)
-      while IFS= read -r s; do
-        [ -n "$s" ] || continue
-        is_portable_serial_heavy "$s" && continue
+        [ "$(portable_serial_half_for "$s")" = "$half" ] || continue
         add_script "$s"
         found=1
       done < <(list_portable_serial_all)
@@ -560,17 +583,25 @@ failed = 0
 skipped = 0
 total = 0
 wall_ms = 0
+interrupted_lanes = []
 for path in inputs:
     doc = json.loads(path.read_text(encoding="utf-8"))
     summary = doc.get("summary") or {}
+    # An interrupted lane contributes a TRUNCATED total/duration and only the
+    # scripts that finished before the stop. Carrying the flag through is what
+    # keeps a reader from mistaking a budget-killed half for a full measurement.
+    lane_interrupted = bool(doc.get("interrupted"))
     lane = {
         "path": str(path),
         "run_id": doc.get("run_id"),
         "selection": doc.get("selection"),
         "started_at": doc.get("started_at"),
         "finished_at": doc.get("finished_at"),
+        "interrupted": lane_interrupted,
         "summary": summary,
     }
+    if lane_interrupted:
+        interrupted_lanes.append(doc.get("selection") or str(path))
     lanes.append(lane)
     total += int(summary.get("total") or 0)
     failed += int(summary.get("failed") or 0)
@@ -586,19 +617,24 @@ all_scripts.sort(key=lambda s: (-int(s.get("duration_ms") or 0), s.get("path") o
 agg = {
     "kind": "aggregate",
     "lanes": lanes,
+    "interrupted": bool(interrupted_lanes),
+    "interrupted_lanes": sorted(interrupted_lanes),
     "summary": {
         "lanes": len(lanes),
         "total": total,
         "failed": failed,
         "skipped_gate": skipped,
         "critical_path_duration_ms": wall_ms,
+        "interrupted": bool(interrupted_lanes),
     },
     "scripts": all_scripts,
     "slowest": all_scripts[:15],
 }
 out.parent.mkdir(parents=True, exist_ok=True)
 out.write_text(json.dumps(agg, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-print(f"FM_TEST_AGGREGATE lanes={len(lanes)} total={total} failed={failed} skipped_gate={skipped} critical_path_duration_ms={wall_ms}")
+print(f"FM_TEST_AGGREGATE lanes={len(lanes)} total={total} failed={failed} skipped_gate={skipped} critical_path_duration_ms={wall_ms} interrupted={str(bool(interrupted_lanes)).lower()}")
+if interrupted_lanes:
+    print("::warning::aggregate includes interrupted lane(s): " + ", ".join(sorted(interrupted_lanes)))
 PY
 }
 

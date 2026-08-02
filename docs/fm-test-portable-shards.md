@@ -59,15 +59,24 @@ Two CI jobs are two hosts, so that contention does not apply across them.
 CI therefore runs `portable-serial-1` and `portable-serial-2` on separate runners, each still strictly serial internally, which halves the lane's wall clock without relaxing the isolation contract that keeps these scripts out of the parallel shards.
 Running `--lane portable-serial` locally still executes the whole remainder on one machine.
 
-The split is a pinned heavy list in `list_portable_serial_heavy` plus an automatic remainder.
-Five scripts carry half the lane, so every other script - including every newly added one - lands in `portable-serial-2` without maintenance.
-A stale balance only skews wall clock; it cannot drop a script, because both halves are computed from the same residual.
+The split is a pinned assignment table in `list_portable_serial_pinned` plus a stable CRC of the basename for everything not pinned.
+The pinned table is longest-processing-time over the measured heavyweights, which carry ~1043 s of the lane's ~1174 s; the hash spreads the remaining small scripts.
 
-| Lane | Script count | Measured duration (2026-08-02 CI) |
+The hash is the part that matters over time.
+The lane grows by roughly 1.4 scripts and 30 s per day, and a rule that sends every unpinned script to the same half would walk that half into its time budget within about a week - a reset clock, not a fix.
+Hashing the basename puts new scripts in both halves, so growth is shared and the halves stay comparable without anyone maintaining a duration table.
+A stale balance only skews wall clock; it cannot drop a script, because both halves are computed from the same residual and the coverage guard proves they partition it.
+
+Counts below are as of this commit; durations are the per-script measurements from the 2026-08-02 CI artifact, applied to the current assignment.
+
+| Lane | Script count | Measured duration |
 |---|---:|---:|
-| `portable-serial-1` | 5 | ~582 s |
-| `portable-serial-2` | 65 | ~592 s |
-| imbalance | | ~10 s |
+| `portable-serial-1` | 32 | ~577 s |
+| `portable-serial-2` | 39 | ~592 s |
+| imbalance | | ~16 s (1.3%) |
+
+Scripts added since that artifact are unmeasured and are not counted in the durations.
+Re-derive both columns from a recent `fm-test-timing-portable-serial-*` artifact when rebalancing.
 
 ### Time budget
 

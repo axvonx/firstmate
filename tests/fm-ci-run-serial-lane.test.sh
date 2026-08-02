@@ -84,9 +84,60 @@ exit 0'
   expect_code 1 "$RUN_RC" "an overrun must fail the step (exit 1), not pass"
   assert_contains "$RUN_OUT" "::error" "an overrun must emit a GitHub error annotation"
   assert_contains "$RUN_OUT" "exceeded its time budget" "annotation must name the overrun"
-  assert_contains "$RUN_OUT" "not a failing test" "annotation must separate itself from a test failure"
+  assert_contains "$RUN_OUT" "TIME BUDGET OVERRUN" "annotation must separate itself from a test failure"
   assert_contains "$RUN_OUT" "portable-serial-1" "annotation must name the lane"
   pass "a time-budget overrun is annotated as an overrun, not as a failing test"
+}
+
+# The overrun annotation is read under time pressure, so it must describe the
+# real result. Claiming "no assertion failed" on a run where assertions DID fail
+# would send the reader looking for a balance problem instead of a broken test.
+stub_that_flushes_then_hangs() {  # <failed-count>
+  cat <<STUB
+#!/usr/bin/env bash
+json=""
+while [ "\$#" -gt 0 ]; do
+  case "\$1" in
+    --json) json=\$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+mkdir -p "\$(dirname "\$json")"
+printf '%s\n' '{"interrupted": true, "summary": {"total": 3, "failed": $1, "skipped_gate": 0, "duration_ms": 1000}, "scripts": []}' >"\$json"
+sleep 30
+STUB
+}
+
+test_overrun_without_failures_says_no_assertion_failed() {
+  run_wrapper overrun-clean portable-serial-1 1 "$(stub_that_flushes_then_hangs 0)"
+  expect_code 1 "$RUN_RC" "an overrun must fail the step"
+  assert_contains "$RUN_OUT" "No assertion failed" \
+    "with zero recorded failures the annotation may say no assertion failed"
+  pass "an overrun with no recorded failures says so"
+}
+
+test_overrun_with_failures_does_not_claim_no_assertion_failed() {
+  run_wrapper overrun-dirty portable-serial-2 1 "$(stub_that_flushes_then_hangs 2)"
+  expect_code 1 "$RUN_RC" "an overrun must fail the step"
+  case "$RUN_OUT" in
+    *"No assertion failed"*)
+      fail "annotation must not claim no assertion failed when 2 scripts failed: $RUN_OUT" ;;
+  esac
+  assert_contains "$RUN_OUT" "ALREADY FAILED" "annotation must surface the recorded failures"
+  assert_contains "$RUN_OUT" "2 script" "annotation must count the recorded failures"
+  pass "an overrun with recorded failures reports them instead of denying them"
+}
+
+test_overrun_without_artifact_reports_unknown() {
+  run_wrapper overrun-noartifact portable-serial-1 1 '#!/usr/bin/env bash
+sleep 30'
+  expect_code 1 "$RUN_RC" "an overrun must fail the step"
+  case "$RUN_OUT" in
+    *"No assertion failed"*)
+      fail "annotation must not assert a clean result with no artifact to read: $RUN_OUT" ;;
+  esac
+  assert_contains "$RUN_OUT" "UNKNOWN" "annotation must admit it could not read the artifact"
+  pass "an overrun with no readable artifact reports the failure count as unknown"
 }
 
 test_unsupported_lane_is_refused
@@ -94,3 +145,6 @@ test_malformed_budget_is_refused
 test_passing_lane_passes_through
 test_real_test_failure_is_not_relabelled_as_a_timeout
 test_budget_overrun_is_annotated_as_a_timeout
+test_overrun_without_failures_says_no_assertion_failed
+test_overrun_with_failures_does_not_claim_no_assertion_failed
+test_overrun_without_artifact_reports_unknown
