@@ -11,7 +11,8 @@
 #   (e) an edit that silently does not take is reported as blocked
 #   (f) other allowed merge methods are reported, never changed
 #   (g) usage and precondition errors exit 2, a nested directory included
-#   (h) a fork clone arms its own repository and names the parent it leaves alone
+#   (h) a fork clone arms its own repository, names the parent it leaves alone,
+#       and says which head branches nothing in the chain deletes
 #   (i) a gh warning on a zero exit is never parsed as repository data
 set -u
 
@@ -211,7 +212,11 @@ test_fork_clone_arms_itself_and_reports_the_parent() {
     "the fork shape must be reported so the parent is not mistaken for armed"
   assert_contains "$out" 'governed by the setting on an-org/a-repo, which this script does not change' \
     "the advisory must say who governs a pull request merged into the parent"
-  pass "a fork clone arms its own repository and reports the parent it leaves alone"
+  assert_contains "$out" 'a head branch pushed to a-user/a-repo is deleted by neither that setting nor the gh --delete-branch flag' \
+    "the relayed line must name the head branches that nothing deletes"
+  assert_contains "$out" 'removed by hand until separate work lands' \
+    "the relayed line must say who is left holding that cleanup"
+  pass "a fork clone arms its own repository and reports the parent and the uncovered head branches"
 }
 
 test_gh_warning_on_success_is_not_parsed_as_data() {

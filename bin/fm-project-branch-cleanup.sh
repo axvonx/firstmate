@@ -13,14 +13,10 @@
 # Usage: fm-project-branch-cleanup.sh <project-path>
 #
 # The setting is armed on the repository gh resolves for the clone, and only on
-# that one. When the clone is a fork, a pull request merged into the fork's
-# parent is governed by the setting on the parent instead; that shape is reported
-# and the parent is never edited, because plenty of parents cannot be
-# administered by the account that cloned them.
-#
-# GitHub deletes only a head branch that lives in the repository the pull request
-# merged into, so a head branch pushed to a fork is not cleaned up by this chain
-# at all. That gap is left to separate work.
+# that one. When the clone is a fork, the parent is never edited, because plenty
+# of parents cannot be administered by the account that cloned them; the fork
+# advisory below carries what that leaves uncovered, so an operator reading only
+# the relayed lines still learns it.
 #
 # Exactly one result line is printed to stdout:
 #   BRANCH_CLEANUP: already on for <owner/repo>
@@ -30,7 +26,9 @@
 # rebase merges, one advisory line each:
 #   BRANCH_CLEANUP_INFO: <owner/repo> is a fork of <owner/repo>; a pull request
 #   merged into the parent is governed by the setting on the parent, which this
-#   script does not change
+#   script does not change; a head branch pushed to the fork is deleted by
+#   neither that setting nor the gh --delete-branch flag, so it has to be removed
+#   by hand until separate work lands
 #   BRANCH_CLEANUP_INFO: <owner/repo> also allows <methods>; squash-only merges
 #   are a separate decision and are not changed here
 #
@@ -132,8 +130,8 @@ report_fork_parent() {
     ?*/?*) ;;
     *) return 0 ;;
   esac
-  printf 'BRANCH_CLEANUP_INFO: %s is a fork of %s; a pull request merged into %s is governed by the setting on %s, which this script does not change\n' \
-    "$REPO" "$PARENT" "$PARENT" "$PARENT"
+  printf 'BRANCH_CLEANUP_INFO: %s is a fork of %s; a pull request merged into %s is governed by the setting on %s, which this script does not change; a head branch pushed to %s is deleted by neither that setting nor the gh --delete-branch flag, so it has to be removed by hand until separate work lands\n' \
+    "$REPO" "$PARENT" "$PARENT" "$PARENT" "$REPO"
 }
 
 report_merge_methods() {
