@@ -12,12 +12,21 @@
 #
 # Usage: fm-project-branch-cleanup.sh <project-path>
 #
+# The setting is armed on the repository a PR merges INTO - the same repository
+# bin/fm-pr-merge.sh addresses from the PR URL - so the two paths cannot
+# disagree about which repository is a project's forge. When the clone resolves
+# to a fork, that base repository is the fork's parent. GitHub deletes only head
+# branches that live in the base repository, so this setting can never clean up
+# a branch pushed to a fork; the fork shape is reported rather than papered over,
+# and bin/fm-pr-merge.sh asks for its deletion with --delete-branch instead.
+#
 # Exactly one result line is printed to stdout:
 #   BRANCH_CLEANUP: already on for <owner/repo>
 #   BRANCH_CLEANUP: enabled for <owner/repo>
 #   BRANCH_CLEANUP_BLOCKED: <owner/repo|path>: <reason>
-# and, when the repository also allows merge commits or rebase merges, one
-# advisory line:
+# and, when the clone resolves to a fork, or the repository also allows merge
+# commits or rebase merges, one advisory line each:
+#   BRANCH_CLEANUP_INFO: <owner/repo> is a fork of <owner/repo>; ...
 #   BRANCH_CLEANUP_INFO: <owner/repo> also allows <methods>; squash-only merges
 #   are a separate decision and are not changed here
 #
@@ -26,7 +35,7 @@
 # repositories cannot be configured by the account that clones them (a read-only
 # upstream reached through a fork, for example), and that must never fail adding
 # the project. Exit 2 is reserved for a usage or precondition error - a missing
-# argument or a path that is not a Git working tree.
+# argument or a path that is not the root of a Git working tree.
 #
 # This script never changes a repository's allowed merge methods. Turning a
 # repository squash-only is a stronger change than branch cleanup and belongs
@@ -45,8 +54,15 @@ case "$PROJ" in
 esac
 
 [ -d "$PROJ" ] || { echo "error: $PROJ is not a directory" >&2; exit 2; }
-git -C "$PROJ" rev-parse --git-dir >/dev/null 2>&1 \
-  || { echo "error: $PROJ is not a Git working tree" >&2; exit 2; }
+# The path must be a clone's own root, not merely somewhere inside a Git working
+# tree. Projects live under the firstmate checkout, so a half-made or empty
+# projects/<name> would otherwise satisfy a plain rev-parse and send every
+# lookup below to the fleet repository's own remotes.
+PROJ_TOP=$(git -C "$PROJ" rev-parse --show-toplevel 2>/dev/null) || PROJ_TOP=
+PROJ_ABS=$(cd "$PROJ" && pwd -P) || PROJ_ABS=
+[ -n "$PROJ_TOP" ] && [ -n "$PROJ_ABS" ] \
+  && [ "$(cd "$PROJ_TOP" 2>/dev/null && pwd -P)" = "$PROJ_ABS" ] \
+  || { echo "error: $PROJ is not the root of a Git working tree" >&2; exit 2; }
 
 blocked() {
   printf 'BRANCH_CLEANUP_BLOCKED: %s: %s\n' "$1" "$2"
@@ -68,27 +84,73 @@ gh_run() {
 command -v gh >/dev/null 2>&1 \
   || blocked "$PROJ" "the GitHub CLI (gh) is not installed"
 
-# One read of the fields this script decides on. gh resolves the repository from
-# the clone's own remotes, so a non-GitHub or missing remote fails here with the
-# CLI's own reason instead of being guessed at.
-VIEW_FIELDS=nameWithOwner,deleteBranchOnMerge,mergeCommitAllowed,rebaseMergeAllowed
-VIEW_QUERY='[.nameWithOwner, (.deleteBranchOnMerge|tostring), (.mergeCommitAllowed|tostring), (.rebaseMergeAllowed|tostring)] | @tsv'
+# gh's stdout is parsed as data, so its stderr is kept in a file of its own: a
+# warning printed alongside a zero exit must never be read back as a repository
+# name, and a failure must still carry the CLI's own reason.
+GH_ERR=$(mktemp "${TMPDIR:-/tmp}/fm-project-branch-cleanup.XXXXXX" 2>/dev/null) \
+  || blocked "$PROJ" "a temporary file for the GitHub CLI's diagnostics could not be created"
+trap 'rm -f "$GH_ERR"' EXIT
+
+gh_in_project() {
+  ( cd "$PROJ" && gh_run "$@" ) 2>"$GH_ERR"
+}
+
+gh_error() {
+  first_error_line "$(cat "$GH_ERR" 2>/dev/null || true)"
+}
+
+# One read of the fields this script decides on. With no argument gh resolves
+# the repository from the clone's own remotes, so a non-GitHub or missing remote
+# fails here with the CLI's own reason instead of being guessed at.
+VIEW_FIELDS=nameWithOwner,parent,deleteBranchOnMerge,mergeCommitAllowed,rebaseMergeAllowed
+VIEW_QUERY='[.nameWithOwner, (if .parent then (.parent.owner.login // "") + "/" + (.parent.name // "") else "-" end), (.deleteBranchOnMerge|tostring), (.mergeCommitAllowed|tostring), (.rebaseMergeAllowed|tostring)] | @tsv'
 
 read_settings() {
-  ( cd "$PROJ" && gh_run repo view --json "$VIEW_FIELDS" -q "$VIEW_QUERY" ) 2>&1
+  gh_in_project repo view "$@" --json "$VIEW_FIELDS" -q "$VIEW_QUERY"
+}
+
+# Tab is IFS whitespace, so an empty field would collapse into its neighbour and
+# shift every value after it; the query emits "-" for a repository with no
+# parent rather than an empty field.
+parse_settings() {
+  IFS=$'\t' read -r REPO PARENT ON MERGE_OK REBASE_OK <<EOF
+$1
+EOF
+  return 0
 }
 
 if ! view=$(read_settings); then
-  blocked "$PROJ" "$(first_error_line "$view")"
+  blocked "$PROJ" "$(gh_error)"
 fi
-IFS=$'\t' read -r REPO ON MERGE_OK REBASE_OK <<EOF
-$view
-EOF
+parse_settings "$view"
 [ -n "${REPO:-}" ] \
   || blocked "$PROJ" "the GitHub CLI did not report a repository for this clone"
 
-# The advisory is printed for every outcome that identified the repository, so a
-# blocked cleanup still tells the captain what the merge posture is.
+# A clone that resolves to a fork contributes to the fork's parent, so the
+# parent is the repository a PR merges into and the only one whose setting
+# decides the merged branch's fate.
+FORK=
+case "${PARENT:-}" in
+  ?*/?*)
+    FORK=$REPO
+    if ! view=$(read_settings "$PARENT"); then
+      blocked "$PARENT" "$(gh_error)"
+    fi
+    parse_settings "$view"
+    [ -n "${REPO:-}" ] \
+      || blocked "$PARENT" "the GitHub CLI did not report the repository $FORK is a fork of"
+    ;;
+esac
+TARGET=$REPO
+
+# The advisories are printed for every outcome that identified the repository,
+# so a blocked cleanup still tells the captain what the posture is.
+report_fork_shape() {
+  [ -n "$FORK" ] || return 0
+  printf 'BRANCH_CLEANUP_INFO: %s is a fork of %s, so the setting armed on %s never deletes a head branch pushed to the fork; bin/fm-pr-merge.sh passes --delete-branch to ask for its deletion at merge time\n' \
+    "$FORK" "$TARGET" "$TARGET"
+}
+
 report_merge_methods() {
   local methods=
   if [ "${MERGE_OK:-}" = true ]; then
@@ -99,28 +161,27 @@ report_merge_methods() {
   fi
   [ -n "$methods" ] || return 0
   printf 'BRANCH_CLEANUP_INFO: %s also allows %s; squash-only merges are a separate decision and are not changed here\n' \
-    "$REPO" "$methods"
+    "$TARGET" "$methods"
 }
+report_fork_shape
 report_merge_methods
 
-if [ "$ON" = true ]; then
-  printf 'BRANCH_CLEANUP: already on for %s\n' "$REPO"
+if [ "${ON:-}" = true ]; then
+  printf 'BRANCH_CLEANUP: already on for %s\n' "$TARGET"
   exit 0
 fi
 
-if ! edit=$( ( cd "$PROJ" && gh_run repo edit "$REPO" --delete-branch-on-merge ) 2>&1 ); then
-  blocked "$REPO" "$(first_error_line "$edit")"
+if ! gh_in_project repo edit "$TARGET" --delete-branch-on-merge >/dev/null; then
+  blocked "$TARGET" "$(gh_error)"
 fi
 
 # Verify rather than trust the edit's exit status: the setting is what matters,
 # and a re-read is the only evidence that it took.
-if ! view=$(read_settings); then
-  blocked "$REPO" "the setting could not be confirmed: $(first_error_line "$view")"
+if ! view=$(read_settings "$TARGET"); then
+  blocked "$TARGET" "the setting could not be confirmed: $(gh_error)"
 fi
-IFS=$'\t' read -r _ ON _ _ <<EOF
-$view
-EOF
-[ "$ON" = true ] \
-  || blocked "$REPO" "the setting did not take effect"
+parse_settings "$view"
+[ "${ON:-}" = true ] \
+  || blocked "$TARGET" "the setting did not take effect"
 
-printf 'BRANCH_CLEANUP: enabled for %s\n' "$REPO"
+printf 'BRANCH_CLEANUP: enabled for %s\n' "$TARGET"
