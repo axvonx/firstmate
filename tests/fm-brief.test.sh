@@ -874,12 +874,18 @@ test_browser_teardown_contract() {
   for id in brief-browser-ship brief-browser-scout; do
     brief="$home/data/$id/brief.md"
     assert_present "$brief" "$id: brief was not scaffolded"
-    assert_grep "park the browser with \`chrome-devtools-axi open about:blank\`" "$brief" \
-      "$id: brief must name the concrete park command"
+    assert_grep "park every page you opened with \`chrome-devtools-axi open about:blank\`" "$brief" \
+      "$id: brief must name the concrete park command and cover every page opened"
+    assert_grep "\`open\` navigates only the currently selected page" "$brief" \
+      "$id: brief must say why one park command is not enough"
+    assert_grep "one chrome-devtools-axi session serves every worker on this machine" "$brief" \
+      "$id: brief must state the shared-session consequence"
+    assert_grep "blanks whatever that worker was about to capture" "$brief" \
+      "$id: brief must name what parking someone else's page costs them"
     assert_grep "Do not close or stop the browser" "$brief" \
       "$id: brief must forbid tearing down the shared browser session"
-    assert_grep "every actor shares the default chrome-devtools-axi session" "$brief" \
-      "$id: brief must explain why it stops at parking"
+    assert_no_grep "chrome-devtools-axi stop" "$brief" \
+      "$id: brief must never instruct stopping the shared browser session"
   done
   pass "fm-brief.sh: browser work ends by parking on about:blank, never stopping"
 }

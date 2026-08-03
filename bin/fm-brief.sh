@@ -325,8 +325,9 @@ The report is the only thing that survives, so anything worth keeping must be in
 1. Never push to any remote and never open a PR.
 2. Stay inside this worktree; the only files you may write outside it are the report and the status file below.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
-   When browser work is finished, park the browser with \`chrome-devtools-axi open about:blank\`. An abandoned page keeps rendering at full CPU indefinitely; parked on about:blank it measures 0.0%, so parking captures the entire saving.
-   Do not close or stop the browser, and do not add that later: every actor shares the default chrome-devtools-axi session, so \`stop\` would kill the browsers of the other crew still working. Parking is deliberately the whole instruction.
+   When browser work is finished, park every page you opened with \`chrome-devtools-axi open about:blank\`; \`open\` navigates only the currently selected page, so use \`pages\` and \`selectpage\` to reach each one you opened. An abandoned page keeps rendering at full CPU indefinitely; parked on about:blank it measures 0.0%, so parking captures the entire saving.
+   Park only the pages you opened, because one chrome-devtools-axi session serves every worker on this machine: parking a page you did not open blanks whatever that worker was about to capture.
+   Do not close or stop the browser, and do not add that later: that same shared session means \`stop\` would kill the browsers of the other crew still working. Parking is deliberately the whole instruction.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
@@ -486,8 +487,9 @@ If the top-level path is the primary checkout or not the worktree you were launc
 $RULE1
 $RULE2
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
-   When browser work is finished, park the browser with \`chrome-devtools-axi open about:blank\`. An abandoned page keeps rendering at full CPU indefinitely; parked on about:blank it measures 0.0%, so parking captures the entire saving.
-   Do not close or stop the browser, and do not add that later: every actor shares the default chrome-devtools-axi session, so \`stop\` would kill the browsers of the other crew still working. Parking is deliberately the whole instruction.
+   When browser work is finished, park every page you opened with \`chrome-devtools-axi open about:blank\`; \`open\` navigates only the currently selected page, so use \`pages\` and \`selectpage\` to reach each one you opened. An abandoned page keeps rendering at full CPU indefinitely; parked on about:blank it measures 0.0%, so parking captures the entire saving.
+   Park only the pages you opened, because one chrome-devtools-axi session serves every worker on this machine: parking a page you did not open blanks whatever that worker was about to capture.
+   Do not close or stop the browser, and do not add that later: that same shared session means \`stop\` would kill the browsers of the other crew still working. Parking is deliberately the whole instruction.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
