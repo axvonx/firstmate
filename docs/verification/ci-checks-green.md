@@ -63,6 +63,12 @@ The bound above is narrower than "a crew's claim is never taken at face value", 
 When no run can be attributed at all, and the crew's endpoint is readable with an exact idle verdict, the no-run fallback (script header section 4) reports the status log's last line as-is, so a `done: PR <url> checks green` line does surface as `state: done` with `source: status-log`.
 That happens when the bounded `axi status` call returns nothing, when `no-mistakes` is not on PATH, or when the run has aged out of the runs list.
 
+A fourth trigger matters more than those three, because it is the one that makes the surfaced claim stale by construction: head binding rejects the run.
+A crew reports checks green, then commits or rebases, so its worktree tip advances past the run head, or the tip was rewritten, or the run's `head` field is absent.
+`nm_run_head_matches_worktree` then rejects the `axi status` run, and `nm_coarse_head_matches_worktree` rejects the runs-list row as well, so `HAVE_RUN` stays 0 and the claim surfaces through the fallback.
+The head whose checks the crew was reporting on is no longer the head firstmate is reporting done for.
+`test_historical_same_branch_rewritten_head_not_current`, `test_local_advanced_past_run_head_invalidates`, and `test_missing_run_head_falls_back_to_current_state` pin the fallback firing on that condition.
+
 This is not the defect that was removed above.
 There a run was attributed, so corroboration was available and was skipped; here there is no run to corroborate against, because none was found.
 The same fallback is how pre-validation crews, direct-PR crews, scouts, and secondmates report completion at all, so suppressing it would mean a crew whose run aged out, or whose bounded status call timed out, could never report a finished PR.
@@ -99,5 +105,28 @@ This misread is upstream in no-mistakes' own ci step, not in how firstmate queri
 The ci step emits the bare aggregate `all CI checks passed - still monitoring until merged or closed` and never names the checks it saw, so the log firstmate reads carries no evidence that distinguishes a complete required set from whichever checks happened to exist.
 Requiring the expected job by name is therefore not implementable from this log, and firstmate does not work around it at this layer.
 
-This limitation reaches firstmate through both affirmative readings named above, and the terminal `outcome: checks-passed` is where it usually lands: by the time the run is terminal the ci step has already emitted that bare pass, so the outcome inherits it.
-An audit of false-green vectors has to cover both, not the ci-log marker alone.
+This limitation reaches firstmate through both affirmative readings named above, so an audit of false-green vectors has to cover both, not the ci-log marker alone.
+
+Frequency does not rank the two the way it might appear.
+For a repo where merge is left to the captain, the terminal `outcome: checks-passed` is the rare path, because the top-level status and outcome stay running for the entire CI-monitor phase; the comment above `nm_ci_checks_state` owns that root cause, and it is why the ci-log reading exists at all.
+A read-only query of the run store on 2026-08-03 found no run of the shape that renders that outcome, meaning one that completed while its pull request was still open:
+
+```sh
+sqlite3 "file:$HOME/.no-mistakes/state.sqlite?mode=ro" "select status, pr_state, count(*), sum(ci_ready_at is not null) from runs group by 1,2"
+```
+
+Observed output:
+
+```
+cancelled|none|3|0
+cancelled|open|13|10
+completed|closed|1|1
+completed|merged|36|28
+completed|none|1|0
+failed|none|10|0
+running|none|5|0
+```
+
+There is no `completed|open` row, while the census above counts the pass marker 41 times as of its snapshot and 52 when this query ran.
+How the CLI derives the `outcome` field is not visible from this layer, so this is evidence that the terminal path is rare on this machine, not proof that `checks-passed` never renders.
+Both counts are a point-in-time snapshot of this machine, so a future reader should expect drift rather than read changed numbers as a regression.
