@@ -860,6 +860,36 @@ test_scout_and_secondmate_scaffold() {
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
 
+# Ship and scout briefs both tell the worker to park the browser, and only to park it.
+test_browser_teardown_contract() {
+  local home brief
+  home="$TMP_ROOT/browser-teardown-home"
+  write_registry "$home"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-browser-ship no-registry-proj >/dev/null 2>&1 \
+    || fail "fm-brief.sh ship scaffold exited non-zero"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-browser-scout no-registry-proj --scout >/dev/null 2>&1 \
+    || fail "fm-brief.sh scout scaffold exited non-zero"
+
+  for id in brief-browser-ship brief-browser-scout; do
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$id: brief was not scaffolded"
+    assert_grep "park every page you opened with \`chrome-devtools-axi open about:blank\`" "$brief" \
+      "$id: brief must name the concrete park command and cover every page opened"
+    assert_grep "\`open\` navigates only the currently selected page" "$brief" \
+      "$id: brief must say why one park command is not enough"
+    assert_grep "one chrome-devtools-axi session serves every worker on this machine" "$brief" \
+      "$id: brief must state the shared-session consequence"
+    assert_grep "blanks whatever that worker was about to capture" "$brief" \
+      "$id: brief must name what parking someone else's page costs them"
+    assert_grep "Do not close or stop the browser" "$brief" \
+      "$id: brief must forbid tearing down the shared browser session"
+    assert_no_grep "chrome-devtools-axi stop" "$brief" \
+      "$id: brief must never instruct stopping the shared browser session"
+  done
+  pass "fm-brief.sh: browser work ends by parking on about:blank, never stopping"
+}
+
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
@@ -879,3 +909,4 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
+test_browser_teardown_contract
