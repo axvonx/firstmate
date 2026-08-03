@@ -298,20 +298,27 @@ jobs:
         with:
           pattern: fm-test-timing-*
           path: ${{ runner.temp }}/fm-test-aggregate
-          merge-multiple: true
+          # No merge-multiple: one subdirectory per artifact is what lets the
+          # collector below account for each lane by name. Merging them erases
+          # that identity, and a lane whose JSON sits deeper inside its artifact
+          # then vanishes from a flat glob with no signal.
       - name: Build aggregate timing summary
         run: |
           set -eu
           mkdir -p "$RUNNER_TEMP/fm-test"
-          shopt -s nullglob
-          inputs=("$RUNNER_TEMP"/fm-test-aggregate/fm-test-timing-*.json)
-          if [ "${#inputs[@]}" -eq 0 ]; then
-            echo "::warning::no per-lane timing JSON found to aggregate"
-            exit 0
-          fi
-          bin/fm-test-run.sh --aggregate-json \
+          # Every lane this workflow defines is listed here. The collector fails
+          # if one is missing, contributes no timing JSON, or arrives
+          # unaccounted, so adding a lane above without adding it here is red
+          # rather than a quietly smaller aggregate.
+          bin/fm-test-timing-aggregate.sh \
+            --ignore fm-test-timing-aggregate \
+            "$RUNNER_TEMP/fm-test-aggregate" \
             "$RUNNER_TEMP/fm-test/fm-test-timing-aggregate.json" \
-            "${inputs[@]}"
+            fm-test-timing-portable-parallel-1 \
+            fm-test-timing-portable-parallel-2 \
+            fm-test-timing-portable-serial-1 \
+            fm-test-timing-portable-serial-2 \
+            fm-test-timing-herdr
       - name: Upload aggregate timing artifact
         if: always()
         uses: actions/upload-artifact@v4

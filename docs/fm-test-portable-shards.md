@@ -65,22 +65,22 @@ The pinned table is longest-processing-time over the measured heavyweights, whic
 Hashing the basename puts new scripts in both halves, so growth is shared rather than piling onto one half.
 A stale balance only skews wall clock; it cannot drop a script, because both halves are computed from the same residual and the coverage guard proves they partition it.
 
-The figures below are the 2026-08-02 record: script counts from that day's lane listings, durations from that day's CI timing artifact.
+Durations below are the 2026-08-02 CI timing artifact; script counts are the lane listings as of 2026-08-03.
 `bin/fm-test-run.sh --list --lane portable-serial-1` and `--lane portable-serial-2` print the assignment in force now, and those listings are the only authoritative answer to which half a script runs in.
 
 | Lane | Script count | Measured duration |
 |---|---:|---:|
 | `portable-serial-1` | 32 | ~577 s |
-| `portable-serial-2` | 39 | ~592 s |
+| `portable-serial-2` | 40 | ~592 s |
 | imbalance | | ~16 s (1.3% of the lane) |
 
 The 577 s / 592 s figures are the sums of the 45 rows in the per-script table below (576.5 s and 592.3 s exactly).
-26 of the 71 residual scripts are not in that table (12 in half 1, 14 in half 2), and they break down as:
+27 of the 72 residual scripts are not in that table (12 in half 1, 15 in half 2), and they break down as:
 
 - **25 measured, ~5 s in total across both halves.** The 2026-08-02 artifact timed them; they are the sub-second tail, and subtracting the ~1169 s of listed rows from the artifact's 1174 s lane total leaves the same ~5 s. They are excluded from the 577/592 sums, so each half's true cost is a couple of seconds higher.
-- **1 unmeasured.** `tests/fm-ci-run-serial-lane.test.sh`, added with the split, in half 1. The artifact covered 70 scripts and the residual is now 71.
+- **2 unmeasured.** `tests/fm-ci-run-serial-lane.test.sh`, added with the split, in half 1, and `tests/fm-test-timing-aggregate.test.sh`, added with the timing-aggregate lane guard, in half 2 at ~2 s locally. The artifact covered 70 scripts and the residual is now 72.
 
-So the uncertainty in the split is one new script plus ~5 s of known sub-second work - not 26 scripts of unknown cost.
+So the uncertainty in the split is two new scripts plus ~5 s of known sub-second work - not 27 scripts of unknown cost.
 
 Re-derive the counts and durations from a recent `fm-test-timing-portable-serial-*` artifact when rebalancing.
 
@@ -107,8 +107,8 @@ Provenance of the derived figures above:
 
 | Figure | Source |
 |---|---|
-| counts 32 / 39 / 71, unlisted 12 / 14 | counted from `--list --lane portable-serial{,-1,-2}` on 2026-08-02 |
-| 576.5 s / 592.3 s per-half sums | the PR1 column below, grouped by that day's lane listings |
+| counts 32 / 40 / 72, unlisted 12 / 15 | counted from `--list --lane portable-serial{,-1,-2}` on 2026-08-03 |
+| 576.5 s / 592.3 s per-half sums | the PR1 column below, grouped by the 2026-08-02 lane listings |
 | trip-day arithmetic and 2026-08-15 | derived from those sums, shown inline above |
 | PR1 / PR2 per-script durations, ~5 s tail, 1174 s / 1185 s lane totals, growth rate | read from the 2026-08-02 CI artifact, not re-measured here |
 
@@ -180,8 +180,9 @@ It additionally verifies that `portable-serial-1` and `portable-serial-2` partit
 ## Timing artifacts
 
 Portable shards, each portable serial half, and the Herdr lane upload runner-generated timing JSON.
-`bin/fm-test-run.sh --aggregate-json` creates the combined summary artifact.
-`.github/workflows/ci.yml` owns the exact artifact names and aggregation wiring.
+`bin/fm-test-timing-aggregate.sh` collects every lane's JSON by name from the downloaded artifacts and calls `bin/fm-test-run.sh --aggregate-json` for the combined summary artifact.
+A lane that uploaded nothing, no longer carries a timing JSON, or is not in the accounted lane list fails the aggregate step rather than quietly shrinking the reported lane count, so a lane job that dies before uploading shows a second red check for the one root cause.
+`.github/workflows/ci.yml` owns the exact artifact names, the accounted lane list, and the aggregation wiring, and the collector's header owns its flags and exit codes.
 
 ## Local entry points
 
