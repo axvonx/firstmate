@@ -386,6 +386,138 @@ test_portable_shard_union_and_coverage_guard() {
   pass "portable shard union, disjointness, and coverage guard hold"
 }
 
+test_portable_serial_halves_partition_the_lane() {
+  local serial h1 h2 overlap name
+  serial=$("$RUNNER" --list --lane portable-serial | LC_ALL=C sort)
+  h1=$("$RUNNER" --list --lane portable-serial-1 | LC_ALL=C sort)
+  h2=$("$RUNNER" --list --lane portable-serial-2 | LC_ALL=C sort)
+  [ -n "$h1" ] && [ -n "$h2" ] || fail "both portable serial halves must be non-empty"
+  overlap=$(comm -12 <(printf '%s\n' "$h1") <(printf '%s\n' "$h2") || true)
+  [ -z "$overlap" ] || fail "portable serial halves overlap: $overlap"
+  [ "$(printf '%s\n' "$h1" "$h2" | LC_ALL=C sort -u)" = "$serial" ] \
+    || fail "portable serial halves must union to the portable serial lane"
+  # The measured heavyweights carry most of the lane, so one silently sliding to
+  # the other half would unbalance CI with no coverage guard noticing. Assert the
+  # placement through the lane listings, which are the authoritative answer to
+  # which half a script runs in; never against the runner's own source bytes.
+  for name in tests/fm-pr-check-security.test.sh tests/fm-secondmate-harness.test.sh \
+    tests/fm-procevent.test.sh tests/fm-vendor-auth-probe.test.sh \
+    tests/fm-spawn-dispatch-profile.test.sh; do
+    printf '%s\n' "$h1" | grep -Fqx "$name" \
+      || fail "heavy script must run in portable-serial-1: $name"
+  done
+  for name in tests/fm-watch-triage.test.sh tests/fm-watcher-lock.test.sh \
+    tests/fm-bearings-snapshot.test.sh tests/fm-claude-stop-autoarm.test.sh \
+    tests/fm-session-start.test.sh; do
+    printf '%s\n' "$h2" | grep -Fqx "$name" \
+      || fail "heavy script must run in portable-serial-2: $name"
+  done
+  pass "portable serial halves partition the serial lane and place the heavyweights"
+}
+
+# Growth regression guard: the lane gains scripts continuously, and if unpinned
+# scripts all landed in one half that half would walk into its CI time budget on
+# its own. Both halves must therefore carry a substantial share of the lane.
+# Derived from the lane listings, not from the assignment function's source.
+test_unpinned_serial_scripts_spread_across_both_halves() {
+  local h1 h2 n1 n2 total smaller
+  h1=$("$RUNNER" --list --lane portable-serial-1)
+  h2=$("$RUNNER" --list --lane portable-serial-2)
+  n1=$(printf '%s\n' "$h1" | grep -c 'test\.sh$' || true)
+  n2=$(printf '%s\n' "$h2" | grep -c 'test\.sh$' || true)
+  total=$((n1 + n2))
+  [ "$total" -gt 0 ] || fail "portable serial halves are empty"
+  if [ "$n1" -le "$n2" ]; then smaller=$n1; else smaller=$n2; fi
+  # A degenerate split (everything on one side) is the failure this guards. Both
+  # halves must hold at least a quarter of the lane.
+  [ $((smaller * 4)) -ge "$total" ] \
+    || fail "portable serial halves are lopsided: 1=$n1 2=$n2 of $total"
+  pass "portable serial halves each carry a substantial share so growth does not pile up"
+}
+
+test_interrupt_writes_partial_timing_artifact() {
+  local tmp rc runner_pid waited
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-interrupt.XXXXXX")
+  mkdir -p "$tmp/tests"
+  cat >"$tmp/tests/a.test.sh" <<'SH'
+#!/usr/bin/env bash
+echo "ok - fast"
+SH
+  cat >"$tmp/tests/b.test.sh" <<'SH'
+#!/usr/bin/env bash
+# Long enough that the runner is reliably still inside it when we signal, and
+# short enough to bound this test if the group kill ever fails to reach it.
+sleep 20
+echo "ok - slow"
+SH
+  chmod +x "$tmp/tests/a.test.sh" "$tmp/tests/b.test.sh"
+  # `set -m` puts the runner in its OWN process group, so the kill below can
+  # signal the group the way GNU timeout(1) does in CI. Signalling the runner
+  # alone is not enough: bash defers an INT/TERM trap until the foreground
+  # pipeline returns, so the handler would not run until the in-flight test
+  # script finished on its own - the test would block for its whole duration and
+  # would not model the CI path at all.
+  # exec so the recorded pid is the runner itself; signalling a wrapping subshell
+  # would kill the subshell and never reach the runner's interrupt handler.
+  set -m
+  (
+    cd "$ROOT" || exit 1
+    exec "$RUNNER" --json "$tmp/out.json" \
+      "$tmp/tests/a.test.sh" "$tmp/tests/b.test.sh" >"$tmp/out" 2>&1
+  ) &
+  runner_pid=$!
+  set +m
+  # Wait for the first script to be recorded, so the interrupt lands mid-suite
+  # rather than before any measurement exists.
+  waited=0
+  while [ "$waited" -lt 200 ]; do
+    grep -q 'FM_TEST_END .*a\.test\.sh' "$tmp/out" 2>/dev/null && break
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  grep -q 'FM_TEST_END .*a\.test\.sh' "$tmp/out" 2>/dev/null \
+    || { kill -TERM -"$runner_pid" 2>/dev/null; rm -rf "$tmp"; fail "first script never completed"; }
+  kill -TERM -"$runner_pid" 2>/dev/null
+  set +e
+  wait "$runner_pid"
+  rc=$?
+  set -e
+  [ "$rc" -eq 124 ] \
+    || { rm -rf "$tmp"; fail "interrupted run must exit 124 like timeout(1), got $rc"; }
+  [ -s "$tmp/out.json" ] \
+    || { rm -rf "$tmp"; fail "interrupted run must still write a timing artifact"; }
+  python3 -c '
+import json,sys
+doc=json.load(open(sys.argv[1]))
+assert doc["interrupted"] is True, "artifact must mark itself interrupted"
+paths=[s["path"] for s in doc["scripts"]]
+assert any(p.endswith("a.test.sh") for p in paths), "finished script must be recorded: %r" % paths
+assert not any(p.endswith("b.test.sh") for p in paths), "unfinished script must not be recorded: %r" % paths
+' "$tmp/out.json" || { rm -rf "$tmp"; fail "interrupted artifact shape wrong: $(cat "$tmp/out.json")"; }
+  rm -rf "$tmp"
+  pass "an interrupted run writes a partial timing artifact marked interrupted"
+}
+
+test_completed_run_is_not_marked_interrupted() {
+  local tmp
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-complete.XXXXXX")
+  mkdir -p "$tmp/tests"
+  cat >"$tmp/tests/a.test.sh" <<'SH'
+#!/usr/bin/env bash
+echo "ok - fast"
+SH
+  chmod +x "$tmp/tests/a.test.sh"
+  ( cd "$ROOT" && "$RUNNER" --json "$tmp/out.json" "$tmp/tests/a.test.sh" ) >"$tmp/out" 2>&1 \
+    || { rm -rf "$tmp"; fail "clean run failed: $(cat "$tmp/out")"; }
+  python3 -c '
+import json,sys
+doc=json.load(open(sys.argv[1]))
+assert doc["interrupted"] is False, "a completed run must not be marked interrupted"
+' "$tmp/out.json" || { rm -rf "$tmp"; fail "completed artifact wrongly marked interrupted"; }
+  rm -rf "$tmp"
+  pass "a completed run records interrupted=false"
+}
+
 test_jobs_requires_proven_isolated() {
   local tmp rc
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-jobs.XXXXXX")
@@ -405,6 +537,14 @@ test_jobs_requires_proven_isolated() {
   pass "--jobs refuses non-proven / stateful selections"
 }
 
+# Load-sensitive by construction: the fixtures below prove slot refill by racing
+# a 0.5s script against a 0.05s one, so on a machine under heavy load (many
+# concurrent agents, memory pressure) the fast fixture can start after the slow
+# one finishes and "scheduler waited for oldest worker" or "jobs=2 must refill
+# the first completed slot" fails without the runner having regressed. Tracked
+# for a load-independent rewrite as backlog item fm-scheduler-test-load-sensitivity;
+# do not read a failure here as evidence about the code under test until the
+# machine's load at the time has been checked.
 test_jobs_parallel_scheduler_and_failure_propagation() {
   local tmp repo runner evidence fake_bin a b c d rc begin_n end_n
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-jobs-sched.XXXXXX")
@@ -544,6 +684,7 @@ JSON
   "selection": "lane=portable-serial",
   "started_at": "2026-07-22T00:00:00Z",
   "finished_at": "2026-07-22T00:02:00Z",
+  "interrupted": true,
   "summary": {"total": 2, "failed": 1, "skipped_gate": 0, "duration_ms": 2000},
   "scripts": [
     {"path": "tests/b.test.sh", "family": "afk", "duration_ms": 1500, "exit": 1, "gate_skip": false},
@@ -562,9 +703,18 @@ assert doc["summary"]["total"]==3
 assert doc["summary"]["failed"]==1
 assert doc["summary"]["critical_path_duration_ms"]==2000
 assert len(doc["scripts"])==3
+# An interrupted lane carries a truncated total; the aggregate must say so
+# instead of presenting it as a complete measurement.
+assert doc["interrupted"] is True, "aggregate must flag an interrupted input lane"
+assert doc["summary"]["interrupted"] is True
+assert doc["interrupted_lanes"]==["lane=portable-serial"], doc["interrupted_lanes"]
+lanes={l["run_id"]: l for l in doc["lanes"]}
+assert lanes["a"]["interrupted"] is False, "a complete lane must not be flagged"
+assert lanes["b"]["interrupted"] is True, "the interrupted lane must be flagged"
 ' "$tmp/out.json" || { rm -rf "$tmp"; fail "aggregate JSON shape wrong"; }
+  assert_contains "$out" "interrupted=true" "aggregate summary line reports interruption"
   rm -rf "$tmp"
-  pass "aggregate-json merges lane timing artifacts"
+  pass "aggregate-json merges lane timing artifacts and preserves the interrupted marker"
 }
 
 test_list_all_exact_suite_coverage
@@ -579,6 +729,10 @@ test_gate_skip_accounting
 test_fail_on_gate_skip_token
 test_exclude_family
 test_portable_shard_union_and_coverage_guard
+test_portable_serial_halves_partition_the_lane
+test_unpinned_serial_scripts_spread_across_both_halves
+test_interrupt_writes_partial_timing_artifact
+test_completed_run_is_not_marked_interrupted
 test_jobs_requires_proven_isolated
 test_jobs_parallel_scheduler_and_failure_propagation
 test_aggregate_json

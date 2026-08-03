@@ -2,6 +2,7 @@ projects/
 state/
 data/
 .no-mistakes/
+.fm-ci-tmp/
 .lavish/
 .fm-secondmate-home
 .DS_Store

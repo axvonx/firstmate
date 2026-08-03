@@ -9,6 +9,7 @@
 #   fm-test-run.sh --family <name>
 #   fm-test-run.sh --changed [--base <git-ref>]
 #   fm-test-run.sh --lane portable-parallel-1|portable-parallel-2|portable-serial
+#   fm-test-run.sh --lane portable-serial-1|portable-serial-2
 #   fm-test-run.sh --proven-isolated
 #   fm-test-run.sh tests/<name>.test.sh [more scripts...]
 #
@@ -47,14 +48,30 @@
 #   FM_TEST_BEGIN <iso8601> <script> family=<family> expected_gate_skip=<class>
 #   FM_TEST_END <iso8601> <script> exit=<code> duration_ms=<n> gate_skip=<true|false>
 #
+# Lanes: portable-serial is the whole stateful remainder. portable-serial-1 and
+# portable-serial-2 partition it for CI, where two jobs are two hosts and the
+# same-host contention that keeps these scripts serial does not apply across
+# them. Each half still runs strictly serially. Run --lane portable-serial to
+# execute the whole remainder on one machine.
+#
 # After all scripts (stdout):
 #   FM_TEST_SUMMARY total=<n> failed=<n> skipped_gate=<n> duration_ms=<n>
 #   FM_TEST_SUMMARY_FAMILY family=<name> count=<n> duration_ms=<n> failed=<n>
 #   FM_TEST_SLOWEST rank=<k> script=<path> duration_ms=<n>
 #
+# After --aggregate-json (stdout, one line):
+#   FM_TEST_AGGREGATE lanes=<n> total=<n> failed=<n> skipped_gate=<n> critical_path_duration_ms=<n> interrupted=<true|false>
+#   interrupted=true means at least one input lane artifact was flushed by a
+#   time-bounded stop, so the totals are truncated rather than complete; the
+#   aggregate also warns with the interrupted lanes named.
+#
 # Exit status is non-zero if any selected script exits non-zero or a configured
 # --fail-on-gate-skip token appears. Other gate skips (first meaningful line
 # matching ^skip:) remain successful and are counted as skipped_gate.
+# On INT/TERM the run stops, flushes any --json artifact for the scripts that
+# finished (marked "interrupted": true, so it is not a complete measurement),
+# and exits 124 like timeout(1) so a caller can tell a time-bounded stop from a
+# test failure. bin/fm-ci-run-serial-lane.sh relies on both.
 #
 # Family labels, the changed-file map, and production portable-shard composition
 # live in this script only (one owner). The proven-isolated candidate set remains
@@ -227,8 +244,99 @@ list_known_lanes() {
 portable-parallel-1
 portable-parallel-2
 portable-serial
+portable-serial-1
+portable-serial-2
 real-herdr-gated
 EOF
+}
+
+# The serial remainder is stateful only with respect to PEERS ON THE SAME
+# MACHINE: watcher locks, AFK daemons, tmux servers, and poll migration all
+# contend inside one host. Two CI jobs are two hosts, so the remainder can be
+# cut in half and each half still runs strictly serially with no peer beside
+# it. This buys wall clock without relaxing the isolation contract that keeps
+# these scripts out of the proven-isolated parallel shards.
+#
+# Balance is a pinned assignment table plus a stable hash for everything else.
+# The pinned table is longest-processing-time over the heavyweights measured in
+# CI, which carry most of the lane; a CRC of the basename assigns the small
+# scripts below them. The hash is the load-bearing part: the lane grows
+# continuously and an unpinned script would otherwise always land in the same
+# half, so the half that absorbs growth would drift into its time budget on its
+# own. A hash splits new scripts across BOTH halves without anyone maintaining
+# a duration table.
+#
+# Splitting RESETS the clock, it does not stop it: both halves still grow toward
+# the budget together, so the next remedy is a third host or a real speedup, not
+# another rebalance. docs/fm-test-portable-shards.md owns the measured per-half
+# durations and counts, the growth trend, and the projected trip date; keep them
+# there rather than copying a snapshot back here, where nothing would catch the
+# drift.
+#
+# A stale balance only skews wall clock; it can never drop a script, because
+# both halves are computed from the same residual and --check-coverage proves
+# they partition it. Rebalance by moving a name between columns here (or by
+# pinning a script that has grown heavy) when the timing artifact shows the
+# halves drifting apart.
+list_portable_serial_pinned() {
+  cat <<'EOF'
+1	tests/fm-pr-check-security.test.sh
+1	tests/fm-secondmate-harness.test.sh
+1	tests/fm-procevent.test.sh
+1	tests/fm-vendor-auth-probe.test.sh
+1	tests/fm-spawn-dispatch-profile.test.sh
+1	tests/fm-wake-queue.test.sh
+1	tests/fm-public-followup.test.sh
+1	tests/fm-pi-watch-extension.test.sh
+1	tests/fm-backend.test.sh
+1	tests/fm-kimi-harness.test.sh
+2	tests/fm-watch-triage.test.sh
+2	tests/fm-watcher-lock.test.sh
+2	tests/fm-bearings-snapshot.test.sh
+2	tests/fm-claude-stop-autoarm.test.sh
+2	tests/fm-session-start.test.sh
+2	tests/fm-afk-inject-e2e.test.sh
+2	tests/fm-secondmate-safety.test.sh
+2	tests/fm-teardown.test.sh
+2	tests/fm-bootstrap.test.sh
+2	tests/fm-daemon.test.sh
+2	tests/fm-fleet-sync.test.sh
+EOF
+}
+
+# Which CI half a serial script belongs to. Pinned first, then a CRC of the
+# basename so unpinned scripts distribute deterministically across both halves.
+portable_serial_half_for() {
+  local want=$1 half path sum rest
+  while IFS=$'\t' read -r half path; do
+    [ "$path" = "$want" ] || continue
+    printf '%s\n' "$half"
+    return 0
+  done < <(list_portable_serial_pinned)
+  read -r sum rest < <(printf '%s' "${want##*/}" | cksum)
+  : "$rest"
+  printf '%s\n' "$((sum % 2 + 1))"
+}
+
+# Single owner of the serial residual: everything in the complete suite that is
+# not proven-isolated and not real-herdr-gated. Watcher/lock/AFK/tmux/daemon/
+# ambiguous/stateful work stays here, serial only. portable-serial and its two
+# halves all read this one definition, so a new test cannot land in a half
+# without also landing in the whole.
+list_portable_serial_all() {
+  local s base fam
+  while IFS= read -r s; do
+    [ -n "$s" ] || continue
+    base=$(basename "$s")
+    fam=$(family_for_basename "$base")
+    if [ "$fam" = "real-herdr-gated" ]; then
+      continue
+    fi
+    if is_proven_isolated_script "$s"; then
+      continue
+    fi
+    printf '%s\n' "$s"
+  done < <(all_repo_tests)
 }
 
 # Exact proven-isolated candidate set (same paths as
@@ -318,7 +426,7 @@ select_proven_isolated() {
 }
 
 select_lane() {
-  local want=$1 s base fam found=0
+  local want=$1 s base fam half found=0
   case "$want" in
     portable-parallel-1)
       while IFS= read -r s; do
@@ -335,22 +443,20 @@ select_lane() {
       done < <(list_portable_parallel_2)
       ;;
     portable-serial)
-      # Everything in the complete suite that is not proven-isolated and not
-      # real-herdr-gated. Watcher/lock/AFK/tmux/daemon/ambiguous/stateful work
-      # stays here, serial only.
       while IFS= read -r s; do
         [ -n "$s" ] || continue
-        base=$(basename "$s")
-        fam=$(family_for_basename "$base")
-        if [ "$fam" = "real-herdr-gated" ]; then
-          continue
-        fi
-        if is_proven_isolated_script "$s"; then
-          continue
-        fi
         add_script "$s"
         found=1
-      done < <(all_repo_tests)
+      done < <(list_portable_serial_all)
+      ;;
+    portable-serial-1|portable-serial-2)
+      half=${want##*-}
+      while IFS= read -r s; do
+        [ -n "$s" ] || continue
+        [ "$(portable_serial_half_for "$s")" = "$half" ] || continue
+        add_script "$s"
+        found=1
+      done < <(list_portable_serial_all)
       ;;
     real-herdr-gated)
       select_family real-herdr-gated
@@ -397,9 +503,33 @@ run_coverage_guard() {
   select_lane portable-serial
   printf '%s\n' "${SCRIPTS[@]+"${SCRIPTS[@]}"}" | LC_ALL=C sort -u >"$tmp/serial"
   SCRIPTS=()
+  select_lane portable-serial-1
+  printf '%s\n' "${SCRIPTS[@]+"${SCRIPTS[@]}"}" | LC_ALL=C sort -u >"$tmp/serial1"
+  SCRIPTS=()
+  select_lane portable-serial-2
+  printf '%s\n' "${SCRIPTS[@]+"${SCRIPTS[@]}"}" | LC_ALL=C sort -u >"$tmp/serial2"
+  SCRIPTS=()
   select_family real-herdr-gated
   printf '%s\n' "${SCRIPTS[@]+"${SCRIPTS[@]}"}" | LC_ALL=C sort -u >"$tmp/herdr"
   SCRIPTS=("${saved_scripts[@]+"${saved_scripts[@]}"}")
+
+  # The two CI halves must partition the serial lane exactly: no shared script
+  # (it would run twice) and no gap (it would run nowhere). This is the guard
+  # that lets the halves be rebalanced by hand without risking coverage.
+  cat "$tmp/serial1" "$tmp/serial2" | LC_ALL=C sort | uniq -d >"$tmp/serial_dups"
+  if [ -s "$tmp/serial_dups" ]; then
+    log "coverage guard: portable serial halves share scripts:"
+    cat "$tmp/serial_dups" >&2
+    rm -rf "$tmp"
+    return 1
+  fi
+  cat "$tmp/serial1" "$tmp/serial2" | LC_ALL=C sort -u >"$tmp/serial_halves"
+  if ! cmp -s "$tmp/serial" "$tmp/serial_halves"; then
+    log "coverage guard: portable serial halves must equal the portable serial lane"
+    comm -3 "$tmp/serial" "$tmp/serial_halves" >&2 || true
+    rm -rf "$tmp"
+    return 1
+  fi
 
   for pair in "shards_union:serial" "shards_union:herdr" "serial:herdr"; do
     a=${pair%%:*}
@@ -468,17 +598,25 @@ failed = 0
 skipped = 0
 total = 0
 wall_ms = 0
+interrupted_lanes = []
 for path in inputs:
     doc = json.loads(path.read_text(encoding="utf-8"))
     summary = doc.get("summary") or {}
+    # An interrupted lane contributes a TRUNCATED total/duration and only the
+    # scripts that finished before the stop. Carrying the flag through is what
+    # keeps a reader from mistaking a budget-killed half for a full measurement.
+    lane_interrupted = bool(doc.get("interrupted"))
     lane = {
         "path": str(path),
         "run_id": doc.get("run_id"),
         "selection": doc.get("selection"),
         "started_at": doc.get("started_at"),
         "finished_at": doc.get("finished_at"),
+        "interrupted": lane_interrupted,
         "summary": summary,
     }
+    if lane_interrupted:
+        interrupted_lanes.append(doc.get("selection") or str(path))
     lanes.append(lane)
     total += int(summary.get("total") or 0)
     failed += int(summary.get("failed") or 0)
@@ -494,19 +632,24 @@ all_scripts.sort(key=lambda s: (-int(s.get("duration_ms") or 0), s.get("path") o
 agg = {
     "kind": "aggregate",
     "lanes": lanes,
+    "interrupted": bool(interrupted_lanes),
+    "interrupted_lanes": sorted(interrupted_lanes),
     "summary": {
         "lanes": len(lanes),
         "total": total,
         "failed": failed,
         "skipped_gate": skipped,
         "critical_path_duration_ms": wall_ms,
+        "interrupted": bool(interrupted_lanes),
     },
     "scripts": all_scripts,
     "slowest": all_scripts[:15],
 }
 out.parent.mkdir(parents=True, exist_ok=True)
 out.write_text(json.dumps(agg, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-print(f"FM_TEST_AGGREGATE lanes={len(lanes)} total={total} failed={failed} skipped_gate={skipped} critical_path_duration_ms={wall_ms}")
+print(f"FM_TEST_AGGREGATE lanes={len(lanes)} total={total} failed={failed} skipped_gate={skipped} critical_path_duration_ms={wall_ms} interrupted={str(bool(interrupted_lanes)).lower()}")
+if interrupted_lanes:
+    print("::warning::aggregate includes interrupted lane(s): " + ", ".join(sorted(interrupted_lanes)))
 PY
 }
 
@@ -852,15 +995,16 @@ write_json_artifact() {
   local selection=$9
   local records_file=${10}
   local families_file=${11}
+  local interrupted=${12:-false}
 
   if ! command -v python3 >/dev/null 2>&1; then
     die "--json requires python3 to emit a valid timing artifact"
   fi
 
-  python3 - "$out" "$started" "$finished" "$run_id" "$total" "$failed" "$skipped" "$duration" "$selection" "$records_file" "$families_file" <<'PY'
+  python3 - "$out" "$started" "$finished" "$run_id" "$total" "$failed" "$skipped" "$duration" "$selection" "$records_file" "$families_file" "$interrupted" <<'PY'
 import json, sys
 
-out, started, finished, run_id, total, failed, skipped, duration, selection, records_file, families_file = sys.argv[1:]
+out, started, finished, run_id, total, failed, skipped, duration, selection, records_file, families_file, interrupted = sys.argv[1:]
 
 scripts = []
 with open(records_file, encoding="utf-8") as fh:
@@ -897,6 +1041,10 @@ doc = {
     "started_at": started,
     "finished_at": finished,
     "selection": selection,
+    # True when the run was cut short by a signal, so "scripts" is the set that
+    # finished before the interrupt rather than the whole selection. Consumers
+    # must not read an interrupted artifact as a complete lane measurement.
+    "interrupted": interrupted == "true",
     "summary": {
         "total": int(total),
         "failed": int(failed),
@@ -1146,7 +1294,7 @@ if [ "${#SCRIPTS[@]}" -eq 0 ]; then
     : >"$empty_fam"
     started=$(now_iso)
     mkdir -p "$(dirname "$JSON_PATH")"
-    write_json_artifact "$JSON_PATH" "$started" "$started" "empty" 0 0 0 0 "$SELECTION_DESC" "$empty_rec" "$empty_fam"
+    write_json_artifact "$JSON_PATH" "$started" "$started" "empty" 0 0 0 0 "$SELECTION_DESC" "$empty_rec" "$empty_fam" false
     rm -f "$empty_rec" "$empty_fam"
   fi
   exit 0
@@ -1180,6 +1328,46 @@ TOTAL=0
 FAILED=0
 SKIPPED_GATE=0
 AGG_RC=0
+
+# Single owner of the timing-artifact write, used both by the normal end of the
+# run and by the interrupt path. Emitting from one place is what lets a run that
+# is killed at a CI time budget still ship the per-script durations it already
+# measured, which is the evidence needed to explain the overrun.
+emit_timing_artifact() {  # <interrupted:true|false>
+  local interrupted=$1 finished_iso finished_ms duration
+  [ -n "$JSON_PATH" ] || return 0
+  finished_iso=$(now_iso)
+  finished_ms=$(now_ms)
+  duration=$((finished_ms - RUN_STARTED_MS))
+  if [ "$duration" -lt 0 ]; then
+    duration=0
+  fi
+  mkdir -p "$(dirname "$JSON_PATH")"
+  # Families file may be unsorted; write_json reads as-is (deterministic sort in python).
+  if [ -s "$FAMILIES_TSV" ]; then
+    sort -t$'\t' -k1,1 "$FAMILIES_TSV" -o "$FAMILIES_TSV"
+  else
+    : >"$FAMILIES_TSV"
+  fi
+  write_json_artifact "$JSON_PATH" \
+    "$RUN_STARTED_ISO" "$finished_iso" "$RUN_ID" \
+    "$TOTAL" "$FAILED" "$SKIPPED_GATE" "$duration" \
+    "$SELECTION_DESC" "$RECORDS" "$FAMILIES_TSV" "$interrupted"
+  log "wrote timing artifact: $JSON_PATH"
+}
+
+# A CI time budget kills this runner mid-suite. Without this trap the records
+# accumulated so far die with $RUN_TMP and the lane reports no timing at all,
+# exactly when the timing is the thing being asked for. Exit 124 matches
+# timeout(1) so a caller can tell a budget kill from a test failure.
+# shellcheck disable=SC2329  # invoked indirectly by the INT/TERM trap below
+on_interrupt() {
+  trap - INT TERM
+  log "interrupted after $TOTAL script(s); writing partial timing artifact"
+  emit_timing_artifact true
+  exit 124
+}
+trap on_interrupt INT TERM
 
 # Family accumulators as TSV lines updated in-memory via temp files.
 # family -> count, duration_ms, failed
@@ -1390,7 +1578,6 @@ else
   done
 fi
 
-RUN_FINISHED_ISO=$(now_iso)
 RUN_FINISHED_MS=$(now_ms)
 RUN_DURATION=$((RUN_FINISHED_MS - RUN_STARTED_MS))
 if [ "$RUN_DURATION" -lt 0 ]; then
@@ -1418,19 +1605,6 @@ if [ -s "$RECORDS" ]; then
   done
 fi
 
-if [ -n "$JSON_PATH" ]; then
-  mkdir -p "$(dirname "$JSON_PATH")"
-  # Families file may be unsorted; write_json reads as-is (deterministic sort in python).
-  if [ -s "$FAMILIES_TSV" ]; then
-    sort -t$'\t' -k1,1 "$FAMILIES_TSV" -o "$FAMILIES_TSV"
-  else
-    : >"$FAMILIES_TSV"
-  fi
-  write_json_artifact "$JSON_PATH" \
-    "$RUN_STARTED_ISO" "$RUN_FINISHED_ISO" "$RUN_ID" \
-    "$TOTAL" "$FAILED" "$SKIPPED_GATE" "$RUN_DURATION" \
-    "$SELECTION_DESC" "$RECORDS" "$FAMILIES_TSV"
-  log "wrote timing artifact: $JSON_PATH"
-fi
+emit_timing_artifact false
 
 exit "$AGG_RC"

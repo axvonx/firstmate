@@ -104,13 +104,29 @@ jobs:
 
   # Required portable serial remainder: watcher, lock, AFK, tmux, daemon,
   # ambiguous, and other stateful tests. Real Herdr stays in tests-herdr.
+  #
+  # Split across two jobs because these scripts are serial with respect to
+  # PEERS ON THE SAME MACHINE (watcher locks, AFK daemons, tmux servers, poll
+  # migration), and two jobs are two hosts. Each half still runs strictly
+  # serially, so nothing races that did not race before. Composition owner:
+  # bin/fm-test-run.sh (docs/fm-test-portable-shards.md).
   tests-portable-serial:
-    name: Behavior portable serial
+    name: Behavior portable serial ${{ matrix.half }}
     runs-on: ubuntu-latest
-    # Measured serial remainder is ~13 min wall without Herdr. Cap is a hang
-    # tripwire above observed p99 script cost and suite wall, not the expected
-    # healthy end (interim 25m full-suite slack reduced after sharding).
-    timeout-minutes: 20
+    strategy:
+      # One setup, two halves: duplicating these steps is how the two halves
+      # silently drift apart. fail-fast off because each half is an independent
+      # result - one failing is no reason to lose the other's timing artifact.
+      fail-fast: false
+      matrix:
+        half: [1, 2]
+    # Measured half is ~10 min wall. Cap is a hang tripwire with roughly 50%
+    # headroom, not the expected healthy end of the lane. FM_SERIAL_BUDGET_SECONDS
+    # below must stay under it so an overrun is a self-describing step failure
+    # rather than an opaque job cancellation.
+    timeout-minutes: 15
+    env:
+      FM_SERIAL_BUDGET_SECONDS: 780
     steps:
       - uses: actions/checkout@v6
         with:
@@ -133,18 +149,18 @@ jobs:
           set -eu
           npm install -g tasks-axi
           tasks-axi --version
-      - name: Run portable serial remainder
+      - name: Run portable serial half ${{ matrix.half }}
         run: |
           set -eu
-          mkdir -p "$RUNNER_TEMP/fm-test"
-          bin/fm-test-run.sh --lane portable-serial \
-            --json "$RUNNER_TEMP/fm-test/fm-test-timing-portable-serial.json"
-      - name: Upload portable serial timing artifact
+          bin/fm-ci-run-serial-lane.sh "portable-serial-$HALF"
+        env:
+          HALF: ${{ matrix.half }}
+      - name: Upload portable serial ${{ matrix.half }} timing artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: fm-test-timing-portable-serial
-          path: ${{ runner.temp }}/fm-test/fm-test-timing-portable-serial.json
+          name: fm-test-timing-portable-serial-${{ matrix.half }}
+          path: ${{ runner.temp }}/fm-test/fm-test-timing-portable-serial-${{ matrix.half }}.json
           if-no-files-found: warn
 
   # Required real-Herdr lane: pinned install, serial real-herdr-gated family,
