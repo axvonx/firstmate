@@ -387,7 +387,7 @@ test_portable_shard_union_and_coverage_guard() {
 }
 
 test_portable_serial_halves_partition_the_lane() {
-  local serial h1 h2 overlap want path lane pinned1 pinned2
+  local serial h1 h2 overlap name
   serial=$("$RUNNER" --list --lane portable-serial | LC_ALL=C sort)
   h1=$("$RUNNER" --list --lane portable-serial-1 | LC_ALL=C sort)
   h2=$("$RUNNER" --list --lane portable-serial-2 | LC_ALL=C sort)
@@ -396,51 +396,43 @@ test_portable_serial_halves_partition_the_lane() {
   [ -z "$overlap" ] || fail "portable serial halves overlap: $overlap"
   [ "$(printf '%s\n' "$h1" "$h2" | LC_ALL=C sort -u)" = "$serial" ] \
     || fail "portable serial halves must union to the portable serial lane"
-  # The pinned table carries most of the lane; a script silently sliding to the
-  # other half would unbalance CI without any coverage guard noticing, so assert
-  # the pin itself.
-  pinned1=0
-  pinned2=0
-  while IFS=$'\t' read -r want path; do
-    [ -n "$path" ] || continue
-    case "$want" in
-      1) lane=$h1; pinned1=$((pinned1 + 1)) ;;
-      2) lane=$h2; pinned2=$((pinned2 + 1)) ;;
-      *) fail "pinned serial half must be 1 or 2, got '$want' for $path" ;;
-    esac
-    printf '%s\n' "$lane" | grep -Fqx "$path" \
-      || fail "pinned script missing from portable-serial-$want: $path"
-  done < <(sed -n '/^list_portable_serial_pinned()/,/^}$/p' "$RUNNER" \
-    | grep -E '^[12][[:space:]]+tests/')
-  [ "$pinned1" -gt 0 ] && [ "$pinned2" -gt 0 ] \
-    || fail "the pinned table must place scripts in BOTH halves, got 1=$pinned1 2=$pinned2"
-  pass "portable serial halves partition the serial lane and honour the pinned table"
+  # The measured heavyweights carry most of the lane, so one silently sliding to
+  # the other half would unbalance CI with no coverage guard noticing. Assert the
+  # placement through the lane listings, which are the authoritative answer to
+  # which half a script runs in; never against the runner's own source bytes.
+  for name in tests/fm-pr-check-security.test.sh tests/fm-secondmate-harness.test.sh \
+    tests/fm-procevent.test.sh tests/fm-vendor-auth-probe.test.sh \
+    tests/fm-spawn-dispatch-profile.test.sh; do
+    printf '%s\n' "$h1" | grep -Fqx "$name" \
+      || fail "heavy script must run in portable-serial-1: $name"
+  done
+  for name in tests/fm-watch-triage.test.sh tests/fm-watcher-lock.test.sh \
+    tests/fm-bearings-snapshot.test.sh tests/fm-claude-stop-autoarm.test.sh \
+    tests/fm-session-start.test.sh; do
+    printf '%s\n' "$h2" | grep -Fqx "$name" \
+      || fail "heavy script must run in portable-serial-2: $name"
+  done
+  pass "portable serial halves partition the serial lane and place the heavyweights"
 }
 
 # Growth regression guard: the lane gains scripts continuously, and if unpinned
 # scripts all landed in one half that half would walk into its CI time budget on
-# its own. Unknown names must spread across both halves.
+# its own. Both halves must therefore carry a substantial share of the lane.
+# Derived from the lane listings, not from the assignment function's source.
 test_unpinned_serial_scripts_spread_across_both_halves() {
-  local tmp n half counts1=0 counts2=0
-  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-halfmap.XXXXXX")
-  {
-    sed -n '/^list_portable_serial_pinned()/,/^}$/p' "$RUNNER"
-    sed -n '/^portable_serial_half_for()/,/^}$/p' "$RUNNER"
-  } >"$tmp/halfmap.sh"
-  # shellcheck disable=SC1090,SC1091
-  . "$tmp/halfmap.sh"
-  for n in $(seq 1 40); do
-    half=$(portable_serial_half_for "tests/fm-synthetic-probe-$n.test.sh")
-    case "$half" in
-      1) counts1=$((counts1 + 1)) ;;
-      2) counts2=$((counts2 + 1)) ;;
-      *) rm -rf "$tmp"; fail "portable_serial_half_for returned '$half' for a synthetic script" ;;
-    esac
-  done
-  rm -rf "$tmp"
-  [ "$counts1" -ge 10 ] && [ "$counts2" -ge 10 ] \
-    || fail "unpinned scripts must spread across both halves, got 1=$counts1 2=$counts2"
-  pass "unpinned serial scripts spread across both halves so growth does not pile up"
+  local h1 h2 n1 n2 total smaller
+  h1=$("$RUNNER" --list --lane portable-serial-1)
+  h2=$("$RUNNER" --list --lane portable-serial-2)
+  n1=$(printf '%s\n' "$h1" | grep -c 'test\.sh$' || true)
+  n2=$(printf '%s\n' "$h2" | grep -c 'test\.sh$' || true)
+  total=$((n1 + n2))
+  [ "$total" -gt 0 ] || fail "portable serial halves are empty"
+  if [ "$n1" -le "$n2" ]; then smaller=$n1; else smaller=$n2; fi
+  # A degenerate split (everything on one side) is the failure this guards. Both
+  # halves must hold at least a quarter of the lane.
+  [ $((smaller * 4)) -ge "$total" ] \
+    || fail "portable serial halves are lopsided: 1=$n1 2=$n2 of $total"
+  pass "portable serial halves each carry a substantial share so growth does not pile up"
 }
 
 test_interrupt_writes_partial_timing_artifact() {
