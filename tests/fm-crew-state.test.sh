@@ -441,27 +441,30 @@ test_gate_block_parked_not_superseded() {
   pass "gate block parked run is not flagged superseded"
 }
 
-test_ci_ready_done_log_beats_monitoring_run() {
+# A crew's own "done: PR ... checks green" line is a claim, not a reading, so it
+# never surfaces the PR as ready while a run is attributed and still working -
+# here a run at the review step, which offers no CI reading at all.
+test_ci_ready_done_log_without_ci_reading_stays_working() {
   reset_fakes
   local d; d=$(new_case ci-ready)
   make_repo_on_branch "$d/wt" fm/feat-ci
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-ci.meta" "window=fm:fm-feat-ci" "worktree=$d/wt" "kind=ship"
   printf 'done: PR https://github.com/o/r/pull/2 checks green\n' > "$d/state/feat-ci.status"
-  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-ci)"
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-ci)"
   local out; out=$(run_crew_state "$d" feat-ci)
-  assert_contains "$out" "state: done" "ci-ready status log -> done"
-  assert_contains "$out" "source: status-log" "ci-ready state comes from the status log"
-  assert_contains "$out" "checks green" "ci-ready detail preserves the report"
-  assert_not_contains "$out" "state: working" "ci-ready is not hidden by monitoring run"
-  pass "ci-ready status log beats monitoring run"
+  assert_contains "$out" "state: working" "an uncorroborated crew claim stays working"
+  assert_contains "$out" "source: run-step" "a working run remains run-step sourced"
+  assert_not_contains "$out" "state: done" "a crew claim alone must not read as done"
+  assert_not_contains "$out" "checks green" "a crew claim alone must not report checks green"
+  pass "a checks-green status log needs an affirmative CI reading"
 }
 
 # Regression for the PR #252 incident: the crew's own status log never got a
-# "done: ... checks green" line (log_reports_ci_ready above does not apply),
-# but the ci step's log tail shows CI is actually green and only waiting on
-# merge/close. fm-crew-state must surface this as done, not "validating
-# (running)", so a green PR is never silently absorbed as still-in-progress.
+# "done: ... checks green" line, but the ci step's log tail shows CI is actually
+# green and only waiting on merge/close. fm-crew-state must surface this as
+# done, not "validating (running)", so a green PR is never silently absorbed as
+# still-in-progress.
 test_ci_monitoring_checks_green_surfaces_done() {
   reset_fakes
   local d; d=$(new_case ci-green)
@@ -499,7 +502,15 @@ test_top_level_ci_checks_green_surfaces_done() {
   pass "top-level ci status uses ci log green marker"
 }
 
-test_ci_monitoring_no_checks_terminal_surfaces_done() {
+# Regression for the 2026-08-03 false-green sightings: a PR was reported as
+# passing while its checks had not concluded. "no CI checks reported - still
+# monitoring until merged or closed" states that NO check could be enumerated,
+# and absence of a red signal is not a green one - a gate that cannot enumerate
+# the checks it expects cannot conclude anything. Real ~/.no-mistakes ci.log
+# occurrences of this marker are followed by "CI checks running, waiting for
+# results...", "PR has been closed", or "error: context canceled", never by a
+# pass, so it is not terminal and must never surface as done/checks green.
+test_ci_monitoring_no_checks_never_surfaces_green() {
   reset_fakes
   local d; d=$(new_case ci-nochecks)
   make_repo_on_branch "$d/wt" fm/feat-cinochecks
@@ -508,9 +519,47 @@ test_ci_monitoring_no_checks_terminal_surfaces_done() {
   FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cinochecks)"
   FM_FAKE_CI_LOGS="no CI checks reported - still monitoring until merged or closed"
   local out; out=$(run_crew_state "$d" feat-cinochecks)
-  assert_contains "$out" "state: done" "terminal no-checks ci-monitor run -> done"
-  assert_contains "$out" "checks green" "terminal no-checks ci-monitor detail mentions checks green"
-  pass "terminal no-checks ci-monitor marker surfaces done"
+  assert_contains "$out" "state: working" "no-checks ci-monitor marker -> working"
+  assert_not_contains "$out" "state: done" "absent checks must not read as done"
+  assert_not_contains "$out" "checks green" "absent checks must not read as checks green"
+  pass "absent-checks ci-monitor marker never surfaces green"
+}
+
+# The same absence, but reported through the crew's own "done: PR ... checks
+# green" status line. The crew's claim is corroborated against the ci step, not
+# taken on trust, so an absent-checks reading holds it as still working.
+test_ci_ready_done_log_with_absent_checks_stays_working() {
+  reset_fakes
+  local d; d=$(new_case ci-ready-nochecks)
+  make_repo_on_branch "$d/wt" fm/feat-cireadynochecks
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cireadynochecks.meta" "window=fm:fm-feat-cireadynochecks" "worktree=$d/wt" "kind=ship"
+  printf 'done: PR https://github.com/o/r/pull/2 checks green\n' > "$d/state/feat-cireadynochecks.status"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cireadynochecks)"
+  FM_FAKE_CI_LOGS="no CI checks reported - still monitoring until merged or closed"
+  local out; out=$(run_crew_state "$d" feat-cireadynochecks)
+  assert_contains "$out" "state: working" "absent checks under a done log -> working"
+  assert_not_contains "$out" "state: done" "a crew claim cannot make absent checks done"
+  pass "a checks-green status log does not override absent checks"
+}
+
+# Indeterminate is not passed either: while the ci step is actively monitoring
+# and the ci log yields no recognized marker at all, nothing has been shown to
+# have concluded, so the crew's claim is held rather than surfaced as ready.
+test_ci_ready_done_log_with_indeterminate_ci_stays_working() {
+  reset_fakes
+  local d; d=$(new_case ci-ready-indeterminate)
+  make_repo_on_branch "$d/wt" fm/feat-cireadyunknown
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cireadyunknown.meta" "window=fm:fm-feat-cireadyunknown" "worktree=$d/wt" "kind=ship"
+  printf 'done: PR https://github.com/o/r/pull/2 checks green\n' > "$d/state/feat-cireadyunknown.status"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cireadyunknown)"
+  # Unreadable/empty ci log: no marker, so the reading is indeterminate.
+  FM_FAKE_CI_LOGS=""
+  local out; out=$(run_crew_state "$d" feat-cireadyunknown)
+  assert_contains "$out" "state: working" "indeterminate ci reading -> working"
+  assert_not_contains "$out" "state: done" "indeterminate ci reading must not read as done"
+  pass "an indeterminate CI reading is not reported as passing"
 }
 
 test_ci_monitoring_green_then_rearm_stays_working() {
@@ -738,7 +787,13 @@ EOF
   pass "cross-branch attribution picks the branch's most recent row"
 }
 
-test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status() {
+# A coarse-attributed run carries no run id of its own, so there is no ci log it
+# may read: the only one reachable belongs to the OTHER branch whose run `axi
+# status` answered with. That foreign log must never decide this crew's state,
+# and the crew's own checks-green claim has nothing to corroborate it here, so
+# the coarse run-step verdict stands. The fake ci log is deliberately GREEN: if a
+# probe were ever added back, it would promote this crew to done and fail here.
+test_coarse_run_does_not_probe_other_branch_ci_log() {
   reset_fakes
   local d short; d=$(new_case coarse-ready-other-log)
   make_repo_on_branch "$d/wt" fm/feat-coarseready
@@ -752,11 +807,12 @@ test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status() {
   running    fm/feat-coarseready ${short}  2026-07-02 22:05
 EOF
 )"
-  FM_FAKE_CI_LOGS="CI checks running, waiting for results..."
+  FM_FAKE_CI_LOGS="all CI checks passed - still monitoring until merged or closed"
   local out; out=$(run_crew_state "$d" feat-coarseready)
-  assert_contains "$out" "state: done" "coarse ready status -> done"
-  assert_contains "$out" "source: status-log" "coarse ready status remains status-log sourced"
-  assert_not_contains "$out" "state: working" "coarse ready status must not be suppressed by another branch log"
+  assert_contains "$out" "state: working" "coarse attribution with no CI reading -> working"
+  assert_contains "$out" "source: run-step" "coarse verdict remains run-step sourced"
+  assert_not_contains "$out" "state: done" "another branch's green log must not promote this crew"
+  assert_not_contains "$out" "checks green" "coarse attribution must not report checks green"
   pass "coarse run does not probe another branch's ci log"
 }
 
@@ -1315,10 +1371,12 @@ test_stale_blocked_superseded
 test_genuine_parked_not_superseded
 test_scalar_gate_parked_not_superseded
 test_gate_block_parked_not_superseded
-test_ci_ready_done_log_beats_monitoring_run
+test_ci_ready_done_log_without_ci_reading_stays_working
 test_ci_monitoring_checks_green_surfaces_done
 test_top_level_ci_checks_green_surfaces_done
-test_ci_monitoring_no_checks_terminal_surfaces_done
+test_ci_monitoring_no_checks_never_surfaces_green
+test_ci_ready_done_log_with_absent_checks_stays_working
+test_ci_ready_done_log_with_indeterminate_ci_stays_working
 test_ci_monitoring_green_then_rearm_stays_working
 test_ci_monitoring_no_checks_yet_stays_working
 test_ci_monitoring_still_waiting_stays_working
@@ -1331,7 +1389,7 @@ test_terminal_passed
 test_terminal_failed
 test_cross_branch_attribution_via_runs_list
 test_cross_branch_attribution_picks_most_recent_row
-test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
+test_coarse_run_does_not_probe_other_branch_ci_log
 test_other_branch_run_ignored
 test_no_run_busy_pane
 test_no_run_footer_text_alone_is_not_working
