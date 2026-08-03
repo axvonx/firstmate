@@ -537,14 +537,12 @@ test_jobs_requires_proven_isolated() {
   pass "--jobs refuses non-proven / stateful selections"
 }
 
-# Load-sensitive by construction: the fixtures below prove slot refill by racing
-# a 0.5s script against a 0.05s one, so on a machine under heavy load (many
-# concurrent agents, memory pressure) the fast fixture can start after the slow
-# one finishes and "scheduler waited for oldest worker" or "jobs=2 must refill
-# the first completed slot" fails without the runner having regressed. Tracked
-# for a load-independent rewrite as backlog item fm-scheduler-test-load-sensitivity;
-# do not read a failure here as evidence about the code under test until the
-# machine's load at the time has been checked.
+# The slot-refill fixtures below are causal, not timed: the oldest worker blocks
+# until the replacement worker signals that it started, so a correct scheduler
+# unblocks it and a scheduler that waits for the oldest worker deadlocks until
+# SCHED_REFILL_TIMEOUT_S and leaves no oldest-saw-refill evidence. Machine load
+# changes how long the healthy path takes, never whether it completes, so do not
+# reintroduce a sleep race to express this property.
 test_jobs_parallel_scheduler_and_failure_propagation() {
   local tmp repo runner evidence fake_bin a b c d rc begin_n end_n
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-jobs-sched.XXXXXX")
@@ -570,33 +568,55 @@ if [ "$1" = "-f" ] && [ "$2" = "%Lp" ]; then
 fi
 exit 1
 SH
+  # Oldest worker: finishes only once the replacement worker reports that it
+  # started, so its completion is caused by the refill rather than by a sleep.
   cat >"$repo/$a" <<'SH'
 #!/usr/bin/env bash
-sleep 0.5
-touch "$SCHED_EVIDENCE/slow-done"
-echo "ok - slow fixture"
+waited=0
+if [ -n "${SCHED_EXPECT_REFILL:-}" ]; then
+  limit=$(awk -v s="${SCHED_REFILL_TIMEOUT_S:-30}" 'BEGIN{printf "%d", s/0.05}')
+  while [ ! -e "$SCHED_EVIDENCE/refill-started" ]; do
+    if [ "$waited" -ge "$limit" ]; then
+      echo "not ok - oldest worker was never joined by a replacement worker"
+      touch "$SCHED_EVIDENCE/oldest-exited"
+      exit 1
+    fi
+    waited=$((waited + 1))
+    sleep 0.05
+  done
+  touch "$SCHED_EVIDENCE/oldest-saw-refill"
+fi
+echo "ok - oldest fixture"
+touch "$SCHED_EVIDENCE/oldest-exited"
 SH
+  # Frees the second slot immediately; the scheduler must refill it.
   cat >"$repo/$b" <<'SH'
 #!/usr/bin/env bash
-sleep 0.05
-echo "ok - fast fixture"
+echo "ok - slot-freeing fixture"
 SH
+  # Replacement worker: reads the oldest worker's liveness before releasing it,
+  # so the observation cannot be overtaken by the release it triggers. Both
+  # branches release, so a scheduler regression reports rather than deadlocks.
   cat >"$repo/$c" <<'SH'
 #!/usr/bin/env bash
-if [ -e "$SCHED_EVIDENCE/slow-done" ]; then
+if [ -e "$SCHED_EVIDENCE/oldest-exited" ]; then
   echo "not ok - scheduler waited for oldest worker"
+  touch "$SCHED_EVIDENCE/refill-started"
   exit 1
 fi
-echo "ok - replacement fixture started before slow fixture finished"
+touch "$SCHED_EVIDENCE/refill-started"
+echo "ok - replacement fixture started while the oldest fixture was in flight"
 SH
   chmod +x "$runner" "$repo/$a" "$repo/$b" "$repo/$c" "$fake_bin/stat"
   set +e
-  PATH="$fake_bin:$PATH" SCHED_EVIDENCE="$evidence" \
+  PATH="$fake_bin:$PATH" SCHED_EVIDENCE="$evidence" SCHED_EXPECT_REFILL=1 \
     "$runner" --jobs 2 --json "$tmp/timing.json" \
     "$a" "$b" "$c" >"$tmp/out" 2>"$tmp/err"
   rc=$?
   set -e
   [ "$rc" -eq 0 ] || { cat "$tmp/out" "$tmp/err"; rm -rf "$tmp"; fail "jobs=2 must refill the first completed slot"; }
+  [ -e "$evidence/oldest-saw-refill" ] \
+    || { cat "$tmp/out" "$tmp/err"; rm -rf "$tmp"; fail "jobs=2 must refill a freed slot while the oldest worker is still running"; }
   begin_n=$(grep -c '^FM_TEST_BEGIN ' "$tmp/out" || true)
   end_n=$(grep -c '^FM_TEST_END ' "$tmp/out" || true)
   [ "$begin_n" -eq 3 ] || fail "expected 3 BEGIN markers, got $begin_n"
@@ -624,14 +644,17 @@ SH
   set -e
   [ "$rc" -eq 2 ] || fail "jobs with non-proven fail fixture must refuse before run, got $rc"
 
-  # Parallel failure propagation stays inside the private runner fixture.
+  # Parallel failure propagation stays inside the private runner fixture. It
+  # deliberately runs without SCHED_EXPECT_REFILL: two scripts fill both slots,
+  # so no replacement worker exists to release the oldest fixture and it must
+  # not wait for one.
   cat >"$repo/$b" <<'SH'
 #!/usr/bin/env bash
 echo "not ok - deliberate proven-set fail"
 exit 1
 SH
   chmod +x "$repo/$b"
-  rm -f "$evidence/slow-done"
+  rm -f "$evidence/refill-started" "$evidence/oldest-saw-refill" "$evidence/oldest-exited"
   set +e
   SCHED_EVIDENCE="$evidence" "$runner" --jobs 2 "$a" "$b" >"$tmp/out4" 2>"$tmp/err4"
   rc=$?
