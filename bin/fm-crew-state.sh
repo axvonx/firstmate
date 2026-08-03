@@ -37,11 +37,14 @@
 #      green, so a green PR is never silently read as still-validating. That
 #      override needs an AFFIRMATIVE pass reading: pending, absent, and
 #      indeterminate all stay working, and never report the PR as passing.
-#      It is also the ONLY path that reports checks green. A crew's own
-#      `done: PR <url> checks green` status line is a claim, not a reading:
-#      while a run is attributed and still working, that line never surfaces
-#      the PR as ready on its own, so nothing reaches the captain as passing
-#      without CI corroboration.
+#      Two readings of an attributed run report checks green: this ci-step log
+#      marker, and the terminal `outcome: checks-passed` named above. Both rest
+#      on the same upstream aggregate, which docs/verification/ci-checks-green.md
+#      bounds. A crew's own `done: PR <url> checks green` status line is neither
+#      - it is a claim, not a reading - so while a run is attributed and still
+#      working, that line never surfaces the PR as ready on its own. With NO run
+#      attributed there is nothing to corroborate it against, and the fallback in
+#      4 does report it at face value; that residual is recorded in the same doc.
 #   3. Reconcile the status log: if its last line says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
@@ -470,8 +473,6 @@ fi
 if [ "$HAVE_RUN" = 1 ]; then
   RUN_STATE=working
   RUN_DETAIL=""
-  CI_STEP_STATUS=""
-  CI_LOG_STATE=""
   RUN_STATUS=""
   if [ "$RUN_SOURCE" = coarse ]; then
     # No step/gate detail is available from the plain runs list - only ever
@@ -532,6 +533,9 @@ if [ "$HAVE_RUN" = 1 ]; then
       esac
       if [ "$RUN_STATE" = working ]; then
         CI_STEP_STATUS=$(nm_effective_ci_step_status)
+        # A MONITORING ci step is the only one whose log may be consulted. A
+        # `ci,fixing` step is reworking a red result, so an earlier green marker
+        # in its log is stale by construction and must never read as a pass.
         case "$CI_STEP_STATUS" in
           running)
             CI_LOG_STATE=$(nm_ci_checks_state)
@@ -539,9 +543,6 @@ if [ "$HAVE_RUN" = 1 ]; then
               RUN_STATE="done"
               RUN_DETAIL="checks green: PR ready for review (still monitoring for merge/close)"
             fi
-            ;;
-          fixing)
-            CI_LOG_STATE=not-ready
             ;;
         esac
       fi
