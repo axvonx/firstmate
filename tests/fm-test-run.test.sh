@@ -644,7 +644,10 @@ SH
   set -e
   [ "$rc" -eq 2 ] || fail "jobs with non-proven fail fixture must refuse before run, got $rc"
 
-  # Parallel failure propagation stays inside the private runner fixture.
+  # Parallel failure propagation stays inside the private runner fixture. It
+  # deliberately runs without SCHED_EXPECT_REFILL: two scripts fill both slots,
+  # so no replacement worker exists to release the oldest fixture and it must
+  # not wait for one.
   cat >"$repo/$b" <<'SH'
 #!/usr/bin/env bash
 echo "not ok - deliberate proven-set fail"
