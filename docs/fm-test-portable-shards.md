@@ -72,7 +72,7 @@ The figures below are the 2026-08-02 record: script counts from that day's lane 
 |---|---:|---:|
 | `portable-serial-1` | 32 | ~577 s |
 | `portable-serial-2` | 39 | ~592 s |
-| imbalance | | ~16 s (1.3%) |
+| imbalance | | ~16 s (1.3% of the lane) |
 
 The 577 s / 592 s figures are the sums of the 45 rows in the per-script table below (576.5 s and 592.3 s exactly).
 26 of the 71 residual scripts are not in that table (12 in half 1, 14 in half 2), and they break down as:

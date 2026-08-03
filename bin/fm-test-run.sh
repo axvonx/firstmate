@@ -258,20 +258,20 @@ EOF
 # these scripts out of the proven-isolated parallel shards.
 #
 # Balance is a pinned assignment table plus a stable hash for everything else.
-# The pinned table is longest-processing-time over the measured heavyweights of
-# the 2026-08-02 CI artifact, which carry 1043s of the lane's 1174s; the ~131s of
-# small scripts below them are assigned by a CRC of the basename. Measured split
-# with this table: half 1 ~577s over 32 scripts, half 2 ~592s over 39 scripts.
-# The hash is the load-bearing part: the lane grows by ~1.4 scripts and ~30s a
-# day and an unpinned script would otherwise always land in the same half, so
-# the half that absorbs growth would drift into its time budget on its own. A
-# hash splits new scripts across BOTH halves without anyone maintaining a
-# duration table.
+# The pinned table is longest-processing-time over the heavyweights measured in
+# CI, which carry most of the lane; a CRC of the basename assigns the small
+# scripts below them. The hash is the load-bearing part: the lane grows
+# continuously and an unpinned script would otherwise always land in the same
+# half, so the half that absorbs growth would drift into its time budget on its
+# own. A hash splits new scripts across BOTH halves without anyone maintaining
+# a duration table.
 #
-# This RESETS the clock, it does not stop it. Each half still gains ~15s/day
-# against the 780s budget, so from 577s and 592s both reach it in ~13 days
-# (~2026-08-15) and now arrive together. The next remedy is a third host or a
-# real speedup, not another rebalance. See docs/fm-test-portable-shards.md.
+# Splitting RESETS the clock, it does not stop it: both halves still grow toward
+# the budget together, so the next remedy is a third host or a real speedup, not
+# another rebalance. docs/fm-test-portable-shards.md owns the measured per-half
+# durations and counts, the growth trend, and the projected trip date; keep them
+# there rather than copying a snapshot back here, where nothing would catch the
+# drift.
 #
 # A stale balance only skews wall clock; it can never drop a script, because
 # both halves are computed from the same residual and --check-coverage proves
