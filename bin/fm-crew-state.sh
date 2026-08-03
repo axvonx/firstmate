@@ -37,6 +37,11 @@
 #      green, so a green PR is never silently read as still-validating. That
 #      override needs an AFFIRMATIVE pass reading: pending, absent, and
 #      indeterminate all stay working, and never report the PR as passing.
+#      It is also the ONLY path that reports checks green. A crew's own
+#      `done: PR <url> checks green` status line is a claim, not a reading:
+#      while a run is attributed and still working, that line never surfaces
+#      the PR as ready on its own, so nothing reaches the captain as passing
+#      without CI corroboration.
 #   3. Reconcile the status log: if its last line says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
@@ -261,13 +266,6 @@ nm_gate_findings_count() {
   rest=${rest%%|*}
   case "$rest" in ''|*[!0-9]*) return 0 ;; esac
   printf '%s' "$rest"
-}
-log_reports_ci_ready() {
-  [ "$LOG_VERB" = "done" ] || return 1
-  case "$(status_line_note "$LOG_LINE")" in
-    *PR*"checks green"*|*"checks green"*PR*) return 0 ;;
-    *) return 1 ;;
-  esac
 }
 
 nm_ci_step_status() {
@@ -547,35 +545,6 @@ if [ "$HAVE_RUN" = 1 ]; then
             ;;
         esac
       fi
-    fi
-  fi
-
-  if [ "$RUN_STATE" = working ] && log_reports_ci_ready; then
-    if [ "$RUN_SOURCE" = coarse ]; then
-      emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
-    fi
-    [ -n "$CI_STEP_STATUS" ] || CI_STEP_STATUS=$(nm_effective_ci_step_status)
-    if [ "$RUN_STATUS" = fixing ]; then
-      CI_LOG_STATE=not-ready
-    elif [ "$CI_STEP_STATUS" = running ] && [ -z "$CI_LOG_STATE" ]; then
-      CI_LOG_STATE=$(nm_ci_checks_state)
-    elif [ "$CI_STEP_STATUS" = fixing ]; then
-      CI_LOG_STATE=not-ready
-    fi
-    # While the ci step is actively monitoring, the crew's own "checks green"
-    # claim is corroborated, never taken on trust: only an affirmative green
-    # reading surfaces it. An indeterminate reading (unknown - no run id, an
-    # unreadable or empty ci log, or no recognized marker) means the checks
-    # have not been shown to have concluded, so it is held as still working
-    # rather than reported to the captain as a PR ready for review.
-    CI_READY_CONFIRMED=1
-    if [ "$CI_STEP_STATUS" = running ]; then
-      [ "$CI_LOG_STATE" = green ] || CI_READY_CONFIRMED=0
-    elif [ "$CI_LOG_STATE" = not-ready ]; then
-      CI_READY_CONFIRMED=0
-    fi
-    if [ "$CI_READY_CONFIRMED" = 1 ]; then
-      emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
     fi
   fi
 
