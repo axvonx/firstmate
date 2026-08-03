@@ -34,7 +34,9 @@
 #      the active step is ci, `axi status` alone cannot tell "still waiting on
 #      checks" from "checks green, waiting on merge" (see nm_ci_checks_state) -
 #      a ci-step log-tail check overrides working -> done once checks read
-#      green, so a green PR is never silently read as still-validating.
+#      green, so a green PR is never silently read as still-validating. That
+#      override needs an AFFIRMATIVE pass reading: pending, absent, and
+#      indeterminate all stay working, and never report the PR as passing.
 #   3. Reconcile the status log: if its last line says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
@@ -308,6 +310,18 @@ nm_effective_ci_step_status() {
 # for the MOST RECENT recognized marker (the log is append-only/chronological,
 # so the last match is current): green with nothing red after it means CI is
 # green right now, still only waiting on merge/close.
+#
+# ONLY an affirmative pass marker returns green. Absence of a red signal is not
+# a green one, so every other outcome - no run id, an unreadable or empty log,
+# no recognized marker, or an explicit report that no checks were found - is
+# not-ready or unknown, and neither is ever reported as passing. In particular
+# "no CI checks reported - still monitoring until merged or closed" used to map
+# to green, which is how an unconcluded PR reached the captain as "checks
+# green": that marker states no check could be enumerated, and a gate that
+# cannot enumerate the checks it expects cannot conclude anything. Real logs
+# confirm it is not terminal - occurrences are followed by "CI checks running,
+# waiting for results...", "PR has been closed", or "error: context canceled",
+# never by a pass.
 nm_ci_checks_state() {
   local run_id log_tail marker
   run_id=$(strip_quotes "$(nm_field id)")
@@ -318,8 +332,8 @@ nm_ci_checks_state() {
     | grep -E 'CI checks passed|no CI checks reported - still monitoring|no CI checks reported yet|checks failed|issues detected|CI checks running|base branch advanced.*re-arming CI monitor timeout' \
     | tail -1)
   case "$marker" in
-    *"checks passed"*|*"no CI checks reported - still monitoring"*) printf 'green' ;;
-    *"no CI checks reported yet"*|*"checks failed"*|*"issues detected"*|*"CI checks running"*|*"base branch advanced"*"re-arming CI monitor timeout"*) printf 'not-ready' ;;
+    *"checks passed"*) printf 'green' ;;
+    *"no CI checks reported - still monitoring"*|*"no CI checks reported yet"*|*"checks failed"*|*"issues detected"*|*"CI checks running"*|*"base branch advanced"*"re-arming CI monitor timeout"*) printf 'not-ready' ;;
     *) printf 'unknown' ;;
   esac
 }
@@ -548,7 +562,19 @@ if [ "$HAVE_RUN" = 1 ]; then
     elif [ "$CI_STEP_STATUS" = fixing ]; then
       CI_LOG_STATE=not-ready
     fi
-    if [ "$CI_LOG_STATE" != not-ready ]; then
+    # While the ci step is actively monitoring, the crew's own "checks green"
+    # claim is corroborated, never taken on trust: only an affirmative green
+    # reading surfaces it. An indeterminate reading (unknown - no run id, an
+    # unreadable or empty ci log, or no recognized marker) means the checks
+    # have not been shown to have concluded, so it is held as still working
+    # rather than reported to the captain as a PR ready for review.
+    CI_READY_CONFIRMED=1
+    if [ "$CI_STEP_STATUS" = running ]; then
+      [ "$CI_LOG_STATE" = green ] || CI_READY_CONFIRMED=0
+    elif [ "$CI_LOG_STATE" = not-ready ]; then
+      CI_READY_CONFIRMED=0
+    fi
+    if [ "$CI_READY_CONFIRMED" = 1 ]; then
       emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
     fi
   fi
