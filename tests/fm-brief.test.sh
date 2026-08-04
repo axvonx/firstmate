@@ -860,20 +860,18 @@ test_scout_and_secondmate_scaffold() {
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
 
-# PATH with the directory holding `av` removed, so the vault-absent branch is
-# deterministic on a host that does have Automic Vault installed. A host without
-# it returns PATH unchanged, which is already the absent case.
+# PATH with EVERY directory holding an executable `av` removed, so the
+# vault-absent branch is deterministic on a host that has Automic Vault installed
+# more than once - dropping only the directory `command -v av` resolved first
+# would just uncover the next copy. An empty entry means the current directory and
+# is dropped for the same reason. A host with no `av` anywhere on PATH loses
+# nothing, which is already the absent case.
 path_without_av() {
-  local resolved dir entry out=""
-  resolved=$(command -v av 2>/dev/null) || { printf '%s\n' "$PATH"; return 0; }
-  case "$resolved" in
-    /*) : ;;
-    *) printf '%s\n' "$PATH"; return 0 ;;
-  esac
-  dir=${resolved%/*}
+  local entry out=""
   local IFS=:
   for entry in $PATH; do
-    [ "$entry" = "$dir" ] && continue
+    [ -n "$entry" ] || continue
+    [ -x "${entry%/}/av" ] && continue
     out="${out}${out:+:}$entry"
   done
   printf '%s\n' "$out"
@@ -886,11 +884,14 @@ path_without_av() {
 # tool it does not have. Both branches are driven through PATH rather than an
 # ambient host fact, so each is exercised wherever the suite runs.
 test_credential_rule_covers_ship_and_scout() {
-  local home id brief kind fakebin novault
+  local home id brief kind fakebin novault probe_line inject_line
   home="$TMP_ROOT/credential-home"
   write_registry "$home"
   fakebin=$(fm_fakebin "$TMP_ROOT/credential-vault")
   fm_fake_exit0 "$fakebin" av
+  # An exported shell function named `av` would be inherited by the scaffold and
+  # satisfy its `command -v av` gate no matter what PATH says, so drop it too.
+  unset -f av 2>/dev/null || true
   novault=$(path_without_av)
 
   for kind in ship scout; do
@@ -913,6 +914,34 @@ test_credential_rule_covers_ship_and_scout() {
     # shellcheck disable=SC2016  # literal brief text: the parameter expansion must not expand here
     assert_grep 'test it (`[ -n "${SOME_API_KEY:-}" ]`) rather than printing it' "$brief" \
       "$kind: never-print rule left the worker no way to check a credential without printing it"
+
+    # Half two opens with an identity probe: `av` is a name, not proof of the tool
+    # behind it, and other tools ship a command by that name. A worker that pipes a
+    # credential through a foreign `av` has leaked it to whatever that program is.
+    # shellcheck disable=SC2016  # literal brief text: backticks must stay literal
+    assert_grep 'Before you use `av` for anything, confirm the `av` on this machine IS Automic Vault' "$brief" \
+      "$kind: vault guidance let the worker trust a command by name alone"
+    assert_grep "av help 2>&1 | grep -q 'automicvault\.com'" "$brief" \
+      "$kind: vault guidance did not give the worker a concrete identity probe to run"
+    # shellcheck disable=SC2016  # literal brief text: backticks must stay literal
+    assert_grep '`av` is only a command name and other tools ship one by that same name' "$brief" \
+      "$kind: vault guidance did not say why a name is not proof of the tool"
+    # A failed probe is an escalation, not a puzzle to work around.
+    # shellcheck disable=SC2016  # literal brief text: backticks must stay literal
+    assert_grep 'append `blocked: av on this machine is not Automic Vault` to the status file and stop' "$brief" \
+      "$kind: a failed identity probe did not route into the brief's stop-and-report path"
+    # shellcheck disable=SC2016  # literal brief text: backticks must stay literal
+    assert_grep 'other output, an error, or no `av` on this machine at all' "$brief" \
+      "$kind: identity probe left a missing or foreign av as an undefined case"
+    assert_grep "Never guess at another vault command and never fall back to reading the credential out of the ambient environment" "$brief" \
+      "$kind: identity probe left the ambient environment open as a fallback"
+    assert_grep "that ambient copy is the exposure this rule exists to remove, so stopping and reporting is correct here and improvising is not" "$brief" \
+      "$kind: brief did not say why stopping beats falling back to the ambient environment"
+    # The probe only protects the worker if it is read before the tool is used.
+    probe_line=$(grep -nF "automicvault" "$brief" | head -1 | cut -d: -f1)
+    inject_line=$(grep -nF 'av inject +SERVICE_API_KEY' "$brief" | head -1 | cut -d: -f1)
+    [ -n "$probe_line" ] && [ -n "$inject_line" ] && [ "$probe_line" -lt "$inject_line" ] \
+      || fail "$kind: identity probe must be stated before the av inject invocation it guards"
 
     # Half two: how to actually reach a credential, keys named at the call site.
     assert_grep "Credentials belong in Automic Vault rather than the ambient environment" "$brief" \
@@ -968,6 +997,10 @@ test_credential_rule_covers_ship_and_scout() {
       "$kind: vault-absent brief carried the bless prohibition with no vault installed"
     assert_no_grep "av list" "$brief" \
       "$kind: vault-absent brief carried vault discovery with no vault installed"
+    assert_no_grep "automicvault" "$brief" \
+      "$kind: vault-absent brief carried the vault identity probe with no vault installed"
+    assert_no_grep "av help" "$brief" \
+      "$kind: vault-absent brief instructs a help command this host does not have"
   done
 
   # A secondmate is a firstmate in its own home and reads the same rule from that
@@ -990,6 +1023,12 @@ test_credential_rule_covers_ship_and_scout() {
     "fm-brief.sh --help does not document that the vault half is conditional"
   assert_contains "$help" "is on PATH at scaffold time" \
     "fm-brief.sh --help does not document how the vault half is gated"
+  assert_contains "$help" "an identity probe the" \
+    "fm-brief.sh --help does not document the runtime identity probe the brief requires"
+  assert_contains "$help" "av help 2>&1 | grep -q 'automicvault\.com'" \
+    "fm-brief.sh --help does not document the concrete probe command"
+  assert_contains "$help" "Gate and probe are complementary" \
+    "fm-brief.sh --help does not document that the scaffold gate and the runtime probe decide different things"
   assert_contains "$help" "it hard-codes no key list" \
     "fm-brief.sh --help does not document that the scaffold carries no rotting key list"
   pass "fm-brief.sh: ship and scout briefs teach vault-backed credential access and never print a value"

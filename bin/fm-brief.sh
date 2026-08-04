@@ -90,6 +90,15 @@
 # half is the vault call pattern, and it renders only when `av` (Automic Vault)
 # is on PATH at scaffold time, so a machine without the vault keeps the first
 # half and is never told to reach for a tool it does not have.
+# That gate proves only that something named `av` is there, and other tools ship
+# a command by the same name, so the vault half opens with an identity probe the
+# worker actually runs before reaching for the tool:
+# `av help 2>&1 | grep -q 'automicvault\.com'` must succeed, and a probe that
+# fails - a foreign `av`, or none at all in the pane's own PATH - requires a
+# `blocked:` status line and a stop, never a guess at another command and never a
+# fallback to the ambient environment, which is the exposure the rule removes.
+# Gate and probe are complementary: the gate decides whether the vault half is
+# emitted at all, the probe decides whether the worker may use what it found.
 # The pattern taught is the explicit `av inject +KEY [+KEY...] -- <command>`
 # form, deliberately not `av bless` plus a bare `av inject --`: naming the keys
 # at the call site keeps a money-spending command's credentials visible, and
@@ -332,6 +341,10 @@ EOF
 CREDENTIALS_RULE=${CREDENTIALS_RULE%$'\n'}
 if command -v av >/dev/null 2>&1; then
   IFS= read -r -d '' CREDENTIALS_VAULT <<'EOF' || true
+   Before you use `av` for anything, confirm the `av` on this machine IS Automic Vault by running `av help 2>&1 | grep -q 'automicvault\.com'`, which must succeed.
+   `av` is only a command name and other tools ship one by that same name, so an `av` that fails that probe is a different program, and naming a credential to it would hand that credential to whatever it actually is.
+   If the probe does not confirm the vault - other output, an error, or no `av` on this machine at all - append `blocked: av on this machine is not Automic Vault` to the status file and stop.
+   Never guess at another vault command and never fall back to reading the credential out of the ambient environment: that ambient copy is the exposure this rule exists to remove, so stopping and reporting is correct here and improvising is not.
    Credentials belong in Automic Vault rather than the ambient environment, so any command that authenticates or spends money names the keys it needs at the call site: `av inject +SERVICE_API_KEY +OTHER_TOKEN -- pnpm run benchmark`.
    One `+KEY` per credential, then `--`, then the command; the command itself needs no change, because it still reads the same variables it always did and only the way you launch it changes.
    Name the keys YOUR task actually needs instead of copying that example - `av list` shows the names this machine holds, and `av help` covers the rest.
