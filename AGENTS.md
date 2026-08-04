@@ -159,6 +159,8 @@ Do not dispatch until the required tools are present and GitHub authentication i
 Use `gh-axi` for GitHub, `chrome-devtools-axi` for browser work, and `lavish-axi` for structured decisions or reports; consult current help rather than memorizing flags.
 When browser work is finished, park every page you opened with `chrome-devtools-axi open about:blank`, reaching each one through `pages` and `selectpage`, since `open` navigates only the currently selected page while an abandoned page renders at full CPU indefinitely and about:blank measures 0.0%.
 Never `stop` it and never park a page you did not open, because one session serves every actor: stopping kills the crew's browsers and parking their page blanks their next screenshot.
+Never print, echo, log, or paste a credential value, and never let one reach a commit, a brief, a status line, or a pull request, because everything an agent prints is sent to a model provider, so a printed credential is a leaked credential that must be rotated.
+Where a credential vault is installed, reach a credential by naming it at the call site with `av inject +KEY [+KEY...] -- <command>` instead of relying on the ambient environment; `bin/fm-brief.sh` teaches the same rule to every crewmate and scout it briefs.
 A silent bootstrap section needs no action; for any printed actionable diagnostic line, load `bootstrap-diagnostics` and follow its owner procedure.
 `BOOTSTRAP_INFO:` lines are completed no-action facts and do not require loading a skill.
 `secondmate-provisioning` owns startup secondmate sync, liveness, and inherited local-material convergence.

@@ -84,6 +84,20 @@
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
 # over copied detail) and has the crewmate add the fm-ensure-agents-md.sh
 # self-governance section when a touched project AGENTS.md lacks it.
+# Ship and scout briefs both carry a credential rule. Its first half is
+# unconditional: never print a credential value, because everything a crewmate
+# prints reaches a model provider, so a printed key is a leaked key. Its second
+# half is the vault call pattern, and it renders only when `av` (Automic Vault)
+# is on PATH at scaffold time, so a machine without the vault keeps the first
+# half and is never told to reach for a tool it does not have.
+# The pattern taught is the explicit `av inject +KEY [+KEY...] -- <command>`
+# form, deliberately not `av bless` plus a bare `av inject --`: naming the keys
+# at the call site keeps a money-spending command's credentials visible, and
+# `av bless` approves a script by path, which for a project script would mix a
+# local approval into the change being shipped. The scaffold teaches the pattern
+# and tells the worker to name its own task's keys; it hard-codes no key list,
+# which would rot. Secondmate charters carry no such rule: a secondmate operates
+# from its home's AGENTS.md, which owns the same contract for firstmate itself.
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -306,6 +320,27 @@ EOF
 HERDR_SECTION=${HERDR_SECTION%$'\n'}
 fi
 
+# Credential rule for ship and scout briefs, quoted heredocs throughout so the
+# backticks and `${VAR:-}` snippets reach the crewmate verbatim. The first half
+# holds on every machine. The vault half is added only where Automic Vault is
+# actually installed, so a machine without it never sees the vault instructions.
+IFS= read -r -d '' CREDENTIALS_RULE <<'EOF' || true
+8. Never print, echo, log, or paste the VALUE of an API key, token, or other credential - not into your pane, not into a file you write, and not into a commit, a status line, or a pull request body.
+   Everything you print is sent to a model provider, so a printed credential is a leaked credential that has to be rotated.
+   Refer to a credential by its variable name, and when you need to know whether one is set, test it (`[ -n "${SOME_API_KEY:-}" ]`) rather than printing it.
+EOF
+CREDENTIALS_RULE=${CREDENTIALS_RULE%$'\n'}
+if command -v av >/dev/null 2>&1; then
+  IFS= read -r -d '' CREDENTIALS_VAULT <<'EOF' || true
+   Credentials belong in Automic Vault rather than the ambient environment, so any command that authenticates or spends money names the keys it needs at the call site: `av inject +SERVICE_API_KEY +OTHER_TOKEN -- pnpm run benchmark`.
+   One `+KEY` per credential, then `--`, then the command; the command itself needs no change, because it still reads the same variables it always did and only the way you launch it changes.
+   Name the keys YOUR task actually needs instead of copying that example - `av list` shows the names this machine holds, and `av help` covers the rest.
+   An authentication failure or an unset key is the signal that a command needs `av inject`; it is never a reason to hunt for the value, read it out of a config file, or ask for it to be pasted to you.
+   Do not use `av bless`: it approves a script by path, so blessing a file inside the project would mix a local approval into the change you are shipping, and the explicit `+KEY` form needs no blessing at all.
+EOF
+  CREDENTIALS_RULE="$CREDENTIALS_RULE"$'\n'"${CREDENTIALS_VAULT%$'\n'}"
+fi
+
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -345,6 +380,7 @@ The report is the only thing that survives, so anything worth keeping must be in
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+$CREDENTIALS_RULE
 
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
@@ -510,6 +546,7 @@ $RULE2
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+$CREDENTIALS_RULE
 $VISUAL_EVIDENCE_SECTION
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.
