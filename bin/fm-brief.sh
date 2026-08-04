@@ -84,6 +84,43 @@
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
 # over copied detail) and has the crewmate add the fm-ensure-agents-md.sh
 # self-governance section when a touched project AGENTS.md lacks it.
+# Ship and scout briefs both carry a credential rule. Its first half is
+# unconditional: never print a credential value, because everything a crewmate
+# prints reaches a model provider, so a printed key is a leaked key. Its second
+# half is the vault call pattern, and it renders only when `av` (Automic Vault)
+# is on PATH at scaffold time, so a machine without the vault keeps the first
+# half and is never told to reach for a tool it does not have.
+# That gate proves only that something named `av` is there, and other tools ship
+# a command by the same name, so the vault half opens with an identity probe the
+# worker actually runs before reaching for the tool:
+# `av help 2>&1 | grep -q 'automicvault\.com'` must succeed, and a probe that
+# fails - a foreign `av`, or none at all in the pane's own PATH - requires a
+# `blocked:` status line and a stop, never a guess at another command and never a
+# fallback to the ambient environment, which is the exposure the rule removes.
+# Gate and probe are complementary: the gate decides whether the vault half is
+# emitted at all, the probe decides whether the worker may use what it found.
+# Stopping is not probe-only: the brief routes the whole vault path the same way
+# - a failed probe, a failed `av inject`, a key the vault does not hold, or a
+# credential that otherwise never arrives - since `av list` cannot stand in for
+# any of that (it fails while the vault's approval service is down, which is why
+# the probe is built on `av help` instead).
+# The prohibition is positive rather than implied: after a vault failure the
+# worker never reruns the command bare, because the ambient copy of a key is
+# still present at this step, so a bare rerun can succeed silently on that
+# exposed copy, and a fallback that works hides what a visible error would show.
+# That routing is separate from the wrapped command's own exit code: a failing
+# test or a bug in the script is debugged normally, under the same wrapper, so
+# the rule contains the credential path without blocking ordinary work.
+# The pattern taught is the explicit `av inject +KEY [+KEY...] -- <command>`
+# form, deliberately not `av bless` plus a bare `av inject --`: naming the keys
+# at the call site keeps a money-spending command's credentials visible, and
+# `av bless` approves a script by path, which for a project script would mix a
+# local approval into the change being shipped. The scaffold teaches the pattern
+# and tells the worker to name its own task's keys; it hard-codes no key list,
+# which would rot. Secondmate charters carry no such rule: a secondmate operates
+# from its home's AGENTS.md, which keeps a one-line reinforcement of the
+# invariant and points here for the contract, so this script is the single owner
+# of the credential rule for every audience.
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -306,6 +343,36 @@ EOF
 HERDR_SECTION=${HERDR_SECTION%$'\n'}
 fi
 
+# Credential rule for ship and scout briefs, quoted heredocs throughout so the
+# backticks and `${VAR:-}` snippets reach the crewmate verbatim. The first half
+# holds on every machine. The vault half is added only where Automic Vault is
+# actually installed, so a machine without it never sees the vault instructions.
+IFS= read -r -d '' CREDENTIALS_RULE <<'EOF' || true
+8. Never print, echo, log, or paste the VALUE of an API key, token, or other credential - not into your pane, not into a file you write, and not into a commit, a status line, or a pull request body.
+   Everything you print is sent to a model provider, so a printed credential is a leaked credential that has to be rotated.
+   Refer to a credential by its variable name, and when you need to know whether one is set, test it (`[ -n "${SOME_API_KEY:-}" ]`) rather than printing it.
+EOF
+CREDENTIALS_RULE=${CREDENTIALS_RULE%$'\n'}
+if command -v av >/dev/null 2>&1; then
+  IFS= read -r -d '' CREDENTIALS_VAULT <<'EOF' || true
+   Before you use `av` for anything, confirm the `av` on this machine IS Automic Vault by running `av help 2>&1 | grep -q 'automicvault\.com'`, which must succeed.
+   `av` is only a command name and other tools ship one by that same name, so an `av` that fails that probe is a different program, and naming a credential to it would hand that credential to whatever it actually is.
+   If the probe does not confirm the vault - other output, an error, or no `av` on this machine at all - append `blocked: av on this machine is not Automic Vault` to the status file and stop.
+   Never guess at another vault command and never fall back to reading the credential out of the ambient environment: that ambient copy is the exposure this rule exists to remove, so stopping and reporting is correct here and improvising is not.
+   Credentials belong in Automic Vault rather than the ambient environment, so any command that authenticates or spends money names the keys it needs at the call site: `av inject +SERVICE_API_KEY +OTHER_TOKEN -- pnpm run benchmark`.
+   One `+KEY` per credential, then `--`, then the command; the command itself needs no change, because it still reads the same variables it always did and only the way you launch it changes.
+   Name the keys YOUR task actually needs instead of copying that example - `av list` shows the names this machine holds, and `av help` covers the rest.
+   `av list` is not a liveness check for the vault: it fails while the vault's approval service is not running, so a failed listing is not proof that a key is absent, and the identity probe above is the one check that does not depend on that service.
+   An authentication failure or an unset key is the signal that a command needs `av inject`; it is never a reason to hunt for the value, read it out of a config file, or ask for it to be pasted to you.
+   When the vault path itself fails - the identity probe fails, `av inject` fails, the key you named is not in the vault, or the credential otherwise never arrives - append `blocked: {the vault failure}` to the status file and stop.
+   Never rerun the command bare, meaning never drop the `av inject ... --` wrapper and launch the command directly, because a copy of some keys is still sitting in the ambient environment and a bare rerun can quietly succeed on that exposed copy - the exact exposure this rule exists to remove.
+   A fallback that works is worse than an error here: the error is visible and the silent success is not, so a failed vault call ends the attempt instead of being worked around.
+   That is a rule about the wrapper and not about the wrapped command's own exit code: when the command itself runs and fails on its own merits - a failing test, a compile error, a bug in the script - debug it normally, and keep every rerun under the same `av inject` wrapper.
+   Do not use `av bless`: it approves a script by path, so blessing a file inside the project would mix a local approval into the change you are shipping, and the explicit `+KEY` form needs no blessing at all.
+EOF
+  CREDENTIALS_RULE="$CREDENTIALS_RULE"$'\n'"${CREDENTIALS_VAULT%$'\n'}"
+fi
+
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -345,6 +412,7 @@ The report is the only thing that survives, so anything worth keeping must be in
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+$CREDENTIALS_RULE
 
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
@@ -510,6 +578,7 @@ $RULE2
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+$CREDENTIALS_RULE
 $VISUAL_EVIDENCE_SECTION
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.
