@@ -363,6 +363,87 @@ crew_is_paused() {  # <id>
   [ "$(crew_absorb_class "$1")" = paused ]
 }
 
+# How recently a pipeline step must have LOGGED for that alone to prove it is
+# advancing. Deliberately far above the pane-silence threshold and calibrated
+# against measurement rather than taste: on 2026-08-03 this fleet's live
+# activity ages reached 445s and gaps between an agent's own progress lines in
+# real step logs reached 1213s, so anything near the 240s pane bound would
+# simply reproduce the false alarm this predicate exists to remove.
+FM_STEP_ACTIVITY_FRESH_SECS=${FM_STEP_ACTIVITY_FRESH_SECS:-1800}
+
+# The hard ceiling on how long a step may go without logging even while its
+# agent process is still alive. A live process is evidence of work but not proof
+# of progress - a hung agent is also a live process - so tier 2 below must
+# expire, or suppression would become a permanent blind spot, which is strictly
+# worse than the false alarm. Set well past any single legitimate silent tool
+# call (the pipeline's own steps run 10-55 minutes end to end).
+FM_STEP_STALL_MAX_SECS=${FM_STEP_STALL_MAX_SECS:-7200}
+
+# 0 if crew <id>'s own pipeline run shows it is GETTING ANYWHERE, from the
+# `activity: <N>s` and `step-agent: alive|gone` fields bin/fm-crew-state.sh
+# emits out of `axi status`.
+#
+# This is the question crew_is_provably_working cannot answer. That predicate is
+# a boolean about the current step's STATE, so a run whose step froze still
+# reads `working` forever, and the wedge ladder escalated on pane silence alone.
+#
+# WHY LAST-ACTIVITY ALONE IS NOT ENOUGH - the trap to avoid re-entering. That
+# field is the one that sounds like it means "is it working", and it does not:
+# it tracks the agent's LOG LINES. A step that begins with a long tool call - a
+# build, a full test suite, an install - logs its opening line and then goes
+# quiet for minutes while doing exactly what it should. Measured 2026-08-03 on
+# mkt-pr40-takeover's test step: last_activity read 6m18s old while that run's
+# gate worktree was writing build output 2 minutes old. It was compiling. It was
+# fine. Judging that on log recency alone calls a healthy build wedged.
+#
+# So the decision is two-tiered, and escalates only when BOTH are negative:
+#   tier 1  the step logged within FM_STEP_ACTIVITY_FRESH_SECS -> advancing
+#   tier 2  the step's agent process is still alive AND the silence has not yet
+#           reached FM_STEP_STALL_MAX_SECS -> advancing
+# Tier 2 covers exactly the quiet-build case; its ceiling is what keeps a
+# genuinely hung agent escalating rather than being suppressed forever.
+#
+# Rejected alternatives, so they are not retried: `active_for` and the steps[]
+# table's duration_ms both measure elapsed time, so they climb for a frozen step
+# and cannot indicate progress at all; filesystem recency in the gate worktree
+# is the strongest signal but needs a path this reader does not have, and the
+# build output a naive filter would exclude was the very evidence that settled
+# the measurement above.
+#
+# Fails to 1 on every uncertain reading - no run attributed, a terminal or
+# coarsely-attributed run, an unparseable age, an absent agent pid - so a
+# missing answer escalates exactly as before rather than silently suppressing a
+# real wedge. Costs one bounded fm-crew-state.sh read, so callers run it only at
+# escalation time, never every poll.
+crew_step_is_advancing() {  # <id>
+  local id=$1 line age agent
+  [ -n "$id" ] || return 1
+  line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
+  case "$line" in
+    state:*"activity: "*) ;;
+    *) return 1 ;;
+  esac
+  age=${line#*activity: }
+  age=${age%% *}
+  age=${age%s}
+  case "$age" in ''|*[!0-9]*) return 1 ;; esac
+  # Tier 1: recent log output is progress on its own. Written as an if rather
+  # than `test && return`, whose non-zero list status would abort a future
+  # caller that adds set -e.
+  if [ "$age" -lt "$FM_STEP_ACTIVITY_FRESH_SECS" ]; then
+    return 0
+  fi
+  # Tier 2: a quiet but live agent, bounded.
+  case "$line" in
+    *"step-agent: "*) ;;
+    *) return 1 ;;
+  esac
+  agent=${line#*step-agent: }
+  agent=${agent%% *}
+  [ "$agent" = alive ] || return 1
+  [ "$age" -lt "$FM_STEP_STALL_MAX_SECS" ]
+}
+
 # 0 (benign/absorb) if EVERY task referenced by a no-verb "signal:" wake is provably
 # working; 1 (actionable/surface) if any is not, or no task can be resolved. Pass the
 # same space-separated file list as signal_reason_is_actionable. Files are mapped to

@@ -42,8 +42,12 @@
 #     routine is escalated.
 #   - Bounded wedge latency: a stale pane without a declared external wait is
 #     escalated only after it has been idle for STALE_ESCALATE_SECS
-#     (configurable), rechecked once. A wedged crewmate is therefore detected
-#     within STALE_ESCALATE_SECS + a tick, never lost. A declared pause instead
+#     (configurable), rechecked once, and only when the run's own step progress
+#     does not show it still advancing (crew_step_is_advancing) - a running
+#     pipeline holds a silent pane for the whole length of one step, which is
+#     not a wedge. A crewmate that stops making progress is therefore detected
+#     within STALE_ESCALATE_SECS plus that predicate's own bound, never lost.
+#     A declared pause instead
 #     gets its own longer PAUSE_RESURFACE_SECS recheck, never a wedge escalation.
 #     Crewmates are autonomous, so a delayed stale response does not stall a
 #     healthy crewmate's own progress.
@@ -86,8 +90,16 @@
 #                                   disables. Use sparingly: it overrides the
 #                                   captain-relevant escalation for matching
 #                                   kinds.
-#          FM_STALE_ESCALATE_SECS   idle seconds before a stale pane escalates
-#                                   as a possible wedge (default 240)
+#          FM_STALE_ESCALATE_SECS   idle seconds before a stale pane is
+#                                   rechecked as a possible wedge (default 240)
+#          FM_STEP_ACTIVITY_FRESH_SECS
+#                                   how recently the run's active pipeline step
+#                                   must have logged for that recheck to absorb
+#                                   the stale instead of escalating it
+#                                   (default 1800)
+#          FM_STEP_STALL_MAX_SECS   ceiling on that silence while the step's
+#                                   agent process is still alive, after which it
+#                                   escalates anyway (default 7200)
 #          FM_PAUSE_RESURFACE_SECS  idle seconds before a declared external wait
 #                                   re-surfaces as a recheck (default 3600)
 #          FM_ESCALATE_BATCH_SECS   buffer window for batched escalation
@@ -1014,8 +1026,16 @@ housekeeping() {  # <state>
     case "$?" in
       0) rm -f "$marker" ;;
       2) rm -f "$marker" ;;
-      *) escalate_add "$state" "stale persisted ${age}s (possible wedge): $win"
-         stale_marker_remove "$win" "$state" ;;
+      *) # Same recheck the always-on watcher applies before escalating: a
+         # silent pane whose pipeline step is still advancing is not wedged, so
+         # reset the marker for another window instead of spending a digest slot
+         # on it. Any uncertain reading escalates exactly as before.
+         if crew_step_is_advancing "$task"; then
+           printf '%s' "$now" > "$marker"
+         else
+           escalate_add "$state" "stale persisted ${age}s (possible wedge, no step progress): $win"
+           stale_marker_remove "$win" "$state"
+         fi ;;
     esac
   done
 

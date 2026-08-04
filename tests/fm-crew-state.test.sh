@@ -215,6 +215,45 @@ run:
 EOF
 }
 
+# A run mid-fix-round: the pipeline has advanced its head inside its own gate
+# worktree, so run head is a commit this worktree has never seen, and branch_sync
+# reports pipeline_owned. Shape verified against no-mistakes v1.41.2 on
+# 2026-08-03. $1 branch, $2 the worktree head the run was handed, $3 the
+# pipeline's advanced head, $4 optional last_activity rendering, $5 optional
+# agent pid (defaults to this test process, which is by definition alive).
+run_pipeline_owned() {  # <branch> <submitted-head> <pipeline-head> [activity] [pid]
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: running
+  head: $3
+  findings: 3 auto-fix
+  steps[3]{step,status,findings,duration_ms}:
+    intent,completed,0,0
+    rebase,completed,0,1260
+    review,fixing,3,3340543
+  active_steps[1]{step,status,active_for,last_activity,agent_pid,round}:
+    review,fixing,1h7m,"${4:-25s} ago: log: Round 4. Reviewing \`${3}\`.","${5:-$$}",fix 3
+branch_sync:
+  state: pipeline_owned
+  changed: false
+  local:
+    branch: $1
+    head: $2
+    clean: true
+  pipeline:
+    run: "01RUN"
+    status: running
+    phase: pre_push
+    submitted_head: $2
+    current_head: $3
+    pushed_head: ""
+target:
+  remote: origin
+EOF
+}
+
 run_parked() {  # <branch>
   cat <<EOF
 run:
@@ -1365,6 +1404,161 @@ test_missing_run_head_falls_back_to_current_state() {
   pass "missing run head falls back instead of matching by branch"
 }
 
+# --- pipeline-owned attribution and step activity ---------------------------
+# Regression for the 2026-08-03 fleet-wide false-wedge incident. While a fix
+# round runs, the pipeline commits in its OWN gate worktree, so the run head is
+# not merely ahead of this worktree - it is absent from its object store, and
+# the head rule rejected an actively-running run. Every mid-fix-round crew then
+# read `unknown · none`, nothing could be absorbed as provably working, and
+# supervision escalated healthy lanes as possible wedges. A head no rev-parse
+# here can resolve reproduces exactly that.
+
+test_pipeline_owned_fix_round_is_attributed() {
+  reset_fakes
+  local d local_head out
+  d=$(new_case pipeline-owned)
+  make_repo_on_branch "$d/wt" fm/feat-owned
+  local_head=$(git -C "$d/wt" rev-parse HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/owned.meta" "window=fm:fm-owned" "worktree=$d/wt" "kind=ship"
+  # The pipeline head is a commit this worktree has never seen.
+  FM_FAKE_AXI_STATUS="$(run_pipeline_owned fm/feat-owned "$local_head" 29bcdbf167bfdeb32903a064eae7e800d7d00885)"
+  out=$(run_crew_state "$d" owned)
+  assert_contains "$out" "state: working" "a pipeline-owned fix round is still working"
+  assert_contains "$out" "source: run-step" "a pipeline-owned fix round is attributed to its run"
+  pass "a fix round whose pipeline head is unknown to the worktree is still attributed"
+}
+
+test_pipeline_owned_reports_step_activity_age() {
+  reset_fakes
+  local d local_head out
+  d=$(new_case pipeline-owned-activity)
+  make_repo_on_branch "$d/wt" fm/feat-act
+  local_head=$(git -C "$d/wt" rev-parse HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/act.meta" "window=fm:fm-act" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_pipeline_owned fm/feat-act "$local_head" 29bcdbf1 1m13s)"
+  out=$(run_crew_state "$d" act)
+  assert_contains "$out" "activity: 73s" "1m13s ago must read as 73 seconds"
+  # The hour form drops the seconds component entirely (verified on v1.41.2).
+  FM_FAKE_AXI_STATUS="$(run_pipeline_owned fm/feat-act "$local_head" 29bcdbf1 1h0m)"
+  out=$(run_crew_state "$d" act)
+  assert_contains "$out" "activity: 3600s" "1h0m ago must read as 3600 seconds"
+  pass "step activity recency is published as a parseable age on the state line"
+}
+
+# The hazard the head rule exists to prevent must survive: a run handed a
+# DIFFERENT commit than the one checked out is about code this worktree does not
+# have, pipeline_owned or not.
+test_pipeline_owned_stale_submitted_head_not_attributed() {
+  reset_fakes
+  local d out
+  d=$(new_case pipeline-owned-stale)
+  make_repo_on_branch "$d/wt" fm/feat-stale
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/pstale.meta" "window=fm:fm-pstale" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: local work moved on\n' > "$d/state/pstale.status"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" pstale
+  FM_FAKE_AXI_STATUS="$(run_pipeline_owned fm/feat-stale 1111111111111111111111111111111111111111 29bcdbf1)"
+  out=$(run_crew_state "$d" pstale)
+  assert_not_contains "$out" "source: run-step" "a run handed a different commit must not be attributed"
+  pass "pipeline_owned does not attribute a run that was handed different code"
+}
+
+test_pipeline_owned_other_run_id_not_attributed() {
+  reset_fakes
+  local d local_head out
+  d=$(new_case pipeline-owned-otherrun)
+  make_repo_on_branch "$d/wt" fm/feat-other
+  local_head=$(git -C "$d/wt" rev-parse HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/oth.meta" "window=fm:fm-oth" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: waiting\n' > "$d/state/oth.status"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" oth
+  # branch_sync describes a DIFFERENT run than the one being reported.
+  FM_FAKE_AXI_STATUS="$(run_pipeline_owned fm/feat-other "$local_head" 29bcdbf1 \
+    | sed 's/^    run: "01RUN"/    run: "01OTHER"/')"
+  out=$(run_crew_state "$d" oth)
+  assert_not_contains "$out" "source: run-step" "branch_sync for another run must not attribute this one"
+  pass "pipeline_owned does not attribute when branch_sync names a different run"
+}
+
+# Absence of a reading must never be read as "advancing": a terminal run has no
+# active_steps block at all, and an unrecognized rendering must not parse.
+test_terminal_run_reports_no_step_activity() {
+  reset_fakes
+  local d out
+  d=$(new_case terminal-no-activity)
+  make_repo_on_branch "$d/wt" fm/feat-term
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/term.meta" "window=fm:fm-term" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_passed fm/feat-term)"
+  out=$(run_crew_state "$d" term)
+  assert_not_contains "$out" "activity:" "a terminal run must publish no step activity"
+  pass "a terminal run publishes no step-activity reading"
+}
+
+test_unparseable_activity_rendering_omits_field() {
+  reset_fakes
+  local d local_head out
+  d=$(new_case activity-unparseable)
+  make_repo_on_branch "$d/wt" fm/feat-weird
+  local_head=$(git -C "$d/wt" rev-parse HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/weird.meta" "window=fm:fm-weird" "worktree=$d/wt" "kind=ship"
+  # A future rendering this parser does not recognize.
+  FM_FAKE_AXI_STATUS="$(run_pipeline_owned fm/feat-weird "$local_head" 29bcdbf1 'a while')"
+  out=$(run_crew_state "$d" weird)
+  assert_contains "$out" "state: working" "an unparseable age must not disturb the state"
+  assert_not_contains "$out" "activity:" "an unparseable age must publish no reading"
+  pass "an unrecognized activity rendering publishes no reading rather than a wrong one"
+}
+
+# The step's agent process is the second half of the progress evidence, because
+# last_activity tracks log lines and goes quiet during a long tool call. The pid
+# is taken as the row's last fully-numeric quoted token, never by comma-splitting
+# a row whose last_activity text may itself contain commas.
+test_step_agent_liveness_is_published() {
+  reset_fakes
+  local d local_head out dead_pid
+  d=$(new_case step-agent)
+  make_repo_on_branch "$d/wt" fm/feat-agent
+  local_head=$(git -C "$d/wt" rev-parse HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/agent.meta" "window=fm:fm-agent" "worktree=$d/wt" "kind=ship"
+  # Default pid is this test process, which is alive by construction.
+  FM_FAKE_AXI_STATUS="$(run_pipeline_owned fm/feat-agent "$local_head" 29bcdbf1 25s)"
+  out=$(run_crew_state "$d" agent)
+  assert_contains "$out" "step-agent: alive" "a running agent pid must publish alive"
+  # A reaped child's pid is dead by construction.
+  sh -c 'exit 0' & dead_pid=$!
+  wait "$dead_pid" 2>/dev/null || true
+  FM_FAKE_AXI_STATUS="$(run_pipeline_owned fm/feat-agent "$local_head" 29bcdbf1 25s "$dead_pid")"
+  out=$(run_crew_state "$d" agent)
+  assert_contains "$out" "step-agent: gone" "a dead agent pid must publish gone"
+  pass "step-agent liveness is published alongside the activity age"
+}
+
+# A row whose last_activity prose contains commas must still yield the pid.
+test_step_agent_pid_survives_commas_in_activity_text() {
+  reset_fakes
+  local d local_head out
+  d=$(new_case step-agent-commas)
+  make_repo_on_branch "$d/wt" fm/feat-commas
+  local_head=$(git -C "$d/wt" rev-parse HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/comma.meta" "window=fm:fm-comma" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_pipeline_owned fm/feat-commas "$local_head" 29bcdbf1 \
+    '25s ago: log: reviewing a.go, b.go, and c.go" ;#')"
+  out=$(run_crew_state "$d" comma)
+  # The fixture nests the whole thing in the quoted field; the pid is still the
+  # last fully-numeric quoted token on the row.
+  assert_contains "$out" "step-agent: alive" "commas in activity prose must not break pid extraction"
+  pass "the agent pid survives commas inside the quoted activity text"
+}
+
 test_active_run_is_authoritative
 test_stale_needs_decision_superseded
 test_stale_blocked_superseded
@@ -1416,5 +1610,14 @@ test_historical_same_branch_rewritten_head_not_current
 test_active_run_descendant_fix_head_remains_current
 test_local_advanced_past_run_head_invalidates
 test_missing_run_head_falls_back_to_current_state
+
+test_pipeline_owned_fix_round_is_attributed
+test_pipeline_owned_reports_step_activity_age
+test_pipeline_owned_stale_submitted_head_not_attributed
+test_pipeline_owned_other_run_id_not_attributed
+test_terminal_run_reports_no_step_activity
+test_unparseable_activity_rendering_omits_field
+test_step_agent_liveness_is_published
+test_step_agent_pid_survives_commas_in_activity_text
 
 echo "all fm-crew-state tests passed"

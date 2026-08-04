@@ -23,14 +23,21 @@
 #                          re-surface cadence, never as a wedge. Only when neither
 #                          absorb class applies does the log's last line decide:
 #                          terminal (captain-relevant) or non-terminal (no verb),
-#                          both surfaced at once. A provably-working stale past the
-#                          wedge threshold also surfaces, with an "escalation N"
-#                          count in the reason; at FM_WEDGE_DEMAND_INSPECT_COUNT
-#                          consecutive escalations on the SAME pane, the reason
-#                          also carries a "demand-deep-inspection" marker so the
-#                          wake payload itself, not just repetition, forces a
-#                          closer look instead of another routine supervision
-#                          resume. Unless afk is active. A genuinely busy pane
+#                          both surfaced at once. A provably-working stale that
+#                          reaches the wedge threshold is rechecked against the
+#                          run's OWN step activity before anything surfaces: a
+#                          step that advanced recently is absorbed again with the
+#                          timer restarted, since a running pipeline legitimately
+#                          holds a silent pane for the whole 10-55 minutes of one
+#                          step. Only when that check finds no progress does the
+#                          stale surface, with an "escalation N" count in the
+#                          reason; at FM_WEDGE_DEMAND_INSPECT_COUNT consecutive
+#                          such escalations on the SAME pane, the reason also
+#                          carries a "demand-deep-inspection" marker, which now
+#                          means the cheap progress check has been exhausted, so
+#                          the wake payload itself forces a closer look instead
+#                          of another routine supervision resume. Unless afk is
+#                          active. A genuinely busy pane
 #                          (window_is_busy true) is exempt from the above, but
 #                          only up to BUSY_TURN_MAX_SECS with no completed turn
 #                          (state/<id>.turn-ended, or the spawn record before any
@@ -137,7 +144,15 @@ SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trai
 # (fm-classify-lib.sh) backs the away-mode daemon; while state/.afk exists the
 # daemon owns triage, so this watcher reverts to one-shot (enqueue + exit on every
 # wake) and never double-triages - and never runs the costly provably-working read.
-STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provably-working stale escalates as a possible wedge
+# Idle secs before a provably-working stale is RECHECKED as a possible wedge.
+# Reaching it no longer escalates on its own: pane silence is not evidence of a
+# wedge while a pipeline step is running, and pipeline steps routinely run 10-55
+# minutes on a silent pane, so this bound alone false-fired for the whole length
+# of every long step. At the bound the watcher now asks the run whether it is
+# advancing (crew_step_is_advancing, over FM_STEP_ACTIVITY_FRESH_SECS); it
+# escalates only when that check cannot find progress, and otherwise restarts
+# the timer for another window.
+STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}
 # A busy pane is unconditional proof of liveness with no built-in duration bound,
 # so a hung foreground call can remain hidden even while its rendered busy
 # footer changes every poll. BUSY_TURN_MAX_SECS bounds how long any busy pane
@@ -270,11 +285,13 @@ FM_WEDGE_DEMAND_INSPECT_COUNT=${FM_WEDGE_DEMAND_INSPECT_COUNT:-3}
 # Repeat-poll wedge-timer bookkeeping for an already-classified stale hash
 # absorbed as provably-working - repairs a missing/corrupt timer (self-heals a
 # watcher restart between recording the hash and recording the timer), or
-# escalates once STALE_ESCALATE_SECS have elapsed. Never re-reads the crew
-# state (the costly check already ran once, at classification time). Shared by
-# both places a hash can be absorbed this way: the plain non-terminal path,
-# and the stale_is_terminal-overridden path (a captain-relevant status-log
-# line that an active run/busy pane outranked).
+# escalates once STALE_ESCALATE_SECS have elapsed. Ordinary polls stay cheap and
+# never read the crew state; only the escalation itself spends one bounded
+# crew_step_is_advancing read, so the cost is at most one per window per
+# STALE_ESCALATE_SECS and is paid where it replaces a supervisor's attention.
+# Shared by both places a hash can be absorbed this way: the plain non-terminal
+# path, and the stale_is_terminal-overridden path (a captain-relevant
+# status-log line that an active run/busy pane outranked).
 wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file>
   local win=$1 since_file=$2 label=$3 escalation_file=$4 since age n reason
   since=$(cat "$since_file" 2>/dev/null || true)
@@ -286,11 +303,25 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
     *)
       age=$(( $(date +%s) - since ))
       if [ "$age" -ge "$STALE_ESCALATE_SECS" ]; then
+        # Escalate into the check, not into a human. Pane silence alone is not
+        # evidence of a wedge while a pipeline is running, so before spending a
+        # supervisor's attention, ask the run itself whether it is advancing.
+        # A step that moved recently is not wedged: restart the timer and break
+        # the consecutive-escalation chain, so demand-deep-inspection keeps
+        # meaning "three checks in a row could not find progress" rather than
+        # "this pane has been quiet for twelve minutes". Every uncertain reading
+        # falls through to the ladder below unchanged.
+        if crew_step_is_advancing "$(window_to_task "$win" "$STATE")"; then
+          date +%s > "$since_file"
+          rm -f "$escalation_file"
+          triage_log "absorbed $label (idle ${age}s, run step advancing): $win"
+          return
+        fi
         n=$(( $(cat "$escalation_file" 2>/dev/null || echo 0) + 1 ))
         echo "$n" > "$escalation_file"
-        reason="stale: $win (idle ${age}s, possible wedge, escalation $n)"
+        reason="stale: $win (idle ${age}s, possible wedge, escalation $n, no step progress)"
         if [ "$n" -ge "$FM_WEDGE_DEMAND_INSPECT_COUNT" ]; then
-          reason="stale: $win (idle ${age}s, possible wedge, escalation $n, demand-deep-inspection: same pane has wedge-escalated $n times in a row - do not re-absorb on the run-step/pane state alone)"
+          reason="stale: $win (idle ${age}s, possible wedge, escalation $n, no step progress, demand-deep-inspection: $n escalations in a row where the run reported no advancing step - the cheap progress check is exhausted, so inspect the crew and its validation log rather than re-absorbing on the run-step/pane state)"
         fi
         fm_wake_append stale "$win" "$reason" || exit 1
         rm -f "$since_file"

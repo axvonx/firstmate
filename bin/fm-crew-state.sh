@@ -18,6 +18,17 @@
 #
 #   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|none> · <detail>
 #
+# A still-working run read from full `axi status` output carries two further
+# trailing fields, which together answer the question the state alone cannot -
+# not "is a step running" but "is it getting anywhere":
+#   activity: <N>s          seconds since its active pipeline step last logged
+#   step-agent: alive|gone  whether that step's agent process is still running
+# Both come from that command's own active_steps row. Either may be absent when
+# no such reading exists (no run, a terminal run, a coarse attribution, an
+# unparseable rendering, or a step with no agent pid recorded), and an absent
+# field must never be read as "advancing". See nm_step_activity for why neither
+# signal is sufficient alone.
+#
 # Logic, in order:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta.
 #   2. Matching no-mistakes run for this crew's branch AND current code identity,
@@ -27,7 +38,13 @@
 #      A run matches when its head equals the worktree HEAD, or the worktree HEAD
 #      is an ancestor of the run head (pipeline fix commits advanced the run on
 #      the same line of history). Local work that advanced past the run head, or
-#      diverged from it, invalidates attribution.
+#      diverged from it, invalidates attribution. A run also matches while
+#      `axi status` reports branch_sync.state=pipeline_owned for that same run
+#      with submitted_head still equal to the worktree HEAD: during a fix round
+#      the pipeline commits in its own gate worktree, so its head is not present
+#      here to compare at all, and rejecting it read every mid-fix-round crew as
+#      unknown. See nm_run_is_pipeline_owned_here for why that stays safe
+#      against binding a stale run.
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
 #      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
@@ -280,6 +297,86 @@ nm_ci_step_status() {
   strip_quotes "$(trim "${rest%%,*}")"
 }
 
+# Convert one compact no-mistakes duration to seconds. The CLI renders a
+# duration as concatenated <number><unit> pairs and drops the units it does not
+# need, so the same field arrives as "13s", "59m50s", or "1h0m" (verified on
+# v1.41.2: at the hour form the seconds component is dropped entirely). Summing
+# every pair therefore parses all of them without pinning one layout. Prints
+# nothing when the string is not a duration, which is what keeps an unrecognized
+# future rendering from being read as a fresh age.
+nm_duration_secs() {  # <duration>
+  local d=$1 total=0 n u matched=0
+  while [ -n "$d" ]; do
+    n=${d%%[!0-9]*}
+    [ -n "$n" ] || return 0
+    d=${d#"$n"}
+    [ -n "$d" ] || return 0
+    u=${d%"${d#?}"}
+    d=${d#?}
+    case "$u" in
+      d) total=$(( total + 10#$n * 86400 )) ;;
+      h) total=$(( total + 10#$n * 3600 )) ;;
+      m) total=$(( total + 10#$n * 60 )) ;;
+      s) total=$(( total + 10#$n )) ;;
+      *) return 0 ;;
+    esac
+    matched=1
+  done
+  [ "$matched" = 1 ] && printf '%s' "$total"
+}
+
+# "<seconds-since-last-activity> <agent-pid>" for this run's freshest active
+# step, or empty when the run reports no active step at all.
+#
+# `axi status` renders, for a RUNNING run only, an
+# active_steps[N]{step,status,active_for,last_activity,agent_pid,round} block.
+# Two of those fields carry evidence about whether the run is getting anywhere,
+# and BOTH are needed - see this function's consumer
+# (crew_step_is_advancing in fm-classify-lib.sh) for why one is not enough:
+#
+#   last_activity  "<duration> ago: <what happened>" - the agent's own log
+#                  cadence. Real work, but it tracks LOG LINES, not progress: a
+#                  step that opens with a long tool call (a build, a full test
+#                  suite, an install) logs one line and then says nothing for
+#                  many minutes while doing exactly what it should. Measured
+#                  2026-08-03: a test step read "6m18s ago" while its gate
+#                  worktree was actively writing build output.
+#   agent_pid      the local process actually running the step. Populated only
+#                  while a step is running (verified: every completed, pending
+#                  or failed row has it cleared), so its ABSENCE is ordinary and
+#                  must never be read as a wedge.
+#
+# The other two candidates do not work. duration_ms in the plain steps[] table
+# and active_for here both measure elapsed time, which keeps climbing for a
+# frozen step, so neither can indicate progress at all - active_for only proves
+# the step has not ended. And the steps[] rows themselves do not change for the
+# whole (routinely 10-55 minute) length of one step.
+#
+# Scanning from the active_steps header down keeps a findings or gate string that
+# happens to contain "<duration> ago:" out of the answer. Multiple active rows
+# report the freshest of them, since any one of them advancing means the run is.
+# The row is not comma-split: last_activity is a quoted free-text field that may
+# itself contain commas, so the pid is taken as the row's last fully-numeric
+# quoted token instead.
+nm_step_activity() {
+  local rows row tok secs pid best='' best_pid=''
+  rows=$(printf '%s\n' "$RUN_OUT" \
+    | sed -n '/^[[:space:]]*active_steps\[/,$p' \
+    | grep -E '"[0-9]+[dhms][0-9dhms]* ago:' || true)
+  [ -n "$rows" ] || return 0
+  while IFS= read -r row; do
+    tok=$(printf '%s' "$row" | grep -oE '"[0-9]+[dhms][0-9dhms]* ago:' | head -1)
+    tok=${tok#\"}
+    tok=${tok% ago:}
+    secs=$(nm_duration_secs "$tok")
+    [ -n "$secs" ] || continue
+    pid=$(printf '%s' "$row" | grep -oE '"[0-9]+"' | tail -1 | tr -d '"')
+    if [ -z "$best" ] || [ "$secs" -lt "$best" ]; then best=$secs; best_pid=$pid; fi
+  done <<< "$rows"
+  [ -n "$best" ] || return 0
+  printf '%s %s' "$best" "$best_pid"
+}
+
 nm_effective_ci_step_status() {
   local step_status
   if [ "${RUN_STATUS:-}" = fixing ]; then
@@ -408,6 +505,10 @@ CREW_BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true
 #   - run head is a strict ancestor of worktree HEAD: no match (local work
 #     advanced outside the run)
 #   - diverged / run head not in this worktree: no match (rewritten branch tip)
+# The last rule is why nm_run_is_pipeline_owned_here below exists: during a fix
+# round the pipeline commits in its OWN gate worktree, so its head is not merely
+# ahead of this worktree, it is absent from this worktree's object store
+# entirely and the rev-parse below cannot resolve it at all.
 nm_run_head_matches_worktree() {
   local run_head local_full run_full
   run_head=$(strip_quotes "$(nm_field head)")
@@ -419,6 +520,56 @@ nm_run_head_matches_worktree() {
     return 0
   fi
   return 1
+}
+
+# Scalar value of <key> inside the top-level branch_sync: block of $RUN_OUT.
+# Scoped to that block so it cannot pick up the identically-named run-level
+# `head:` or the pipeline-level `status:`. The range ends at the next
+# column-zero key, or at EOF when branch_sync is the last block.
+nm_branch_sync_field() {  # <key>
+  printf '%s\n' "$RUN_OUT" \
+    | sed -n '/^branch_sync:[[:space:]]*$/,/^[^[:space:]]/p' \
+    | sed -n "s/^[[:space:]]*$1:[[:space:]]*\(.*\)/\1/p" | head -1
+}
+
+# 0 when the reported run is THIS worktree's run and the pipeline currently owns
+# the branch, which is the one legitimate way a live run's head can be unknown
+# to this worktree.
+#
+# Measured 2026-08-03 on no-mistakes v1.41.2: while a fix round runs, `axi
+# status` reports branch_sync.state=pipeline_owned with local.head still at the
+# submitted commit and pipeline.current_head somewhere ahead, in the pipeline's
+# own gate worktree. Those objects are not in this worktree, so
+# nm_run_head_matches_worktree cannot resolve the run head and rejects an
+# actively-running run. Every lane mid-fix-round therefore read
+# `unknown · none`, which is what made a working crew unabsorbable.
+#
+# The reason this is safe to accept is that branch_sync is not merely a hint
+# that heads differ - it names the run that owns the branch and the exact commit
+# that run was handed. All four conditions must hold together:
+#   - the block reports pipeline_owned (the pipeline, not local work, moved the head)
+#   - its pipeline.run is the very run being read (not a leftover from an older one)
+#   - its local.head is this worktree's real HEAD right now (the read is current)
+#   - its submitted_head equals that same HEAD (the run is validating THIS code)
+# So the hazard the head rule exists to prevent - binding a STALE run to code it
+# never saw - still cannot happen: a stale run's submitted_head would no longer
+# be the checked-out commit. A worktree whose branch has no run of its own gets
+# no branch_sync block at all (verified), so this can never match another
+# branch's run.
+nm_run_is_pipeline_owned_here() {
+  local sync_state sync_run sync_local sync_submitted run_id local_full
+  sync_state=$(strip_quotes "$(nm_branch_sync_field state)")
+  [ "$sync_state" = pipeline_owned ] || return 1
+  run_id=$(strip_quotes "$(nm_field id)")
+  [ -n "$run_id" ] || return 1
+  sync_run=$(strip_quotes "$(nm_branch_sync_field run)")
+  [ "$sync_run" = "$run_id" ] || return 1
+  local_full=$(git -C "$WT" rev-parse HEAD 2>/dev/null) || return 1
+  sync_local=$(strip_quotes "$(nm_branch_sync_field head)")
+  [ "$sync_local" = "$local_full" ] || return 1
+  sync_submitted=$(strip_quotes "$(nm_branch_sync_field submitted_head)")
+  [ -n "$sync_submitted" ] || return 1
+  [ "$sync_submitted" = "$local_full" ]
 }
 
 # Coarse runs-list rows are "<status> <branch> <short-sha> ...". 0 if the short
@@ -449,7 +600,8 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
   RUN_OUT=$(nm_run axi status)
   if [ -n "$RUN_OUT" ]; then
     run_branch=$(strip_quotes "$(nm_field branch)")
-    if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] && nm_run_head_matches_worktree; then
+    if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] \
+      && { nm_run_head_matches_worktree || nm_run_is_pipeline_owned_here; }; then
       HAVE_RUN=1
     else
       # The active-or-most-recent run is for another branch, or same branch with
@@ -563,6 +715,30 @@ if [ "$HAVE_RUN" = 1 ]; then
       fi
       ;;
   esac
+
+  # Step-activity recency, appended as the line's own trailing `activity: <N>s`
+  # field. Only for a still-working run read from full `axi status` output: a
+  # coarse runs-list attribution captured another branch's $RUN_OUT, so parsing
+  # activity out of it would report a different crew's progress as this one's.
+  if [ "$RUN_SOURCE" = full ] && [ "$RUN_STATE" = working ]; then
+    STEP_ACTIVITY=$(nm_step_activity)
+    if [ -n "$STEP_ACTIVITY" ]; then
+      STEP_ACTIVITY_AGE=${STEP_ACTIVITY%% *}
+      STEP_AGENT_PID=${STEP_ACTIVITY#* }
+      RUN_DETAIL="$RUN_DETAIL${SEP}activity: ${STEP_ACTIVITY_AGE}s"
+      # Resolved to a verdict here rather than published as a raw pid: liveness
+      # is an OS fact about the same machine this reader runs on, and the pid
+      # itself is noise on a line meant to be read at a glance. A pid we cannot
+      # signal reads as `gone`, which is the conservative direction.
+      if [ -n "$STEP_AGENT_PID" ]; then
+        if kill -0 "$STEP_AGENT_PID" 2>/dev/null; then
+          RUN_DETAIL="$RUN_DETAIL${SEP}step-agent: alive"
+        else
+          RUN_DETAIL="$RUN_DETAIL${SEP}step-agent: gone"
+        fi
+      fi
+    fi
+  fi
 
   emit "$RUN_STATE" run-step "$RUN_DETAIL"
 fi
