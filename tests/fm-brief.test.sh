@@ -966,6 +966,37 @@ test_credential_rule_covers_ship_and_scout() {
       "$kind: vault guidance did not name the failure that means a credential is missing"
     assert_grep "never a reason to hunt for the value, read it out of a config file, or ask for it to be pasted to you" "$brief" \
       "$kind: vault guidance left an auth failure as licence to go looking for the raw value"
+    # Discovery needs the vault's approval service, so a failed listing says
+    # nothing about whether a key exists; only the probe works without it.
+    # shellcheck disable=SC2016  # literal brief text: backticks must stay literal
+    assert_grep '`av list` is not a liveness check for the vault' "$brief" \
+      "$kind: vault guidance let a failed listing pass as a vault verdict"
+    assert_grep "a failed listing is not proof that a key is absent" "$brief" \
+      "$kind: vault guidance let a down approval service read as an absent key"
+
+    # Every failure on the vault path stops, not only a failed identity probe:
+    # the ambient copy is still present at this step, so the worker's natural
+    # next move - drop the wrapper and rerun - would silently spend the exposed
+    # copy and leave no trace of it.
+    # shellcheck disable=SC2016  # literal brief text: backticks must stay literal
+    assert_grep 'the identity probe fails, `av inject` fails, the key you named is not in the vault, or the credential otherwise never arrives' "$brief" \
+      "$kind: stop-and-report still covers only a failed probe, not the whole vault path"
+    # shellcheck disable=SC2016  # literal brief text: backticks must stay literal
+    assert_grep 'append `blocked: {the vault failure}` to the status file and stop' "$brief" \
+      "$kind: a failed vault call had no route into the brief's stop-and-report path"
+    # shellcheck disable=SC2016  # literal brief text: backticks must stay literal
+    assert_grep 'Never rerun the command bare, meaning never drop the `av inject ... --` wrapper' "$brief" \
+      "$kind: brief left dropping the wrapper as an unstated option after a vault failure"
+    assert_grep "a bare rerun can quietly succeed on that exposed copy" "$brief" \
+      "$kind: brief did not say a bare rerun silently spends the exposed ambient copy"
+    assert_grep "A fallback that works is worse than an error here: the error is visible and the silent success is not" "$brief" \
+      "$kind: brief did not say why a working fallback is worse than a failure"
+    # The widened stop must not swallow ordinary debugging: a wrapped command that
+    # fails on its own merits is normal work, still run under the wrapper.
+    assert_grep "That is a rule about the wrapper and not about the wrapped command's own exit code" "$brief" \
+      "$kind: brief turned every non-zero exit of a wrapped command into a stop"
+    assert_grep "debug it normally, and keep every rerun under the same \`av inject\` wrapper" "$brief" \
+      "$kind: brief left ordinary debugging either blocked or unwrapped"
     # The explicit form is deliberate: av bless approves a script by path, which
     # inside a project would mix a local approval into the shipped change.
     # shellcheck disable=SC2016  # literal brief text: backticks must stay literal
@@ -1001,6 +1032,8 @@ test_credential_rule_covers_ship_and_scout() {
       "$kind: vault-absent brief carried the vault identity probe with no vault installed"
     assert_no_grep "av help" "$brief" \
       "$kind: vault-absent brief instructs a help command this host does not have"
+    assert_no_grep "rerun the command bare" "$brief" \
+      "$kind: vault-absent brief carried vault failure routing with no vault installed"
   done
 
   # A secondmate is a firstmate in its own home and reads the same rule from that
@@ -1023,12 +1056,16 @@ test_credential_rule_covers_ship_and_scout() {
     "fm-brief.sh --help does not document that the vault half is conditional"
   assert_contains "$help" "is on PATH at scaffold time" \
     "fm-brief.sh --help does not document how the vault half is gated"
-  assert_contains "$help" "an identity probe the" \
+  assert_contains "$help" "identity probe" \
     "fm-brief.sh --help does not document the runtime identity probe the brief requires"
   assert_contains "$help" "av help 2>&1 | grep -q 'automicvault\.com'" \
     "fm-brief.sh --help does not document the concrete probe command"
   assert_contains "$help" "Gate and probe are complementary" \
     "fm-brief.sh --help does not document that the scaffold gate and the runtime probe decide different things"
+  assert_contains "$help" "the whole vault path" \
+    "fm-brief.sh --help does not document that stopping covers every vault failure, not just the probe"
+  assert_contains "$help" "never reruns the command bare" \
+    "fm-brief.sh --help does not document the never-rerun-bare prohibition the brief carries"
   assert_contains "$help" "it hard-codes no key list" \
     "fm-brief.sh --help does not document that the scaffold carries no rotting key list"
   pass "fm-brief.sh: ship and scout briefs teach vault-backed credential access and never print a value"

@@ -99,6 +99,18 @@
 # fallback to the ambient environment, which is the exposure the rule removes.
 # Gate and probe are complementary: the gate decides whether the vault half is
 # emitted at all, the probe decides whether the worker may use what it found.
+# Stopping is not probe-only: the brief routes the whole vault path the same way
+# - a failed probe, a failed `av inject`, a key the vault does not hold, or a
+# credential that otherwise never arrives - since `av list` cannot stand in for
+# any of that (it fails while the vault's approval service is down, which is why
+# the probe is built on `av help` instead).
+# The prohibition is positive rather than implied: after a vault failure the
+# worker never reruns the command bare, because the ambient copy of a key is
+# still present at this step, so a bare rerun can succeed silently on that
+# exposed copy, and a fallback that works hides what a visible error would show.
+# That routing is separate from the wrapped command's own exit code: a failing
+# test or a bug in the script is debugged normally, under the same wrapper, so
+# the rule contains the credential path without blocking ordinary work.
 # The pattern taught is the explicit `av inject +KEY [+KEY...] -- <command>`
 # form, deliberately not `av bless` plus a bare `av inject --`: naming the keys
 # at the call site keeps a money-spending command's credentials visible, and
@@ -348,7 +360,12 @@ if command -v av >/dev/null 2>&1; then
    Credentials belong in Automic Vault rather than the ambient environment, so any command that authenticates or spends money names the keys it needs at the call site: `av inject +SERVICE_API_KEY +OTHER_TOKEN -- pnpm run benchmark`.
    One `+KEY` per credential, then `--`, then the command; the command itself needs no change, because it still reads the same variables it always did and only the way you launch it changes.
    Name the keys YOUR task actually needs instead of copying that example - `av list` shows the names this machine holds, and `av help` covers the rest.
+   `av list` is not a liveness check for the vault: it fails while the vault's approval service is not running, so a failed listing is not proof that a key is absent, and the identity probe above is the one check that does not depend on that service.
    An authentication failure or an unset key is the signal that a command needs `av inject`; it is never a reason to hunt for the value, read it out of a config file, or ask for it to be pasted to you.
+   When the vault path itself fails - the identity probe fails, `av inject` fails, the key you named is not in the vault, or the credential otherwise never arrives - append `blocked: {the vault failure}` to the status file and stop.
+   Never rerun the command bare, meaning never drop the `av inject ... --` wrapper and launch the command directly, because a copy of some keys is still sitting in the ambient environment and a bare rerun can quietly succeed on that exposed copy - the exact exposure this rule exists to remove.
+   A fallback that works is worse than an error here: the error is visible and the silent success is not, so a failed vault call ends the attempt instead of being worked around.
+   That is a rule about the wrapper and not about the wrapped command's own exit code: when the command itself runs and fails on its own merits - a failing test, a compile error, a bug in the script - debug it normally, and keep every rerun under the same `av inject` wrapper.
    Do not use `av bless`: it approves a script by path, so blessing a file inside the project would mix a local approval into the change you are shipping, and the explicit `+KEY` form needs no blessing at all.
 EOF
   CREDENTIALS_RULE="$CREDENTIALS_RULE"$'\n'"${CREDENTIALS_VAULT%$'\n'}"
