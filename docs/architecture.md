@@ -38,7 +38,7 @@ A declared external wait trades that silence for one bounded recheck per pause w
 Crew status files are append-only wake-event logs, not current-state fields.
 `bin/fm-crew-state.sh <id>` is the cheap current-state read for an actionable heartbeat review: it attributes a no-mistakes run, active or terminal, only when it matches the crew's branch and current code identity, then keeps that run-step authoritative even if the pane has closed.
 Code identity also covers the pipeline-owned case: while a fix round runs, the pipeline commits in its own gate worktree, so its head is absent from the crew's worktree entirely and a head comparison alone would discard a live run.
-For a still-working run it additionally publishes `activity: <N>s`, `activity-id: <hash>` and `step-agent: alive|gone`, the readings supervision uses to tell an advancing step from a frozen or looping one.
+For a still-working run it additionally publishes `activity: <N>s`, `activity-id: <hash>` and `step-agent: alive|gone|none`, the readings supervision uses to tell an advancing step from a frozen or looping one.
 The script header owns the exact run-head ancestry rules, the pipeline-owned conditions, and why no single progress reading is sufficient alone.
 During no-mistakes' `ci` monitor phase, it also reads the ci step log tail because `axi status` reports both "still waiting on checks" and "checks green, waiting on merge" as `ci,running`.
 The most recent recognized ci log marker wins, and only an affirmative pass marker reports done: a later re-arm, failed-check, or issue marker returns the crew to working, and so does a pending, absent, or unrecognized reading, so a pull request whose checks have not concluded - including one in a repo with no CI configured at all - is never reported as passing.
@@ -82,7 +82,7 @@ On every verified primary harness, tracked hook integration gives the primary se
 The guard covers the main primary and genuinely marked secondmate homes, exempts child crewmate/scout worktrees, is loop-safe per harness, and is documented in [turnend-guard.md](turnend-guard.md).
 
 A presence-gated sub-supervisor (`bin/fm-supervise-daemon.sh`) extends this for walk-away supervision: the `/afk` skill starts it through the tracked foreground helper `bin/fm-afk-start.sh`, after which the watcher reverts to daemon-managed one-shot mode and the daemon self-handles routine wakes in bash.
-The watcher and daemon share `bin/fm-classify-lib.sh` for captain-relevant status verbs, declared-external-wait vocabulary, and status-scan primitives.
+The watcher and daemon share `bin/fm-classify-lib.sh` for captain-relevant status verbs, declared-external-wait vocabulary, status-scan primitives, and the `crew_step_is_advancing` step-progress predicate both consult before a wedge escalation.
 Terminal verbs remain captain-relevant, while a nonterminal progress verb cannot become terminal merely because its prose contains a legacy free-text token such as `merged`; bare legacy free-text lines remain compatible.
 The always-on watcher also uses that library's absorb classification on no-verb signals and first-sighting stale panes before status-log terminality is trusted, while the daemon maintains distinct wedge and declared-pause recheck cadences.
 In away mode, seen-status dedupe does not clear possible-wedge aging for nonterminal progress, so housekeeping still re-escalates an unchanged idle pane at the configured bound, subject to the same advancing-run check the watcher applies.

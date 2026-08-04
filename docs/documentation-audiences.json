@@ -312,10 +312,6 @@
       "audience": "maintainer-verification"
     },
     {
-      "path": "docs/verification/step-progress-signals.md",
-      "audience": "maintainer-verification"
-    },
-    {
       "path": "docs/verification/dispatch-auth.md",
       "audience": "maintainer-verification"
     },
@@ -329,6 +325,10 @@
     },
     {
       "path": "docs/verification/runtime-backends.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/step-progress-signals.md",
       "audience": "maintainer-verification"
     },
     {
