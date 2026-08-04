@@ -1036,8 +1036,9 @@ test_credential_rule_covers_ship_and_scout() {
       "$kind: vault-absent brief carried vault failure routing with no vault installed"
   done
 
-  # A secondmate is a firstmate in its own home and reads the same rule from that
-  # home's AGENTS.md, so its charter must not restate a crewmate rule list.
+  # A secondmate is a firstmate in its own home, where AGENTS.md reinforces the
+  # invariant in one line and points here for the contract, so its charter must
+  # not restate a crewmate rule list.
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_SECONDMATE_CHARTER='Handle routed domain work.' \
     "$ROOT/bin/fm-brief.sh" brief-credentials-mate --secondmate --no-projects >/dev/null 2>&1
   brief="$home/data/brief-credentials-mate/brief.md"

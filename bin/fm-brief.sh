@@ -118,7 +118,9 @@
 # local approval into the change being shipped. The scaffold teaches the pattern
 # and tells the worker to name its own task's keys; it hard-codes no key list,
 # which would rot. Secondmate charters carry no such rule: a secondmate operates
-# from its home's AGENTS.md, which owns the same contract for firstmate itself.
+# from its home's AGENTS.md, which keeps a one-line reinforcement of the
+# invariant and points here for the contract, so this script is the single owner
+# of the credential rule for every audience.
 # Refuses to overwrite an existing brief.
 set -eu
 
