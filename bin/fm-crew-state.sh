@@ -24,13 +24,16 @@
 #   activity: <N>s          seconds since its active pipeline step last logged
 #   activity-id: <hash>     digest of WHAT it logged, so a reader can tell a new
 #                           log line from the same line repeated on a loop
-#   step-agent: alive|gone  whether that step's agent process is still running
-# All three come from that command's own active_steps row; activity-id is always
-# published alongside activity. Any of them may be absent when no such reading
-# exists (no run, a terminal run, a coarse attribution, an unparseable
-# rendering, or a step with no agent pid recorded), and an absent field must
-# never be read as "advancing". See nm_step_activity for why no one signal is
-# sufficient alone.
+#   step-agent: alive|gone  whether that step's agent process is still running,
+#                           published ONLY when the row recorded a pid, so its
+#                           absence says "this step has no subprocess agent" (a
+#                           ci monitor never has one) while `gone` says one
+#                           existed and died - a distinction the consumer needs
+# The activity fields come as a pair: activity-id is always published alongside
+# activity. All of them are absent when no reading exists at all (no run, a
+# terminal run, a coarse attribution, an unparseable rendering), and a missing
+# activity reading must never be read as "advancing". See nm_step_activity for
+# why no one signal is sufficient alone.
 #
 # Logic, in order:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta.
@@ -360,9 +363,14 @@ nm_text_digest() {  # <text>
 #                  on a loop keeps a fresh age forever, and only the digest
 #                  distinguishes that from a step that logged something new.
 #   agent_pid      the local process actually running the step. Populated only
-#                  while a step is running (verified: every completed, pending
-#                  or failed row has it cleared), so its ABSENCE is ordinary and
-#                  must never be read as a wedge.
+#                  while a SUBPROCESS AGENT is running it (verified: every
+#                  completed, pending or failed row has it cleared, and no ci
+#                  monitor row in this machine's run history has ever carried
+#                  one), so its ABSENCE is ordinary - it means either no agent
+#                  yet or a step kind that has none at all - and must never be
+#                  read as a wedge. Publishing step-agent only when a pid was
+#                  actually recorded is what lets the consumer tell "this step
+#                  kind has no agent" from "its agent died".
 #
 # The other two candidates do not work. duration_ms in the plain steps[] table
 # and active_for here both measure elapsed time, which keeps climbing for a
@@ -370,29 +378,43 @@ nm_text_digest() {  # <text>
 # the step has not ended. And the steps[] rows themselves do not change for the
 # whole (routinely 10-55 minute) length of one step.
 #
-# Scanning from the active_steps header down keeps a findings or gate string that
-# happens to contain "<duration> ago:" out of the answer. Multiple active rows
-# report the freshest of them, since any one of them advancing means the run is.
-# The row is not comma-split: last_activity is a quoted free-text field that may
-# itself contain commas, so the pid is taken as the row's last fully-numeric
-# quoted token instead.
+# Scanning the active_steps block only, from its header down to the next
+# column-zero key, keeps a findings or gate string that happens to contain
+# "<duration> ago:" out of the answer. Multiple active rows report the freshest
+# of them, since any one of them advancing means the run is. The row is not
+# comma-split: last_activity is a quoted free-text field that may itself contain
+# commas, so the pid is taken as the row's last fully-numeric quoted token
+# instead.
+#
+# The duration is DERIVED, not positioned: the pattern is matched wherever it
+# appears in the row rather than anchored to the field's opening quote, because
+# the field carries variable PREFIXES. Verified on v1.41.2: once step silence
+# passes the tool's own step_quiet_warning, last_activity renders as
+# "quiet 10m4s ago: log: ..." while the duration still reports the true age. An
+# anchored pattern read that as no reading at all and escalated a healthy step,
+# so this must never be re-anchored, and no prefix may be enumerated either -
+# the next one axi adds would break it the same way. The trailing " ago:" is the
+# discriminator that tells last_activity's duration from active_for, which
+# carries no such suffix, and the FIRST match per row is the field's own (a
+# duration inside the message text can only appear after it). The `quiet` marker
+# itself is deliberately NOT read as a signal: it says only that the age has
+# passed a threshold this reader already measures for itself.
 #
 # The digest covers the MESSAGE only, taken from just past the matched
 # "<duration> ago:" and stopping at the last '","' on the row (the quote that
 # closes last_activity, followed by the pid's own opening quote). Deliberately
-# excludes the duration and active_for, both of which climb on every read: a
-# digest that included either would differ every time and could never show that
-# a looping step keeps logging the SAME line.
+# excludes the duration, any prefix, and active_for, all of which change without
+# the message changing: a digest that included them would differ every time and
+# could never show that a looping step keeps logging the SAME line.
 nm_step_activity() {
   local rows row raw tok msg secs pid id best='' best_pid='' best_id=''
   rows=$(printf '%s\n' "$RUN_OUT" \
-    | sed -n '/^[[:space:]]*active_steps\[/,$p' \
-    | grep -E '"[0-9]+[dhms][0-9dhms]* ago:' || true)
+    | sed -n '/^[[:space:]]*active_steps\[/,/^[^[:space:]]/p' \
+    | grep -E '[0-9]+[dhms][0-9dhms]* ago:' || true)
   [ -n "$rows" ] || return 0
   while IFS= read -r row; do
-    raw=$(printf '%s' "$row" | grep -oE '"[0-9]+[dhms][0-9dhms]* ago:' | head -1)
-    tok=${raw#\"}
-    tok=${tok% ago:}
+    raw=$(printf '%s' "$row" | grep -oE '[0-9]+[dhms][0-9dhms]* ago:' | head -1)
+    tok=${raw% ago:}
     secs=$(nm_duration_secs "$tok")
     [ -n "$secs" ] || continue
     msg=${row#*"$raw"}

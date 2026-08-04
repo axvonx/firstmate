@@ -53,6 +53,17 @@ active_steps[1]{step,status,active_for,last_activity,agent_pid,round}:
 `last_activity` renders as a compact duration whose unit components are dropped when unused: `13s`, `59m50s`, and at the hour boundary `1h0m`, with the seconds component gone.
 Summing every `<number><unit>` pair parses all three forms; a string that yields no pair is rejected rather than read as a fresh age.
 
+The duration is also not always the first thing in the field, because the field carries prefixes.
+Once step silence passes the tool's own `step_quiet_warning` (10m on this machine's `~/.no-mistakes/config.yaml`), the same field renders with a `quiet` prefix while the duration still reports the true age:
+
+```
+active_steps[1]{step,status,active_for,last_activity,agent_pid,round}:
+  test,running,12m30s,"quiet 10m4s ago: log: running the suite","90709",
+```
+
+The parser therefore DERIVES the duration by its own pattern wherever it appears in the row, taking the first `<number><unit>...` group followed by ` ago:`, which is the suffix that distinguishes it from `active_for`.
+It deliberately does not enumerate known prefixes, and it deliberately does not read the `quiet` marker as a signal: the marker only restates that the age has passed a threshold this reader measures itself, and any future prefix would silently blind an enumerating parser the same way an opening-quote anchor did.
+
 `agent_pid` is a live local process:
 
 ```sh
@@ -63,8 +74,9 @@ ps -o command= -p 40534
 claude -p --verbose --output-format stream-json --json-schema ...
 ```
 
-It is populated only while a step runs.
-Across this machine's recorded step results, every `completed`, `pending`, `failed` and `skipped` row had it cleared and only the `running` row carried a value, so its absence is ordinary and must not be read as a wedge.
+It is populated only while a SUBPROCESS AGENT runs the step.
+Across this machine's recorded step results, every `completed`, `pending`, `failed` and `skipped` row had it cleared and only the `running` row carried a value, and no `ci` monitor row has ever carried one at all, because that step polls checks rather than running an agent.
+So its absence is ordinary and must not be read as a wedge; it means either no agent yet or a step kind that has none.
 
 ## Why last activity alone is not sufficient
 
@@ -103,9 +115,24 @@ The no-progress escalation count is not cleared by an intervening absorb, so `de
 And `FM_STEP_PROGRESS_SURFACE_COUNT` bounds the absorbs themselves: because an absorb can happen at most once per `FM_STALE_ESCALATE_SECS` per pane, its default of 15 puts a first human glance at roughly one hour at the 240s bound, then roughly hourly.
 That notice is worded as long-running rather than wedged, because the lane is healthy; it exists because progressing and finishing are different things, and only a human can judge that a run has been advancing for longer than the work is worth.
 
+## Where change detection does not apply
+
+The changed-digest rule exists to catch a looping AGENT, so it is scoped to steps that have one.
+A `ci` monitor publishes no `agent_pid`, and its own progress markers are fixed strings that repeat verbatim between observations:
+
+```
+all CI checks passed - still monitoring until merged or closed
+no CI checks reported - still monitoring until merged or closed
+```
+
+Requiring changed text there would escalate the canonical legitimate absorb case, a run sitting on a static pane waiting for CI, every `FM_STALE_ESCALATE_SECS` for as long as the tool's own `ci_timeout` allows.
+So where no step agent is published at all, log recency alone reads as advancing.
+The absence of the field is the discriminator: `step-agent: gone` means an agent existed and its process died, and that still has to prove change.
+The recency-only path stays bounded, because such a step has no live-agent tier to fall back on once its age passes `FM_STEP_ACTIVITY_FRESH_SECS`, and because the `FM_STEP_PROGRESS_SURFACE_COUNT` ladder counts its absorbs like any other.
+
 ## Regression pointers
 
-- `tests/fm-crew-state.test.sh` pins pipeline-owned attribution, its stale-submitted-head and wrong-run rejections, the duration parsing, agent-pid liveness publication, and the activity digest (stable for identical text, different for changed text).
-- `tests/fm-watch-triage.test.sh` pins both escalation directions through the watcher: an advancing step and a quiet-but-live agent are absorbed, while a stopped activity age, an unchanged activity message with no live agent, and a live agent past the stall ceiling all escalate.
+- `tests/fm-crew-state.test.sh` pins pipeline-owned attribution, its stale-submitted-head and wrong-run rejections, the duration parsing including prefixed renderings, agent-pid liveness publication, the absence of a step-agent field for an agentless step, and the activity digest (stable for identical text, different for changed text).
+- `tests/fm-watch-triage.test.sh` pins both escalation directions through the watcher: an advancing step, a quiet-but-live agent, and an agentless step logging recently are absorbed, while a stopped activity age, an unchanged activity message with a dead agent, and a live agent past the stall ceiling all escalate.
 - `tests/fm-watch-triage.test.sh` also pins the two bounds: an absorb no longer clears the no-progress count, and a lane that keeps changing its log text without progressing surfaces one long-running notice per `FM_STEP_PROGRESS_SURFACE_COUNT` absorbs.
 - `tests/fm-daemon.test.sh` pins the same recheck and the same absorb ladder in away mode.

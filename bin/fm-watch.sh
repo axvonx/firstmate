@@ -26,11 +26,12 @@
 #                          both surfaced at once. A provably-working stale that
 #                          reaches the wedge threshold is rechecked against the
 #                          run's OWN step activity before anything surfaces: a
-#                          step that logged something NEW recently, or whose step
-#                          agent is alive within its stall ceiling, is absorbed
-#                          again with the timer restarted, since a running
-#                          pipeline legitimately holds a silent pane for the
-#                          whole 10-55 minutes of one step. Only when that check
+#                          step that logged something NEW recently, or logged at
+#                          all recently while having no agent that could loop, or
+#                          whose step agent is alive within its stall ceiling, is
+#                          absorbed again with the timer restarted, since a
+#                          running pipeline legitimately holds a silent pane for
+#                          the whole 10-55 minutes of one step. Only when that check
 #                          finds no progress does the stale surface, with an
 #                          "escalation N" count in the reason; at
 #                          FM_WEDGE_DEMAND_INSPECT_COUNT such escalations on the
@@ -343,29 +344,33 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
         # "N checks found no progress" and stays reachable through an absorb.
         # Every uncertain reading falls through to the ladder below unchanged.
         if crew_step_is_advancing "$(window_to_task "$win" "$STATE")" "$memo"; then
+          # Both confirmed-advancing outcomes restart the timer and then leave:
+          # the no-progress ladder below must never also run for a lane this
+          # check just found healthy, whatever wake() does.
           date +%s > "$since_file"
           p=$(( $(cat "$progress" 2>/dev/null || echo 0) + 1 ))
           if [ "$p" -lt "$FM_STEP_PROGRESS_SURFACE_COUNT" ]; then
             echo "$p" > "$progress"
             triage_log "absorbed $label (idle ${age}s, run step advancing, progress check $p): $win"
-            return
+          else
+            # The end of the absorb ladder: still advancing, just long. Said in
+            # words that cannot be mistaken for the wedge report below, because
+            # this lane is healthy - it has simply been healthy for a long time,
+            # and only a human can decide that is longer than the work is worth.
+            # The count restarts first, so a lost wake costs one more ladder
+            # rather than repeating this notice on every poll.
+            echo 0 > "$progress"
+            reason="stale: $win (idle ${age}s, LONG-RUNNING not wedged: the run reported an advancing step on $p progress checks for this unchanged pane - glance at whether it is worth continuing, do not treat it as stuck)"
+            fm_wake_append stale "$win" "$reason" || exit 1
+            wake "$reason"
           fi
-          # The end of the absorb ladder: still advancing, just long. Said in
-          # words that cannot be mistaken for the wedge report below, because
-          # this lane is healthy - it has simply been healthy for a long time,
-          # and only a human can decide that is longer than the work is worth.
-          # The count restarts first, so a lost wake costs one more ladder rather
-          # than repeating this notice on every poll.
-          echo 0 > "$progress"
-          reason="stale: $win (idle ${age}s, LONG-RUNNING not wedged: the run reported an advancing step on $p consecutive checks - glance at whether it is worth continuing, do not treat it as stuck)"
-          fm_wake_append stale "$win" "$reason" || exit 1
-          wake "$reason"
+          return
         fi
         n=$(( $(cat "$escalation_file" 2>/dev/null || echo 0) + 1 ))
         echo "$n" > "$escalation_file"
         reason="stale: $win (idle ${age}s, possible wedge, escalation $n, no step progress)"
         if [ "$n" -ge "$FM_WEDGE_DEMAND_INSPECT_COUNT" ]; then
-          reason="stale: $win (idle ${age}s, possible wedge, escalation $n, no step progress, demand-deep-inspection: $n escalations in a row where the run reported no advancing step - the cheap progress check is exhausted, so inspect the crew and its validation log rather than re-absorbing on the run-step/pane state)"
+          reason="stale: $win (idle ${age}s, possible wedge, escalation $n, no step progress, demand-deep-inspection: $n escalations for this unchanged pane where the run reported no advancing step - the cheap progress check is exhausted, so inspect the crew and its validation log rather than re-absorbing on the run-step/pane state)"
         fi
         fm_wake_append stale "$win" "$reason" || exit 1
         rm -f "$since_file"

@@ -1052,7 +1052,7 @@ housekeeping() {  # <state>
            progress=$(( $(cat "$state/.subsuper-step-progress-$key" 2>/dev/null || echo 0) + 1 ))
            if [ "$progress" -ge "$FM_STEP_PROGRESS_SURFACE_COUNT" ]; then
              printf '0' > "$state/.subsuper-step-progress-$key"
-             escalate_add "$state" "stale persisted ${age}s (LONG-RUNNING not wedged: the run reported an advancing step on $progress consecutive checks - glance at whether it is worth continuing): $win"
+             escalate_add "$state" "stale persisted ${age}s (LONG-RUNNING not wedged: the run reported an advancing step on $progress progress checks for this unchanged pane - glance at whether it is worth continuing): $win"
            else
              printf '%s' "$progress" > "$state/.subsuper-step-progress-$key"
            fi

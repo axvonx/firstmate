@@ -348,6 +348,29 @@ run:
 EOF
 }
 
+# A ci monitor with its active_steps row, which is the shape that has NO
+# subprocess agent: the step polls checks rather than running an agent, so
+# agent_pid is empty. Verified against no-mistakes v1.41.2 on 2026-08-03.
+# $2 optional last_activity duration rendering, $3 optional message text.
+run_ci_monitoring_active() {  # <branch> [duration] [message]
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: running
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: "https://github.com/o/r/pull/2"
+  findings: none
+  steps[4]{step,status,findings,duration_ms}:
+    intent,completed,0,0
+    review,completed,0,0
+    push,completed,0,0
+    ci,running,0,0
+  active_steps[1]{step,status,active_for,last_activity,agent_pid,round}:
+    ci,running,21m,"${2:-30s} ago: ${3:-log: CI checks running, waiting for results...}","",
+EOF
+}
+
 run_fixing_ci_running() {  # <branch>
   cat <<EOF
 run:
@@ -1574,6 +1597,62 @@ test_step_activity_digest_tracks_the_message_not_the_clock() {
   pass "the activity digest follows what the step logged, not how long ago it logged it"
 }
 
+# The duration is not always the first thing in last_activity: the field carries
+# prefixes (v1.41.2 renders "quiet <duration> ago: ..." once step silence passes
+# the tool's own step_quiet_warning). An age that reads as no reading at all
+# escalates a healthy step, so the parser must find the duration WHEREVER it sits
+# rather than at a fixed offset - and it must not be tied to any known prefix,
+# since the next prefix the tool adds would blind it again.
+test_prefixed_activity_rendering_still_parses() {
+  reset_fakes
+  local d local_head out
+  d=$(new_case activity-prefixed)
+  make_repo_on_branch "$d/wt" fm/feat-prefix
+  local_head=$(git -C "$d/wt" rev-parse HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/pre.meta" "window=fm:fm-pre" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_pipeline_owned fm/feat-prefix "$local_head" 29bcdbf1 'quiet 10m4s')"
+  out=$(run_crew_state "$d" pre)
+  assert_contains "$out" "activity: 604s" "a quiet-prefixed rendering must still report the true age"
+  # The point of deriving rather than enumerating: a prefix nobody has seen yet
+  # must parse exactly the same way.
+  FM_FAKE_AXI_STATUS="$(run_pipeline_owned fm/feat-prefix "$local_head" 29bcdbf1 'throttled-by-something 12m3s')"
+  out=$(run_crew_state "$d" pre)
+  assert_contains "$out" "activity: 723s" "an unknown prefix must parse the same as a known one"
+  # A prefix appearing or disappearing is not the message changing.
+  FM_FAKE_AXI_STATUS="$(run_pipeline_owned fm/feat-prefix "$local_head" 29bcdbf1 25s '' 'log: still reviewing')"
+  local plain prefixed id_plain id_prefixed
+  plain=$(run_crew_state "$d" pre)
+  FM_FAKE_AXI_STATUS="$(run_pipeline_owned fm/feat-prefix "$local_head" 29bcdbf1 'quiet 25s' '' 'log: still reviewing')"
+  prefixed=$(run_crew_state "$d" pre)
+  id_plain=${plain#*activity-id: }; id_plain=${id_plain%% *}
+  id_prefixed=${prefixed#*activity-id: }; id_prefixed=${id_prefixed%% *}
+  [ "$id_plain" = "$id_prefixed" ] || fail "a prefix change moved the activity digest ($id_plain vs $id_prefixed)"
+  pass "the activity duration is derived wherever it appears, so any prefix parses"
+}
+
+# A ci monitor polls checks instead of running a subprocess agent, so its row
+# records no agent_pid. The step-agent field must then be ABSENT rather than
+# reported as gone: absence means "this step kind has no agent", which is what
+# lets supervision read such a step on log recency alone, while `gone` means an
+# agent existed and died.
+test_agentless_step_publishes_no_step_agent_field() {
+  reset_fakes
+  local d out
+  d=$(new_case agentless-step)
+  make_repo_on_branch "$d/wt" fm/feat-cimon
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/cimon.meta" "window=fm:fm-cimon" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring_active fm/feat-cimon)"
+  FM_FAKE_CI_LOGS="CI checks running, waiting for results..."
+  out=$(run_crew_state "$d" cimon)
+  assert_contains "$out" "state: working" "a ci monitor waiting on checks is still working"
+  assert_contains "$out" "activity: 30s" "a ci monitor's own activity age must still be published"
+  assert_contains "$out" "activity-id: " "a ci monitor must still publish an activity digest"
+  assert_not_contains "$out" "step-agent:" "a step with no agent pid must publish no step-agent field"
+  pass "a step that runs no subprocess agent publishes an activity reading with no step-agent field"
+}
+
 # A row whose last_activity prose contains commas must still yield the pid.
 test_step_agent_pid_survives_commas_in_activity_text() {
   reset_fakes
@@ -1652,6 +1731,8 @@ test_terminal_run_reports_no_step_activity
 test_unparseable_activity_rendering_omits_field
 test_step_agent_liveness_is_published
 test_step_activity_digest_tracks_the_message_not_the_clock
+test_prefixed_activity_rendering_still_parses
+test_agentless_step_publishes_no_step_agent_field
 test_step_agent_pid_survives_commas_in_activity_text
 
 echo "all fm-crew-state tests passed"

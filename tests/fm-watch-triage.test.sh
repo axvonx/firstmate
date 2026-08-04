@@ -1828,8 +1828,10 @@ test_crew_step_is_advancing_classifier() {
   ! crew_step_is_advancing a "$memo" || fail "a frozen step was treated as advancing"
   # The looping blind spot: a retry loop, or a fix round re-entering the same
   # failure, keeps a FRESH age while logging the SAME line forever. Recency is
-  # not change, so the second sighting of one message is not progress.
-  FM_FAKE_CREW_STATE='state: working · source: run-step · validating (fixing) · activity: 25s · activity-id: loop1'
+  # not change, so on a step that HAS an agent the second sighting of one message
+  # is not progress. `gone` is the shape that proves it: an agent existed here,
+  # so the change rule applies, and its process is no longer running.
+  FM_FAKE_CREW_STATE='state: working · source: run-step · validating (fixing) · activity: 25s · activity-id: loop1 · step-agent: gone'
   crew_step_is_advancing a "$memo" || fail "the first sighting of a message was not treated as new"
   ! crew_step_is_advancing a "$memo" || fail "the same activity message twice was treated as progress"
   # ... and tier 2 is why that cannot escalate a healthy step on its own: a
@@ -1837,6 +1839,16 @@ test_crew_step_is_advancing_classifier() {
   # live agent process.
   FM_FAKE_CREW_STATE='state: working · source: run-step · validating (fixing) · activity: 25s · activity-id: loop1 · step-agent: alive'
   crew_step_is_advancing a "$memo" || fail "an unchanged message with a live agent was treated as frozen"
+  # The change requirement is scoped to steps that HAVE an agent to loop. A ci
+  # monitor publishes no step-agent field at all and repeats one fixed marker
+  # verbatim, so recency alone is its correct reading - otherwise the canonical
+  # legitimate absorb, a run waiting on CI, escalates every window.
+  FM_FAKE_CREW_STATE='state: working · source: run-step · monitoring ci · activity: 300s · activity-id: cimarker'
+  crew_step_is_advancing a "$memo" || fail "a ci monitor logging recently was not treated as advancing"
+  crew_step_is_advancing a "$memo" || fail "a ci monitor repeating its fixed marker was treated as frozen"
+  # It stays bounded: with no agent there is no tier 2, so a stale age escalates.
+  FM_FAKE_CREW_STATE='state: working · source: run-step · monitoring ci · activity: 9000s · activity-id: cimarker'
+  ! crew_step_is_advancing a "$memo" || fail "a ci monitor that stopped logging was treated as advancing"
   # Tier 2, the quiet-build case: last_activity tracks log lines, so a step in a
   # long tool call goes quiet while working. A live agent process covers it.
   FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running) · activity: 3000s · step-agent: alive'
@@ -1849,9 +1861,9 @@ test_crew_step_is_advancing_classifier() {
   # Every uncertain reading must fail toward escalation, never toward silence.
   FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
   ! crew_step_is_advancing a "$memo" || fail "a run with no activity reading was treated as advancing"
-  FM_FAKE_CREW_STATE='state: working · source: run-step · validating (fixing) · activity: 25s'
-  ! crew_step_is_advancing a "$memo" || fail "a reading with no activity digest was treated as advancing"
-  FM_FAKE_CREW_STATE='state: working · source: run-step · validating (fixing) · activity: 25s · activity-id: nowhere'
+  FM_FAKE_CREW_STATE='state: working · source: run-step · validating (fixing) · activity: 25s · step-agent: gone'
+  ! crew_step_is_advancing a "$memo" || fail "an agent-run step with no activity digest was treated as advancing"
+  FM_FAKE_CREW_STATE='state: working · source: run-step · validating (fixing) · activity: 25s · activity-id: nowhere · step-agent: gone'
   ! crew_step_is_advancing a || fail "a reading with nowhere to remember the digest was treated as advancing"
   # Only an authoritative run-step reading may be trusted: a crew writes its own
   # status log, so its prose can contain the word `activity:` and must never be
@@ -1867,7 +1879,7 @@ test_crew_step_is_advancing_classifier() {
   FM_FAKE_CREW_STATE='state: working · source: run-step · validating · activity: 25s · activity-id: a9'
   ! crew_step_is_advancing "" "$memo" || fail "an empty id was treated as advancing"
   unset FM_FAKE_CREW_STATE FM_STEP_ACTIVITY_FRESH_SECS FM_STEP_STALL_MAX_SECS
-  pass "crew_step_is_advancing: a NEW log line or a bounded live agent counts as progress, nothing else"
+  pass "crew_step_is_advancing: a NEW log line, an agentless step's recent one, or a bounded live agent counts as progress, nothing else"
 }
 
 # Correction-2 regression, end to end through the watcher: the exact shape
@@ -2107,16 +2119,17 @@ prime_absorbed_stale() {  # <state> <task> <window> <pane-text>
 
 # Recency is not change: a step that keeps re-logging the SAME line has a fresh
 # activity age forever, and absorbing on that alone would suppress a looping run
-# permanently. With no live agent to cover it, the second observation of one
-# unchanged message must escalate.
+# permanently. Once the agent that was logging is gone, the second observation of
+# one unchanged message must escalate.
 test_wedge_escalation_fires_when_activity_message_unchanged() {
   local dir state fakebin out capture_file window pid
   dir=$(make_case wedge-unchanged-text); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-looping"
   printf 'no-mistakes axi run: validating...' > "$capture_file"
   prime_absorbed_stale "$state" looping "$window" "no-mistakes axi run: validating..."
-  # A fresh age, but the identical message every time, and no live step agent.
-  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (fixing) · activity: 25s · activity-id: sameline'
+  # A fresh age, but the identical message every time, and the step's own agent
+  # process is gone.
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (fixing) · activity: 25s · activity-id: sameline · step-agent: gone'
 
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
@@ -2172,6 +2185,36 @@ test_wedge_progress_ladder_surfaces_a_long_running_lane() {
     || fail "the second ladder did not surface another long-running notice: $(cat "$out2")"
   unset FM_FAKE_SEQ FM_FAKE_ADVANCING_CALLS
   pass "an endlessly advancing lane surfaces one long-running notice per ladder, then repeats"
+}
+
+# The canonical legitimate absorb, through the whole watcher: a run waiting on
+# CI. That step publishes no step agent at all and repeats one fixed marker
+# verbatim, so it must be read on log recency alone - and it must still be
+# bounded, reaching a human through the progress ladder rather than never.
+test_ci_monitor_absorbed_on_recency_and_still_ladder_bounded() {
+  local dir state fakebin out capture_file window key pid
+  dir=$(make_case wedge-ci-monitor); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-cimonitor"
+  printf 'no-mistakes axi run: monitoring CI...' > "$capture_file"
+  prime_absorbed_stale "$state" cimonitor "$window" "no-mistakes axi run: monitoring CI..."
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  # Unchanged digest on every read, and no step-agent field at all.
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · monitoring ci (waiting on checks) · activity: 300s · activity-id: cimarker'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=1 FM_STEP_PROGRESS_SURFACE_COUNT=2 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 120 || fail "a ci monitor never reached the end of its absorb ladder: $(cat "$out")"
+  grep -F "LONG-RUNNING not wedged" "$out" >/dev/null \
+    || fail "a ci monitor was not absorbed on recency alone: $(cat "$out")"
+  grep -F "possible wedge" "$out" >/dev/null \
+    && fail "a run waiting on CI was reported as a possible wedge"
+  [ "$(cat "$state/.step-progress-$key" 2>/dev/null | tr -d '[:space:]')" = 0 ] \
+    || fail "the ci monitor's confirmed-progress count was not reset after the notice"
+  unset FM_FAKE_CREW_STATE
+  pass "a ci monitor repeating one marker is absorbed on recency and still bounded by the progress ladder"
 }
 
 # The content-independent backstop. A confirmed-advancing absorb restarts the
@@ -2262,4 +2305,5 @@ test_wedge_escalation_absorbed_while_agent_alive_but_quiet
 test_wedge_escalation_fires_past_stall_ceiling_despite_live_agent
 test_wedge_escalation_fires_when_activity_message_unchanged
 test_wedge_progress_ladder_surfaces_a_long_running_lane
+test_ci_monitor_absorbed_on_recency_and_still_ladder_bounded
 test_absorb_does_not_clear_no_progress_escalation_count

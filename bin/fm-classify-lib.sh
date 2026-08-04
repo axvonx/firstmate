@@ -418,17 +418,32 @@ FM_STEP_PROGRESS_SURFACE_COUNT=${FM_STEP_PROGRESS_SURFACE_COUNT:-15}
 # the previous digest is remembered in the caller's per-window memo file. A memo
 # file that does not exist yet is a first observation and counts as changed; an
 # absent digest, or a caller that supplies no memo path at all, cannot show
-# change and therefore cannot absorb through tier 1.
+# change and therefore cannot absorb an agent-run step through tier 1.
+#
+# THAT CHANGE REQUIREMENT IS SCOPED TO ITS PURPOSE, which is catching a looping
+# AGENT. A step with no subprocess agent - the ci monitor, which polls checks for
+# up to the tool's whole ci timeout - cannot loop that way, and its progress
+# markers are fixed strings that repeat verbatim between observations. It also
+# has no pid, so tier 2 can never absorb it. Requiring changed text there would
+# escalate the canonical legitimate absorb case (a run sitting on a static pane
+# waiting for CI) every STALE_ESCALATE_SECS, so where NO step-agent field was
+# published at all, recency alone is the correct reading. The absence of the
+# field is the discriminator: `step-agent: gone` means an agent existed and its
+# process died, which must still prove change.
 #
 # So the decision is two-tiered, and escalates only when BOTH are negative:
-#   tier 1  the step logged within FM_STEP_ACTIVITY_FRESH_SECS AND logged
-#           something DIFFERENT from last time -> advancing
+#   tier 1  the step logged within FM_STEP_ACTIVITY_FRESH_SECS AND either logged
+#           something DIFFERENT from last time or has no agent to loop
+#           -> advancing
 #   tier 2  the step's agent process is still alive AND the silence has not yet
 #           reached FM_STEP_STALL_MAX_SECS -> advancing
 # Tier 2 covers exactly the quiet-build case, and also the healthy step that
 # legitimately logs one identical line twice, so tier 1's change requirement
 # cannot escalate a working run on its own. Tier 2's ceiling is what keeps a
-# genuinely hung agent escalating rather than being suppressed forever.
+# genuinely hung agent escalating rather than being suppressed forever, and the
+# recency-only path stays bounded the same way any absorb does: a monitor whose
+# age grows past FM_STEP_ACTIVITY_FRESH_SECS has no tier 2 to fall back on, so it
+# escalates.
 #
 # Neither tier bounds how MANY times one window may be absorbed, on purpose: an
 # advancing run is not a wedge and must not be reported as one. That total is
@@ -445,10 +460,11 @@ FM_STEP_PROGRESS_SURFACE_COUNT=${FM_STEP_PROGRESS_SURFACE_COUNT:-15}
 # Fails to 1 on every uncertain reading - no run attributed, a run read from
 # anything but an authoritative run-step (crew-authored status-log prose can say
 # whatever it likes, including the word `activity:`), a terminal or
-# coarsely-attributed run, an unparseable age, an absent digest, an absent agent
-# pid - so a missing answer escalates exactly as before rather than silently
-# suppressing a real wedge. Costs one bounded fm-crew-state.sh read, so callers
-# run it only at escalation time, never every poll.
+# coarsely-attributed run, no activity reading, an unparseable age, an unchanged
+# digest on an agent-run step whose agent is not alive - so a missing answer
+# escalates exactly as before rather than silently suppressing a real wedge.
+# Costs one bounded fm-crew-state.sh read, so callers run it only at escalation
+# time, never every poll.
 crew_step_is_advancing() {  # <id> [activity-memo-file]
   local id=$1 memo=${2:-} line src age digest prev agent changed=no
   [ -n "$id" ] || return 1
@@ -480,19 +496,24 @@ crew_step_is_advancing() {  # <id> [activity-memo-file]
     [ "$prev" = "$digest" ] || changed=yes
     printf '%s' "$digest" > "$memo" 2>/dev/null || true
   fi
-  # Tier 1: a NEW log line is progress on its own. Written as an if rather
-  # than `test && return`, whose non-zero list status would abort a future
-  # caller that adds set -e.
-  if [ "$changed" = yes ] && [ "$age" -lt "$FM_STEP_ACTIVITY_FRESH_SECS" ]; then
+  # An empty agent means the field was not published at all, which is this
+  # step kind having no subprocess agent - never a dead one.
+  case "$line" in
+    *"step-agent: "*)
+      agent=${line#*step-agent: }
+      agent=${agent%% *}
+      ;;
+    *) agent='' ;;
+  esac
+  # Tier 1: a NEW log line is progress on its own, and so is any recent log line
+  # from a step that has no agent to loop. Written as an if rather than
+  # `test && return`, whose non-zero list status would abort a future caller that
+  # adds set -e.
+  if [ "$age" -lt "$FM_STEP_ACTIVITY_FRESH_SECS" ] \
+    && { [ "$changed" = yes ] || [ -z "$agent" ]; }; then
     return 0
   fi
   # Tier 2: a quiet but live agent, bounded.
-  case "$line" in
-    *"step-agent: "*) ;;
-    *) return 1 ;;
-  esac
-  agent=${line#*step-agent: }
-  agent=${agent%% *}
   [ "$agent" = alive ] || return 1
   [ "$age" -lt "$FM_STEP_STALL_MAX_SECS" ]
 }
