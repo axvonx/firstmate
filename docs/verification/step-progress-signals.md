@@ -83,7 +83,29 @@ Observed silence, for threshold calibration:
 
 `active_for` and the `steps[]` table's `duration_ms` were both rejected as progress signals: they measure elapsed time, so they keep climbing for a frozen step.
 
+## Why recency is not change either
+
+A fresh `last_activity` age proves the agent wrote something recently, not that the run got anywhere.
+The rendered field carries both halves of the evidence:
+
+```
+active_steps[1]{step,status,active_for,last_activity,agent_pid,round}:
+  review,fixing,1h7m,"25s ago: log: Round 4. Reviewing `29bcdbf`.","90709",fix 3
+```
+
+A step that re-enters the same failure re-renders the same message with a fresh age indefinitely, which is exactly the looping case `.agents/skills/stuck-crewmate-recovery/SKILL.md` names as genuine wedging.
+So the message half, everything after `<duration> ago:` up to the quote that closes the field, is digested and published as `activity-id`, and the freshness tier requires that digest to differ from the previous observation's.
+The digest deliberately excludes `active_for` and the duration, both of which climb on every read and would make every digest differ.
+
+Change detection alone is still not enough, for the opposite reason: a fix round that logs `Round 1`, `Round 2`, `Round 3` has changing text on every observation while getting nowhere.
+Two content-independent bounds cover that.
+The no-progress escalation count is not cleared by an intervening absorb, so `demand-deep-inspection` stays reachable for a lane that only sometimes looks busy.
+And `FM_STEP_PROGRESS_SURFACE_COUNT` bounds the absorbs themselves: because an absorb can happen at most once per `FM_STALE_ESCALATE_SECS` per pane, its default of 15 puts a first human glance at roughly one hour at the 240s bound, then roughly hourly.
+That notice is worded as long-running rather than wedged, because the lane is healthy; it exists because progressing and finishing are different things, and only a human can judge that a run has been advancing for longer than the work is worth.
+
 ## Regression pointers
 
-- `tests/fm-crew-state.test.sh` pins pipeline-owned attribution, its stale-submitted-head and wrong-run rejections, the duration parsing, and agent-pid liveness publication.
-- `tests/fm-watch-triage.test.sh` pins both escalation directions through the watcher: an advancing step and a quiet-but-live agent are absorbed, while a stopped activity age and a live agent past the stall ceiling still escalate.
+- `tests/fm-crew-state.test.sh` pins pipeline-owned attribution, its stale-submitted-head and wrong-run rejections, the duration parsing, agent-pid liveness publication, and the activity digest (stable for identical text, different for changed text).
+- `tests/fm-watch-triage.test.sh` pins both escalation directions through the watcher: an advancing step and a quiet-but-live agent are absorbed, while a stopped activity age, an unchanged activity message with no live agent, and a live agent past the stall ceiling all escalate.
+- `tests/fm-watch-triage.test.sh` also pins the two bounds: an absorb no longer clears the no-progress count, and a lane that keeps changing its log text without progressing surfaces one long-running notice per `FM_STEP_PROGRESS_SURFACE_COUNT` absorbs.
+- `tests/fm-daemon.test.sh` pins the same recheck and the same absorb ladder in away mode.

@@ -1809,42 +1809,65 @@ test_afk_paused_changed_pane_hands_off_plain_stale() {
 # freeze would trade a false alarm for a blind spot, which is worse.
 
 test_crew_step_is_advancing_classifier() {
-  local dir fakebin
+  local dir fakebin memo
   dir=$(make_case step-advancing); fakebin="$dir/fakebin"
+  memo="$dir/activity-memo"
   export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
   export FM_FAKE_CREW_STATE
   export FM_STEP_ACTIVITY_FRESH_SECS=1800
-  FM_FAKE_CREW_STATE='state: working · source: run-step · validating (fixing) · activity: 25s'
-  crew_step_is_advancing a || fail "a step that moved 25s ago is not treated as advancing"
-  FM_FAKE_CREW_STATE='state: working · source: run-step · validating (fixing) · activity: 1799s'
-  crew_step_is_advancing a || fail "a step just inside the freshness bound is not advancing"
-  FM_FAKE_CREW_STATE='state: working · source: run-step · validating (fixing) · activity: 1800s'
-  ! crew_step_is_advancing a || fail "a step at the freshness bound was treated as advancing"
-  FM_FAKE_CREW_STATE='state: working · source: run-step · validating (fixing) · activity: 9000s'
-  ! crew_step_is_advancing a || fail "a frozen step was treated as advancing"
+  export FM_STEP_STALL_MAX_SECS=7200
+  # Tier 1 needs BOTH halves: a recent log line, and a line that says something
+  # the previous observation did not.
+  FM_FAKE_CREW_STATE='state: working · source: run-step · validating (fixing) · activity: 25s · activity-id: a1'
+  crew_step_is_advancing a "$memo" || fail "a step that logged something new 25s ago is not treated as advancing"
+  FM_FAKE_CREW_STATE='state: working · source: run-step · validating (fixing) · activity: 1799s · activity-id: a2'
+  crew_step_is_advancing a "$memo" || fail "a step just inside the freshness bound is not advancing"
+  FM_FAKE_CREW_STATE='state: working · source: run-step · validating (fixing) · activity: 1800s · activity-id: a3'
+  ! crew_step_is_advancing a "$memo" || fail "a step at the freshness bound was treated as advancing"
+  FM_FAKE_CREW_STATE='state: working · source: run-step · validating (fixing) · activity: 9000s · activity-id: a4'
+  ! crew_step_is_advancing a "$memo" || fail "a frozen step was treated as advancing"
+  # The looping blind spot: a retry loop, or a fix round re-entering the same
+  # failure, keeps a FRESH age while logging the SAME line forever. Recency is
+  # not change, so the second sighting of one message is not progress.
+  FM_FAKE_CREW_STATE='state: working · source: run-step · validating (fixing) · activity: 25s · activity-id: loop1'
+  crew_step_is_advancing a "$memo" || fail "the first sighting of a message was not treated as new"
+  ! crew_step_is_advancing a "$memo" || fail "the same activity message twice was treated as progress"
+  # ... and tier 2 is why that cannot escalate a healthy step on its own: a
+  # working step that legitimately logs one identical line twice still has a
+  # live agent process.
+  FM_FAKE_CREW_STATE='state: working · source: run-step · validating (fixing) · activity: 25s · activity-id: loop1 · step-agent: alive'
+  crew_step_is_advancing a "$memo" || fail "an unchanged message with a live agent was treated as frozen"
   # Tier 2, the quiet-build case: last_activity tracks log lines, so a step in a
   # long tool call goes quiet while working. A live agent process covers it.
-  export FM_STEP_STALL_MAX_SECS=7200
   FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running) · activity: 3000s · step-agent: alive'
-  crew_step_is_advancing a || fail "a quiet but live agent was treated as frozen"
+  crew_step_is_advancing a "$memo" || fail "a quiet but live agent was treated as frozen"
   FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running) · activity: 3000s · step-agent: gone'
-  ! crew_step_is_advancing a || fail "a quiet step whose agent is gone was treated as advancing"
+  ! crew_step_is_advancing a "$memo" || fail "a quiet step whose agent is gone was treated as advancing"
   # ... but tier 2 must expire, or a hung agent would be suppressed forever.
   FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running) · activity: 7200s · step-agent: alive'
-  ! crew_step_is_advancing a || fail "a live agent past the stall ceiling was still treated as advancing"
+  ! crew_step_is_advancing a "$memo" || fail "a live agent past the stall ceiling was still treated as advancing"
   # Every uncertain reading must fail toward escalation, never toward silence.
   FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
-  ! crew_step_is_advancing a || fail "a run with no activity reading was treated as advancing"
+  ! crew_step_is_advancing a "$memo" || fail "a run with no activity reading was treated as advancing"
+  FM_FAKE_CREW_STATE='state: working · source: run-step · validating (fixing) · activity: 25s'
+  ! crew_step_is_advancing a "$memo" || fail "a reading with no activity digest was treated as advancing"
+  FM_FAKE_CREW_STATE='state: working · source: run-step · validating (fixing) · activity: 25s · activity-id: nowhere'
+  ! crew_step_is_advancing a || fail "a reading with nowhere to remember the digest was treated as advancing"
+  # Only an authoritative run-step reading may be trusted: a crew writes its own
+  # status log, so its prose can contain the word `activity:` and must never be
+  # able to talk supervision out of a wedge alarm.
+  FM_FAKE_CREW_STATE='state: working · source: status-log · activity: 30s of build left'
+  ! crew_step_is_advancing a "$memo" || fail "crew-authored status-log prose was read as step progress"
   FM_FAKE_CREW_STATE='state: working · source: pane · harness busy'
-  ! crew_step_is_advancing a || fail "a busy pane with no run was treated as advancing"
+  ! crew_step_is_advancing a "$memo" || fail "a busy pane with no run was treated as advancing"
   FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
-  ! crew_step_is_advancing a || fail "an unknown crew was treated as advancing"
-  FM_FAKE_CREW_STATE='state: working · source: run-step · validating · activity: soon'
-  ! crew_step_is_advancing a || fail "an unparseable activity age was treated as advancing"
-  FM_FAKE_CREW_STATE='state: working · source: run-step · validating · activity: 25s'
-  ! crew_step_is_advancing "" || fail "an empty id was treated as advancing"
+  ! crew_step_is_advancing a "$memo" || fail "an unknown crew was treated as advancing"
+  FM_FAKE_CREW_STATE='state: working · source: run-step · validating · activity: soon · activity-id: a9'
+  ! crew_step_is_advancing a "$memo" || fail "an unparseable activity age was treated as advancing"
+  FM_FAKE_CREW_STATE='state: working · source: run-step · validating · activity: 25s · activity-id: a9'
+  ! crew_step_is_advancing "" "$memo" || fail "an empty id was treated as advancing"
   unset FM_FAKE_CREW_STATE FM_STEP_ACTIVITY_FRESH_SECS FM_STEP_STALL_MAX_SECS
-  pass "crew_step_is_advancing: fresh logs or a bounded live agent count as progress, nothing else"
+  pass "crew_step_is_advancing: a NEW log line or a bounded live agent counts as progress, nothing else"
 }
 
 # Correction-2 regression, end to end through the watcher: the exact shape
@@ -1936,8 +1959,8 @@ test_wedge_escalation_absorbed_while_step_advancing() {
   since_before=$(( $(date +%s) - 500 ))
   echo "$since_before" > "$state/.stale-since-$key"
   printf '2\n' > "$state/.wedge-escalations-$key"
-  # The run is mid-fix-round and its step moved 25 seconds ago.
-  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (fixing) · activity: 25s'
+  # The run is mid-fix-round and its step logged something new 25 seconds ago.
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (fixing) · activity: 25s · activity-id: fixround4'
 
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
@@ -1952,8 +1975,11 @@ test_wedge_escalation_absorbed_while_step_advancing() {
   [ -s "$state/.stale-since-$key" ] || fail "the wedge timer was dropped instead of restarted"
   [ "$(cat "$state/.stale-since-$key")" != "$since_before" ] \
     || fail "the wedge timer was not restarted, so the next poll would escalate again"
-  [ ! -e "$state/.wedge-escalations-$key" ] \
-    || fail "confirmed progress did not break the consecutive-escalation chain"
+  # The no-progress count is content-independent backstop state and must NOT be
+  # cleared by an absorb, or a lane that intermittently looks busy could never
+  # reach demand-deep-inspection.
+  [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null | tr -d '[:space:]')" = 2 ] \
+    || fail "an absorb cleared the no-progress escalation count"
   reap "$pid"
   unset FM_FAKE_CREW_STATE
   pass "a wedge escalation is absorbed while the run's own step is still advancing"
@@ -2022,7 +2048,7 @@ test_busy_turn_age_absorbed_while_step_advancing() {
   # No completed turn for the whole run: age the spawn record past the bound.
   touch -t 200001010000 "$state/busy-advancing.meta"
   echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
-  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (fixing) · activity: 25s'
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (fixing) · activity: 25s · activity-id: busystep1'
 
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
@@ -2038,6 +2064,148 @@ test_busy_turn_age_absorbed_while_step_advancing() {
   reap "$pid"
   unset FM_FAKE_CREW_STATE
   pass "a busy worker past the completed-turn bound is absorbed while its pipeline step advances"
+}
+
+# Install a crew-state stub whose reading CHANGES on every call for the first
+# <advancing-calls> observations and reports a frozen step after that. A fixed
+# FM_FAKE_CREW_STATE cannot express either the looping lane (fresh but always the
+# same text) or a lane that stops advancing partway through a ladder.
+install_sequenced_crew_state() {  # <fakebin>; FM_FAKE_SEQ + FM_FAKE_ADVANCING_CALLS drive it
+  local fakebin=$1
+  cat > "$fakebin/fm-crew-state.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+n=$(cat "$FM_FAKE_SEQ" 2>/dev/null || echo 0)
+n=$((n + 1))
+printf '%s' "$n" > "$FM_FAKE_SEQ"
+if [ "$n" -le "${FM_FAKE_ADVANCING_CALLS:-0}" ]; then
+  printf 'state: working · source: run-step · validating (fixing) · activity: 25s · activity-id: round%s\n' "$n"
+else
+  printf 'state: working · source: run-step · validating (fixing) · activity: 9000s · activity-id: frozen\n'
+fi
+exit 0
+SH
+  chmod +x "$fakebin/fm-crew-state.sh"
+}
+
+# Prime a window that is already classified as a provably-working stale with its
+# wedge timer long past the threshold, which is the state every ladder assertion
+# below starts from.
+prime_absorbed_stale() {  # <state> <task> <window> <pane-text>
+  local state=$1 task=$2 window=$3 text=$4 key pane_hash sig
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/$task.meta"
+  printf 'working: handed to validation\n' > "$state/$task.status"
+  sig=$(seen_sig "$state/$task.status")
+  printf '%s' "$sig" > "$state/.seen-${task}_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "$text")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '2\n' > "$state/.count-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+}
+
+# Recency is not change: a step that keeps re-logging the SAME line has a fresh
+# activity age forever, and absorbing on that alone would suppress a looping run
+# permanently. With no live agent to cover it, the second observation of one
+# unchanged message must escalate.
+test_wedge_escalation_fires_when_activity_message_unchanged() {
+  local dir state fakebin out capture_file window pid
+  dir=$(make_case wedge-unchanged-text); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-looping"
+  printf 'no-mistakes axi run: validating...' > "$capture_file"
+  prime_absorbed_stale "$state" looping "$window" "no-mistakes axi run: validating..."
+  # A fresh age, but the identical message every time, and no live step agent.
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (fixing) · activity: 25s · activity-id: sameline'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=1 FM_STEP_ACTIVITY_FRESH_SECS=1800 FM_STEP_STALL_MAX_SECS=7200 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 120 || fail "a step re-logging one unchanged line never escalated: $(cat "$out")"
+  grep -F "possible wedge" "$out" >/dev/null || fail "the looping lane was not flagged as a possible wedge"
+  grep -F "no step progress" "$out" >/dev/null || fail "the escalation did not record that progress was checked"
+  unset FM_FAKE_CREW_STATE
+  pass "a step whose activity message never changes escalates once its live agent no longer covers it"
+}
+
+# The end of the absorb ladder. A lane whose log text keeps changing while it
+# gets nowhere is absorbed at first, but absorbs are counted: at
+# FM_STEP_PROGRESS_SURFACE_COUNT confirmed-progress checks one long-running
+# notice surfaces - explicitly NOT a wedge report - and the count restarts, so
+# the same cadence repeats instead of the lane going quiet forever.
+test_wedge_progress_ladder_surfaces_a_long_running_lane() {
+  local dir state fakebin out out2 capture_file window key pid
+  dir=$(make_case wedge-progress-ladder); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; out2="$dir/watch2.out"; capture_file="$dir/pane.txt"
+  window="test:fm-endless"
+  printf 'no-mistakes axi run: validating...' > "$capture_file"
+  prime_absorbed_stale "$state" endless "$window" "no-mistakes axi run: validating..."
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  install_sequenced_crew_state "$fakebin"
+  export FM_FAKE_SEQ="$dir/seq" FM_FAKE_ADVANCING_CALLS=999
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=1 FM_STEP_PROGRESS_SURFACE_COUNT=2 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 120 || fail "an endlessly advancing lane never reached a human: $(cat "$out")"
+  grep -F "LONG-RUNNING not wedged" "$out" >/dev/null \
+    || fail "the long-running notice did not distinguish itself from a wedge report: $(cat "$out")"
+  grep -F "possible wedge" "$out" >/dev/null \
+    && fail "an advancing lane was reported as a possible wedge"
+  [ "$(cat "$state/.step-progress-$key" 2>/dev/null | tr -d '[:space:]')" = 0 ] \
+    || fail "the confirmed-progress count was not reset after the long-running notice"
+
+  # Reset means the ladder repeats on the same long cadence rather than firing
+  # once and going silent.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=1 FM_STEP_PROGRESS_SURFACE_COUNT=2 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out2" &
+  pid=$!
+  wait_for_exit "$pid" 120 || fail "the long-running ladder did not repeat after its reset: $(cat "$out2")"
+  grep -F "LONG-RUNNING not wedged" "$out2" >/dev/null \
+    || fail "the second ladder did not surface another long-running notice: $(cat "$out2")"
+  unset FM_FAKE_SEQ FM_FAKE_ADVANCING_CALLS
+  pass "an endlessly advancing lane surfaces one long-running notice per ladder, then repeats"
+}
+
+# The content-independent backstop. A confirmed-advancing absorb restarts the
+# timer but must NOT clear the no-progress count, or a lane that alternates
+# between looking busy and showing no progress could never reach
+# demand-deep-inspection.
+test_absorb_does_not_clear_no_progress_escalation_count() {
+  local dir state fakebin out capture_file window key pid
+  dir=$(make_case wedge-count-survives); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-alternating"
+  printf 'no-mistakes axi run: validating...' > "$capture_file"
+  prime_absorbed_stale "$state" alternating "$window" "no-mistakes axi run: validating..."
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  # Two no-progress escalations already recorded for this pane.
+  printf '2\n' > "$state/.wedge-escalations-$key"
+  # One absorb (fresh, changed text), then the run stops advancing.
+  install_sequenced_crew_state "$fakebin"
+  export FM_FAKE_SEQ="$dir/seq" FM_FAKE_ADVANCING_CALLS=1
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=1 FM_STEP_PROGRESS_SURFACE_COUNT=999 FM_WEDGE_DEMAND_INSPECT_COUNT=3 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 120 || fail "the pane never escalated after an intervening absorb: $(cat "$out")"
+  [ "$(cat "$state/.step-progress-$key" 2>/dev/null | tr -d '[:space:]')" = 1 ] \
+    || fail "the fixture did not actually absorb once before escalating"
+  grep -F "escalation 3" "$out" >/dev/null \
+    || fail "the absorb reset the no-progress count instead of preserving it: $(cat "$out")"
+  grep -F "demand-deep-inspection" "$out" >/dev/null \
+    || fail "demand-deep-inspection was unreachable across an intervening absorb"
+  unset FM_FAKE_SEQ FM_FAKE_ADVANCING_CALLS
+  pass "an intervening absorb leaves the no-progress count intact, so demand-deep-inspection stays reachable"
 }
 
 test_signal_reason_is_actionable_classifier
@@ -2092,3 +2260,6 @@ test_wedge_escalation_fires_when_step_activity_frozen
 test_busy_turn_age_absorbed_while_step_advancing
 test_wedge_escalation_absorbed_while_agent_alive_but_quiet
 test_wedge_escalation_fires_past_stall_ceiling_despite_live_agent
+test_wedge_escalation_fires_when_activity_message_unchanged
+test_wedge_progress_ladder_surfaces_a_long_running_lane
+test_absorb_does_not_clear_no_progress_escalation_count

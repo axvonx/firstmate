@@ -379,9 +379,23 @@ FM_STEP_ACTIVITY_FRESH_SECS=${FM_STEP_ACTIVITY_FRESH_SECS:-1800}
 # call (the pipeline's own steps run 10-55 minutes end to end).
 FM_STEP_STALL_MAX_SECS=${FM_STEP_STALL_MAX_SECS:-7200}
 
+# How many CONFIRMED-progress absorbs one window may collect before supervision
+# surfaces one long-running notice and starts the count again. This is the end of
+# the absorb ladder, and it must exist: a counter that never terminates would let
+# a run that keeps advancing without ever finishing stay invisible for as long as
+# it likes. The arithmetic: an absorb can happen at most once per
+# FM_STALE_ESCALATE_SECS per window, so at that 240s default 15 absorbs is a
+# first human glance at roughly one hour, then roughly hourly after that. An
+# hours-long run deserves exactly that one glance, because progressing and
+# finishing are different things, and only a human can decide the run has been
+# advancing for longer than the work is worth. The notice is NOT a wedge report
+# and says so in its own words, so it can never be confused with the
+# no-progress escalation ladder.
+FM_STEP_PROGRESS_SURFACE_COUNT=${FM_STEP_PROGRESS_SURFACE_COUNT:-15}
+
 # 0 if crew <id>'s own pipeline run shows it is GETTING ANYWHERE, from the
-# `activity: <N>s` and `step-agent: alive|gone` fields bin/fm-crew-state.sh
-# emits out of `axi status`.
+# `activity: <N>s`, `activity-id: <hash>` and `step-agent: alive|gone` fields
+# bin/fm-crew-state.sh emits out of `axi status`.
 #
 # This is the question crew_is_provably_working cannot answer. That predicate is
 # a boolean about the current step's STATE, so a run whose step froze still
@@ -396,12 +410,30 @@ FM_STEP_STALL_MAX_SECS=${FM_STEP_STALL_MAX_SECS:-7200}
 # gate worktree was writing build output 2 minutes old. It was compiling. It was
 # fine. Judging that on log recency alone calls a healthy build wedged.
 #
+# AND WHY RECENCY IS NOT CHANGE - the second half of the same trap. A fresh age
+# only says the agent wrote something recently, not that it got anywhere: a
+# retry/backoff loop, or a fix round re-entering the same failure, keeps logging
+# at a healthy cadence forever. So tier 1 requires the log MESSAGE to differ from
+# the one seen at the previous observation, through the activity-id digest, and
+# the previous digest is remembered in the caller's per-window memo file. A memo
+# file that does not exist yet is a first observation and counts as changed; an
+# absent digest, or a caller that supplies no memo path at all, cannot show
+# change and therefore cannot absorb through tier 1.
+#
 # So the decision is two-tiered, and escalates only when BOTH are negative:
-#   tier 1  the step logged within FM_STEP_ACTIVITY_FRESH_SECS -> advancing
+#   tier 1  the step logged within FM_STEP_ACTIVITY_FRESH_SECS AND logged
+#           something DIFFERENT from last time -> advancing
 #   tier 2  the step's agent process is still alive AND the silence has not yet
 #           reached FM_STEP_STALL_MAX_SECS -> advancing
-# Tier 2 covers exactly the quiet-build case; its ceiling is what keeps a
+# Tier 2 covers exactly the quiet-build case, and also the healthy step that
+# legitimately logs one identical line twice, so tier 1's change requirement
+# cannot escalate a working run on its own. Tier 2's ceiling is what keeps a
 # genuinely hung agent escalating rather than being suppressed forever.
+#
+# Neither tier bounds how MANY times one window may be absorbed, on purpose: an
+# advancing run is not a wedge and must not be reported as one. That total is
+# bounded by the callers instead, through FM_STEP_PROGRESS_SURFACE_COUNT, which
+# surfaces one long-running notice and starts over.
 #
 # Rejected alternatives, so they are not retried: `active_for` and the steps[]
 # table's duration_ms both measure elapsed time, so they climb for a frozen step
@@ -410,27 +442,48 @@ FM_STEP_STALL_MAX_SECS=${FM_STEP_STALL_MAX_SECS:-7200}
 # build output a naive filter would exclude was the very evidence that settled
 # the measurement above.
 #
-# Fails to 1 on every uncertain reading - no run attributed, a terminal or
-# coarsely-attributed run, an unparseable age, an absent agent pid - so a
-# missing answer escalates exactly as before rather than silently suppressing a
-# real wedge. Costs one bounded fm-crew-state.sh read, so callers run it only at
-# escalation time, never every poll.
-crew_step_is_advancing() {  # <id>
-  local id=$1 line age agent
+# Fails to 1 on every uncertain reading - no run attributed, a run read from
+# anything but an authoritative run-step (crew-authored status-log prose can say
+# whatever it likes, including the word `activity:`), a terminal or
+# coarsely-attributed run, an unparseable age, an absent digest, an absent agent
+# pid - so a missing answer escalates exactly as before rather than silently
+# suppressing a real wedge. Costs one bounded fm-crew-state.sh read, so callers
+# run it only at escalation time, never every poll.
+crew_step_is_advancing() {  # <id> [activity-memo-file]
+  local id=$1 memo=${2:-} line src age digest prev agent changed=no
   [ -n "$id" ] || return 1
   line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
+  case "$line" in state:*) ;; *) return 1 ;; esac
+  src=${line#*source: }
+  src=${src%% *}
+  [ "$src" = run-step ] || return 1
   case "$line" in
-    state:*"activity: "*) ;;
+    *"activity: "*) ;;
     *) return 1 ;;
   esac
   age=${line#*activity: }
   age=${age%% *}
   age=${age%s}
   case "$age" in ''|*[!0-9]*) return 1 ;; esac
-  # Tier 1: recent log output is progress on its own. Written as an if rather
+  # Change detection. The memo is refreshed on every observation that carries a
+  # digest, including one that does not absorb, so the next comparison is always
+  # against the most recent reading.
+  case "$line" in
+    *"activity-id: "*)
+      digest=${line#*activity-id: }
+      digest=${digest%% *}
+      ;;
+    *) digest='' ;;
+  esac
+  if [ -n "$digest" ] && [ -n "$memo" ]; then
+    prev=$(cat "$memo" 2>/dev/null || true)
+    [ "$prev" = "$digest" ] || changed=yes
+    printf '%s' "$digest" > "$memo" 2>/dev/null || true
+  fi
+  # Tier 1: a NEW log line is progress on its own. Written as an if rather
   # than `test && return`, whose non-zero list status would abort a future
   # caller that adds set -e.
-  if [ "$age" -lt "$FM_STEP_ACTIVITY_FRESH_SECS" ]; then
+  if [ "$changed" = yes ] && [ "$age" -lt "$FM_STEP_ACTIVITY_FRESH_SECS" ]; then
     return 0
   fi
   # Tier 2: a quiet but live agent, bounded.

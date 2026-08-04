@@ -18,16 +18,19 @@
 #
 #   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|none> · <detail>
 #
-# A still-working run read from full `axi status` output carries two further
+# A still-working run read from full `axi status` output carries three further
 # trailing fields, which together answer the question the state alone cannot -
 # not "is a step running" but "is it getting anywhere":
 #   activity: <N>s          seconds since its active pipeline step last logged
+#   activity-id: <hash>     digest of WHAT it logged, so a reader can tell a new
+#                           log line from the same line repeated on a loop
 #   step-agent: alive|gone  whether that step's agent process is still running
-# Both come from that command's own active_steps row. Either may be absent when
-# no such reading exists (no run, a terminal run, a coarse attribution, an
-# unparseable rendering, or a step with no agent pid recorded), and an absent
-# field must never be read as "advancing". See nm_step_activity for why neither
-# signal is sufficient alone.
+# All three come from that command's own active_steps row; activity-id is always
+# published alongside activity. Any of them may be absent when no such reading
+# exists (no run, a terminal run, a coarse attribution, an unparseable
+# rendering, or a step with no agent pid recorded), and an absent field must
+# never be read as "advancing". See nm_step_activity for why no one signal is
+# sufficient alone.
 #
 # Logic, in order:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta.
@@ -325,8 +328,19 @@ nm_duration_secs() {  # <duration>
   [ "$matched" = 1 ] && printf '%s' "$total"
 }
 
-# "<seconds-since-last-activity> <agent-pid>" for this run's freshest active
-# step, or empty when the run reports no active step at all.
+# Short stable digest of one free-text string, in this repo's usual
+# shasum-else-cksum shape (bin/fm-backend-hometag-lib.sh). Hex only, so the
+# result can never contain a space or the canonical line's SEP.
+nm_text_digest() {  # <text>
+  if command -v shasum >/dev/null 2>&1; then
+    printf '%s' "$1" | shasum -a 256 | awk '{print substr($1,1,10)}'
+  else
+    printf '%s' "$1" | cksum | awk '{printf "%08x", $1}'
+  fi
+}
+
+# "<seconds-since-last-activity> <activity-digest> [<agent-pid>]" for this run's
+# freshest active step, or empty when the run reports no active step at all.
 #
 # `axi status` renders, for a RUNNING run only, an
 # active_steps[N]{step,status,active_for,last_activity,agent_pid,round} block.
@@ -340,7 +354,11 @@ nm_duration_secs() {  # <duration>
 #                  suite, an install) logs one line and then says nothing for
 #                  many minutes while doing exactly what it should. Measured
 #                  2026-08-03: a test step read "6m18s ago" while its gate
-#                  worktree was actively writing build output.
+#                  worktree was actively writing build output. Recency is also
+#                  not CHANGE, which is why the MESSAGE half of that field is
+#                  digested and published too: a step that re-logs the same line
+#                  on a loop keeps a fresh age forever, and only the digest
+#                  distinguishes that from a step that logged something new.
 #   agent_pid      the local process actually running the step. Populated only
 #                  while a step is running (verified: every completed, pending
 #                  or failed row has it cleared), so its ABSENCE is ordinary and
@@ -358,23 +376,34 @@ nm_duration_secs() {  # <duration>
 # The row is not comma-split: last_activity is a quoted free-text field that may
 # itself contain commas, so the pid is taken as the row's last fully-numeric
 # quoted token instead.
+#
+# The digest covers the MESSAGE only, taken from just past the matched
+# "<duration> ago:" and stopping at the last '","' on the row (the quote that
+# closes last_activity, followed by the pid's own opening quote). Deliberately
+# excludes the duration and active_for, both of which climb on every read: a
+# digest that included either would differ every time and could never show that
+# a looping step keeps logging the SAME line.
 nm_step_activity() {
-  local rows row tok secs pid best='' best_pid=''
+  local rows row raw tok msg secs pid id best='' best_pid='' best_id=''
   rows=$(printf '%s\n' "$RUN_OUT" \
     | sed -n '/^[[:space:]]*active_steps\[/,$p' \
     | grep -E '"[0-9]+[dhms][0-9dhms]* ago:' || true)
   [ -n "$rows" ] || return 0
   while IFS= read -r row; do
-    tok=$(printf '%s' "$row" | grep -oE '"[0-9]+[dhms][0-9dhms]* ago:' | head -1)
-    tok=${tok#\"}
+    raw=$(printf '%s' "$row" | grep -oE '"[0-9]+[dhms][0-9dhms]* ago:' | head -1)
+    tok=${raw#\"}
     tok=${tok% ago:}
     secs=$(nm_duration_secs "$tok")
     [ -n "$secs" ] || continue
+    msg=${row#*"$raw"}
+    msg=${msg%\",\"*}
+    while [ "${msg# }" != "$msg" ]; do msg=${msg# }; done
+    id=$(nm_text_digest "$msg")
     pid=$(printf '%s' "$row" | grep -oE '"[0-9]+"' | tail -1 | tr -d '"')
-    if [ -z "$best" ] || [ "$secs" -lt "$best" ]; then best=$secs; best_pid=$pid; fi
+    if [ -z "$best" ] || [ "$secs" -lt "$best" ]; then best=$secs; best_pid=$pid; best_id=$id; fi
   done <<< "$rows"
   [ -n "$best" ] || return 0
-  printf '%s %s' "$best" "$best_pid"
+  printf '%s %s %s' "$best" "$best_id" "$best_pid"
 }
 
 nm_effective_ci_step_status() {
@@ -723,9 +752,8 @@ if [ "$HAVE_RUN" = 1 ]; then
   if [ "$RUN_SOURCE" = full ] && [ "$RUN_STATE" = working ]; then
     STEP_ACTIVITY=$(nm_step_activity)
     if [ -n "$STEP_ACTIVITY" ]; then
-      STEP_ACTIVITY_AGE=${STEP_ACTIVITY%% *}
-      STEP_AGENT_PID=${STEP_ACTIVITY#* }
-      RUN_DETAIL="$RUN_DETAIL${SEP}activity: ${STEP_ACTIVITY_AGE}s"
+      read -r STEP_ACTIVITY_AGE STEP_ACTIVITY_ID STEP_AGENT_PID <<< "$STEP_ACTIVITY"
+      RUN_DETAIL="$RUN_DETAIL${SEP}activity: ${STEP_ACTIVITY_AGE}s${SEP}activity-id: $STEP_ACTIVITY_ID"
       # Resolved to a verdict here rather than published as a raw pid: liveness
       # is an OS fact about the same machine this reader runs on, and the pid
       # itself is noise on a line meant to be read at a glance. A pid we cannot

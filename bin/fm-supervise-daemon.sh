@@ -47,7 +47,11 @@
 #     pipeline holds a silent pane for the whole length of one step, which is
 #     not a wedge. A crewmate that stops making progress is therefore detected
 #     within STALE_ESCALATE_SECS plus that predicate's own bound, never lost.
-#     A declared pause instead
+#     Absorbing an advancing run is itself bounded: every
+#     STEP_PROGRESS_SURFACE_COUNT confirmed-progress rechecks, one long-running
+#     notice is escalated (explicitly not a wedge report) and that count starts
+#     over, so a lane that advances forever without finishing still reaches the
+#     captain on a long cadence. A declared pause instead
 #     gets its own longer PAUSE_RESURFACE_SECS recheck, never a wedge escalation.
 #     Crewmates are autonomous, so a delayed stale response does not stall a
 #     healthy crewmate's own progress.
@@ -100,6 +104,11 @@
 #          FM_STEP_STALL_MAX_SECS   ceiling on that silence while the step's
 #                                   agent process is still alive, after which it
 #                                   escalates anyway (default 7200)
+#          FM_STEP_PROGRESS_SURFACE_COUNT
+#                                   confirmed-progress rechecks one window may
+#                                   absorb before one long-running notice is
+#                                   escalated and the count restarts
+#                                   (default 15)
 #          FM_PAUSE_RESURFACE_SECS  idle seconds before a declared external wait
 #                                   re-surfaces as a recheck (default 3600)
 #          FM_ESCALATE_BATCH_SECS   buffer window for batched escalation
@@ -482,8 +491,10 @@ clear_pause_tracking() {  # <window> <state>
   key=$(_stale_key "$task")
   watcher_key=$(_stale_key "$win")
   rm -f "$state/.subsuper-paused-$key" "$state/.subsuper-stale-$key" \
+    "$state/.subsuper-step-activity-$key" "$state/.subsuper-step-progress-$key" \
     "$state/.paused-$watcher_key" "$state/.paused-rechecked-$watcher_key" "$state/.paused-resurfaced-$watcher_key" \
-    "$state/.stale-$watcher_key" "$state/.stale-since-$watcher_key" "$state/.wedge-escalations-$watcher_key"
+    "$state/.stale-$watcher_key" "$state/.stale-since-$watcher_key" "$state/.wedge-escalations-$watcher_key" \
+    "$state/.step-activity-$watcher_key" "$state/.step-progress-$watcher_key"
 }
 
 reconcile_pause_tracking() {  # <window> <state> <last-status-line>
@@ -969,7 +980,7 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 #  3) heartbeat scan: every HEARTBEAT_SCAN_SECS, grep state/*.status for a
 #     captain-relevant line the per-wake classifier missed and escalate it.
 housekeeping() {  # <state>
-  local state=$1 now due f key task win marker age last max_defer oldest pause_secs
+  local state=$1 now due f key task win marker age last max_defer oldest pause_secs progress
   now=$(_now)
   migrate_watcher_pause_markers "$state"
 
@@ -1011,8 +1022,10 @@ housekeeping() {  # <state>
     # legacy fallback for old markers that predate meta lookup.
     win=$(window_for_task "$key" "$state" 2>/dev/null || true)
     if [ -z "$win" ]; then
-      # Window gone (task torn down): drop the marker, nothing to escalate.
-      rm -f "$marker"; continue
+      # Window gone (task torn down): drop the marker and its progress ladder,
+      # nothing to escalate.
+      rm -f "$marker" "$state/.subsuper-step-activity-$key" "$state/.subsuper-step-progress-$key"
+      continue
     fi
     task=$(window_to_task "$win" "$state")
     last=$(last_status_line "$state/$task.status")
@@ -1024,14 +1037,25 @@ housekeeping() {  # <state>
     [ "$age" -ge "${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}" ] || continue
     stale_window_is_busy "$win" "$state"
     case "$?" in
-      0) rm -f "$marker" ;;
-      2) rm -f "$marker" ;;
+      # Busy again, or gone: the pane is back to activity, so the whole progress
+      # ladder resets with the marker.
+      0) rm -f "$marker" "$state/.subsuper-step-activity-$key" "$state/.subsuper-step-progress-$key" ;;
+      2) rm -f "$marker" "$state/.subsuper-step-activity-$key" "$state/.subsuper-step-progress-$key" ;;
       *) # Same recheck the always-on watcher applies before escalating: a
          # silent pane whose pipeline step is still advancing is not wedged, so
          # reset the marker for another window instead of spending a digest slot
-         # on it. Any uncertain reading escalates exactly as before.
-         if crew_step_is_advancing "$task"; then
+         # on it. Any uncertain reading escalates exactly as before. Bounded the
+         # same way too: the absorb ladder ends in one long-running notice, in
+         # wording that cannot be read as a wedge report, and then repeats.
+         if crew_step_is_advancing "$task" "$state/.subsuper-step-activity-$key"; then
            printf '%s' "$now" > "$marker"
+           progress=$(( $(cat "$state/.subsuper-step-progress-$key" 2>/dev/null || echo 0) + 1 ))
+           if [ "$progress" -ge "$FM_STEP_PROGRESS_SURFACE_COUNT" ]; then
+             printf '0' > "$state/.subsuper-step-progress-$key"
+             escalate_add "$state" "stale persisted ${age}s (LONG-RUNNING not wedged: the run reported an advancing step on $progress consecutive checks - glance at whether it is worth continuing): $win"
+           else
+             printf '%s' "$progress" > "$state/.subsuper-step-progress-$key"
+           fi
          else
            escalate_add "$state" "stale persisted ${age}s (possible wedge, no step progress): $win"
            stale_marker_remove "$win" "$state"

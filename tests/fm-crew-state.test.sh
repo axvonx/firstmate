@@ -219,9 +219,10 @@ EOF
 # worktree, so run head is a commit this worktree has never seen, and branch_sync
 # reports pipeline_owned. Shape verified against no-mistakes v1.41.2 on
 # 2026-08-03. $1 branch, $2 the worktree head the run was handed, $3 the
-# pipeline's advanced head, $4 optional last_activity rendering, $5 optional
-# agent pid (defaults to this test process, which is by definition alive).
-run_pipeline_owned() {  # <branch> <submitted-head> <pipeline-head> [activity] [pid]
+# pipeline's advanced head, $4 optional last_activity duration rendering, $5
+# optional agent pid (defaults to this test process, which is by definition
+# alive), $6 optional last_activity message text.
+run_pipeline_owned() {  # <branch> <submitted-head> <pipeline-head> [duration] [pid] [message]
   cat <<EOF
 run:
   id: "01RUN"
@@ -234,7 +235,7 @@ run:
     rebase,completed,0,1260
     review,fixing,3,3340543
   active_steps[1]{step,status,active_for,last_activity,agent_pid,round}:
-    review,fixing,1h7m,"${4:-25s} ago: log: Round 4. Reviewing \`${3}\`.","${5:-$$}",fix 3
+    review,fixing,1h7m,"${4:-25s} ago: ${6:-log: Round 4. Reviewing \`${3}\`.}","${5:-$$}",fix 3
 branch_sync:
   state: pipeline_owned
   changed: false
@@ -1541,6 +1542,38 @@ test_step_agent_liveness_is_published() {
   pass "step-agent liveness is published alongside the activity age"
 }
 
+# Recency is not change, so the MESSAGE half of last_activity is published as a
+# digest too: a step that re-logs one identical line keeps a fresh age forever,
+# and only the digest can tell that apart from a step logging something new. The
+# digest must be stable for the same message, differ for a different one, and
+# never carry a space or the canonical line's separator.
+test_step_activity_digest_tracks_the_message_not_the_clock() {
+  reset_fakes
+  local d local_head first second third id1 id2 id3
+  d=$(new_case activity-digest)
+  make_repo_on_branch "$d/wt" fm/feat-digest
+  local_head=$(git -C "$d/wt" rev-parse HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/dig.meta" "window=fm:fm-dig" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_pipeline_owned fm/feat-digest "$local_head" 29bcdbf1 25s '' 'log: Round 4 review')"
+  first=$(run_crew_state "$d" dig)
+  assert_contains "$first" "activity-id: " "a working run must publish an activity digest"
+  # Same message, different age: the digest must not move, or a looping step
+  # would look like it was making progress on every read.
+  FM_FAKE_AXI_STATUS="$(run_pipeline_owned fm/feat-digest "$local_head" 29bcdbf1 9m30s '' 'log: Round 4 review')"
+  second=$(run_crew_state "$d" dig)
+  id1=${first#*activity-id: }; id1=${id1%% *}
+  id2=${second#*activity-id: }; id2=${id2%% *}
+  [ "$id1" = "$id2" ] || fail "the same activity message produced two different digests ($id1 vs $id2)"
+  case "$id1" in *' '*|*'·'*) fail "the activity digest contains a space or the line separator: $id1" ;; esac
+  # A different message must produce a different digest.
+  FM_FAKE_AXI_STATUS="$(run_pipeline_owned fm/feat-digest "$local_head" 29bcdbf1 25s '' 'log: Round 5 review')"
+  third=$(run_crew_state "$d" dig)
+  id3=${third#*activity-id: }; id3=${id3%% *}
+  [ "$id1" != "$id3" ] || fail "a changed activity message produced the same digest"
+  pass "the activity digest follows what the step logged, not how long ago it logged it"
+}
+
 # A row whose last_activity prose contains commas must still yield the pid.
 test_step_agent_pid_survives_commas_in_activity_text() {
   reset_fakes
@@ -1618,6 +1651,7 @@ test_pipeline_owned_other_run_id_not_attributed
 test_terminal_run_reports_no_step_activity
 test_unparseable_activity_rendering_omits_field
 test_step_agent_liveness_is_published
+test_step_activity_digest_tracks_the_message_not_the_clock
 test_step_agent_pid_survives_commas_in_activity_text
 
 echo "all fm-crew-state tests passed"
