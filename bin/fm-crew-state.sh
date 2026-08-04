@@ -24,16 +24,21 @@
 #   activity: <N>s          seconds since its active pipeline step last logged
 #   activity-id: <hash>     digest of WHAT it logged, so a reader can tell a new
 #                           log line from the same line repeated on a loop
-#   step-agent: alive|gone  whether that step's agent process is still running,
-#                           published ONLY when the row recorded a pid, so its
-#                           absence says "this step has no subprocess agent" (a
-#                           ci monitor never has one) while `gone` says one
-#                           existed and died - a distinction the consumer needs
+#   step-agent: alive|gone|none
+#                           three POSITIVE readings of the row's agent_pid
+#                           column: a recorded pid whose process is signalable,
+#                           a recorded pid whose process is not, or a column read
+#                           and found genuinely EMPTY, which says this step kind
+#                           runs no subprocess agent at all (a ci monitor never
+#                           has one)
 # The activity fields come as a pair: activity-id is always published alongside
 # activity. All of them are absent when no reading exists at all (no run, a
 # terminal run, a coarse attribution, an unparseable rendering), and a missing
-# activity reading must never be read as "advancing". See nm_step_activity for
-# why no one signal is sufficient alone.
+# activity reading must never be read as "advancing". step-agent is likewise
+# absent when the pid column is present but unreadable - never reported as
+# `none`, because absence has to stay distinguishable from the positive "no
+# agent" reading that lets a consumer trust log recency alone. See
+# nm_step_activity for why no one signal is sufficient alone.
 #
 # Logic, in order:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta.
@@ -366,11 +371,12 @@ nm_text_digest() {  # <text>
 #                  while a SUBPROCESS AGENT is running it (verified: every
 #                  completed, pending or failed row has it cleared, and no ci
 #                  monitor row in this machine's run history has ever carried
-#                  one), so its ABSENCE is ordinary - it means either no agent
-#                  yet or a step kind that has none at all - and must never be
-#                  read as a wedge. Publishing step-agent only when a pid was
-#                  actually recorded is what lets the consumer tell "this step
-#                  kind has no agent" from "its agent died".
+#                  one), so an EMPTY column is ordinary - it means this step kind
+#                  has none at all - and must never be read as a wedge. That is
+#                  published as the positive `step-agent: none`, distinct from
+#                  `gone`, so the consumer can tell "no agent here" from "its
+#                  agent died", and distinct from publishing nothing, which is
+#                  reserved for a column this reader could not read.
 #
 # The other two candidates do not work. duration_ms in the plain steps[] table
 # and active_for here both measure elapsed time, which keeps climbing for a
@@ -381,10 +387,19 @@ nm_text_digest() {  # <text>
 # Scanning the active_steps block only, from its header down to the next
 # column-zero key, keeps a findings or gate string that happens to contain
 # "<duration> ago:" out of the answer. Multiple active rows report the freshest
-# of them, since any one of them advancing means the run is. The row is not
-# comma-split: last_activity is a quoted free-text field that may itself contain
-# commas, so the pid is taken as the row's last fully-numeric quoted token
-# instead.
+# of them, since any one of them advancing means the run is.
+#
+# The pid column is located STRUCTURALLY, from the right: the declared columns
+# are {step,status,active_for,last_activity,agent_pid,round}, so agent_pid is the
+# second-to-last comma-separated component and round is the last. Counting from
+# the right is what makes the free-text last_activity harmless - it may contain
+# commas and even quotes, but all of that lies to the LEFT of the two columns
+# read here. Deliberately NOT found by grepping for a quoted integer: quoting is
+# not a stable contract (this same payload renders the steps[] integers unquoted,
+# and the underlying column is an INTEGER), so a rendering that dropped the
+# quotes would have made every agent-run step look agentless. The column is
+# therefore accepted quoted or unquoted, with surrounding whitespace tolerated,
+# and anything else is reported as unreadable rather than as absence.
 #
 # The duration is DERIVED, not positioned: the pattern is matched wherever it
 # appears in the row rather than anchored to the field's opening quote, because
@@ -401,13 +416,27 @@ nm_text_digest() {  # <text>
 # passed a threshold this reader already measures for itself.
 #
 # The digest covers the MESSAGE only, taken from just past the matched
-# "<duration> ago:" and stopping at the last '","' on the row (the quote that
-# closes last_activity, followed by the pid's own opening quote). Deliberately
-# excludes the duration, any prefix, and active_for, all of which change without
-# the message changing: a digest that included them would differ every time and
-# could never show that a looping step keeps logging the SAME line.
+# "<duration> ago:" through the end of the last_activity column and stripped of
+# its closing quote. Deliberately excludes the duration, any prefix, and
+# active_for, all of which change without the message changing: a digest that
+# included them would differ every time and could never show that a looping step
+# keeps logging the SAME line.
+#
+# The agent component is one of three POSITIVE readings, never an absence:
+#   pid:<N>  the column was read and holds a pid
+#   none     the column was read and is genuinely EMPTY, so this step kind runs
+#            no subprocess agent at all
+#   unknown  the column is present but is neither empty nor a plain integer, so
+#            this reader cannot tell which of the two it is
+# Keeping `none` and `unknown` apart is load-bearing and must not be collapsed
+# back into one state: `none` licenses the consumer to read log recency alone as
+# progress, while `unknown` must stay uncertain and escalate. They need OPPOSITE
+# treatment, so a parse failure may never be reported as absence - that would
+# silently move every agent-run step onto the recency-only path and disable the
+# agent-loop guard fleet-wide with no alarm.
 nm_step_activity() {
-  local rows row raw tok msg secs pid id best='' best_pid='' best_id=''
+  local rows row raw tok msg secs id agent cols pidcol \
+    best='' best_agent='' best_id=''
   rows=$(printf '%s\n' "$RUN_OUT" \
     | sed -n '/^[[:space:]]*active_steps\[/,/^[^[:space:]]/p' \
     | grep -E '[0-9]+[dhms][0-9dhms]* ago:' || true)
@@ -417,15 +446,23 @@ nm_step_activity() {
     tok=${raw% ago:}
     secs=$(nm_duration_secs "$tok")
     [ -n "$secs" ] || continue
-    msg=${row#*"$raw"}
-    msg=${msg%\",\"*}
+    cols=${row%,*}
+    pidcol=${cols##*,}
+    msg=${cols%,*}
+    msg=${msg#*"$raw"}
+    msg=${msg%\"}
     while [ "${msg# }" != "$msg" ]; do msg=${msg# }; done
     id=$(nm_text_digest "$msg")
-    pid=$(printf '%s' "$row" | grep -oE '"[0-9]+"' | tail -1 | tr -d '"')
-    if [ -z "$best" ] || [ "$secs" -lt "$best" ]; then best=$secs; best_pid=$pid; best_id=$id; fi
+    pidcol=$(strip_quotes "$pidcol")
+    case "$pidcol" in
+      '') agent=none ;;
+      *[!0-9]*) agent=unknown ;;
+      *) agent="pid:$pidcol" ;;
+    esac
+    if [ -z "$best" ] || [ "$secs" -lt "$best" ]; then best=$secs; best_agent=$agent; best_id=$id; fi
   done <<< "$rows"
   [ -n "$best" ] || return 0
-  printf '%s %s %s' "$best" "$best_id" "$best_pid"
+  printf '%s %s %s' "$best" "$best_id" "$best_agent"
 }
 
 nm_effective_ci_step_status() {
@@ -774,19 +811,25 @@ if [ "$HAVE_RUN" = 1 ]; then
   if [ "$RUN_SOURCE" = full ] && [ "$RUN_STATE" = working ]; then
     STEP_ACTIVITY=$(nm_step_activity)
     if [ -n "$STEP_ACTIVITY" ]; then
-      read -r STEP_ACTIVITY_AGE STEP_ACTIVITY_ID STEP_AGENT_PID <<< "$STEP_ACTIVITY"
+      read -r STEP_ACTIVITY_AGE STEP_ACTIVITY_ID STEP_AGENT <<< "$STEP_ACTIVITY"
       RUN_DETAIL="$RUN_DETAIL${SEP}activity: ${STEP_ACTIVITY_AGE}s${SEP}activity-id: $STEP_ACTIVITY_ID"
       # Resolved to a verdict here rather than published as a raw pid: liveness
       # is an OS fact about the same machine this reader runs on, and the pid
       # itself is noise on a line meant to be read at a glance. A pid we cannot
-      # signal reads as `gone`, which is the conservative direction.
-      if [ -n "$STEP_AGENT_PID" ]; then
-        if kill -0 "$STEP_AGENT_PID" 2>/dev/null; then
-          RUN_DETAIL="$RUN_DETAIL${SEP}step-agent: alive"
-        else
-          RUN_DETAIL="$RUN_DETAIL${SEP}step-agent: gone"
-        fi
-      fi
+      # signal reads as `gone`, which is the conservative direction. An
+      # unreadable pid column publishes NO field, so the consumer sees an
+      # uncertain reading rather than the positive `none` that licenses reading
+      # log recency alone as progress.
+      case "$STEP_AGENT" in
+        none) RUN_DETAIL="$RUN_DETAIL${SEP}step-agent: none" ;;
+        pid:*)
+          if kill -0 "${STEP_AGENT#pid:}" 2>/dev/null; then
+            RUN_DETAIL="$RUN_DETAIL${SEP}step-agent: alive"
+          else
+            RUN_DETAIL="$RUN_DETAIL${SEP}step-agent: gone"
+          fi
+          ;;
+      esac
     fi
   fi
 

@@ -27,8 +27,9 @@
 #                          reaches the wedge threshold is rechecked against the
 #                          run's OWN step activity before anything surfaces: a
 #                          step that logged something NEW recently, or logged at
-#                          all recently while having no agent that could loop, or
-#                          whose step agent is alive within its stall ceiling, is
+#                          all recently while REPORTING it has no agent that
+#                          could loop, or whose step agent is alive within its
+#                          stall ceiling, is
 #                          absorbed again with the timer restarted, since a
 #                          running pipeline legitimately holds a silent pane for
 #                          the whole 10-55 minutes of one step. Only when that check

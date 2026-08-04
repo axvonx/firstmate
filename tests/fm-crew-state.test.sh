@@ -221,8 +221,9 @@ EOF
 # 2026-08-03. $1 branch, $2 the worktree head the run was handed, $3 the
 # pipeline's advanced head, $4 optional last_activity duration rendering, $5
 # optional agent pid (defaults to this test process, which is by definition
-# alive), $6 optional last_activity message text.
-run_pipeline_owned() {  # <branch> <submitted-head> <pipeline-head> [duration] [pid] [message]
+# alive), $6 optional last_activity message text, $7 the character the pid column
+# is quoted with (pass '' for the unquoted rendering an INTEGER column may take).
+run_pipeline_owned() {  # <branch> <submitted-head> <pipeline-head> [duration] [pid] [message] [pid-quote]
   cat <<EOF
 run:
   id: "01RUN"
@@ -235,7 +236,7 @@ run:
     rebase,completed,0,1260
     review,fixing,3,3340543
   active_steps[1]{step,status,active_for,last_activity,agent_pid,round}:
-    review,fixing,1h7m,"${4:-25s} ago: ${6:-log: Round 4. Reviewing \`${3}\`.}","${5:-$$}",fix 3
+    review,fixing,1h7m,"${4:-25s} ago: ${6:-log: Round 4. Reviewing \`${3}\`.}",${7-\"}${5:-$$}${7-\"},fix 3
 branch_sync:
   state: pipeline_owned
   changed: false
@@ -1631,12 +1632,11 @@ test_prefixed_activity_rendering_still_parses() {
   pass "the activity duration is derived wherever it appears, so any prefix parses"
 }
 
-# A ci monitor polls checks instead of running a subprocess agent, so its row
-# records no agent_pid. The step-agent field must then be ABSENT rather than
-# reported as gone: absence means "this step kind has no agent", which is what
-# lets supervision read such a step on log recency alone, while `gone` means an
-# agent existed and died.
-test_agentless_step_publishes_no_step_agent_field() {
+# A ci monitor polls checks instead of running a subprocess agent, so its row's
+# pid column is genuinely EMPTY. That must be published as the positive
+# `step-agent: none`, distinct from `gone` (an agent existed and died) and
+# distinct from publishing nothing (the column could not be read at all).
+test_agentless_step_publishes_step_agent_none() {
   reset_fakes
   local d out
   d=$(new_case agentless-step)
@@ -1649,8 +1649,52 @@ test_agentless_step_publishes_no_step_agent_field() {
   assert_contains "$out" "state: working" "a ci monitor waiting on checks is still working"
   assert_contains "$out" "activity: 30s" "a ci monitor's own activity age must still be published"
   assert_contains "$out" "activity-id: " "a ci monitor must still publish an activity digest"
-  assert_not_contains "$out" "step-agent:" "a step with no agent pid must publish no step-agent field"
-  pass "a step that runs no subprocess agent publishes an activity reading with no step-agent field"
+  assert_contains "$out" "step-agent: none" "an empty pid column must publish the positive no-agent reading"
+  pass "a step that runs no subprocess agent publishes step-agent: none"
+}
+
+# The pid's QUOTING is not a contract: the column is an INTEGER and this same
+# payload renders other integers bare. A reader that depended on the quotes would
+# extract nothing the day they were dropped, which looks exactly like an
+# agentless step - so every agent-run step would silently move onto the
+# recency-only path and the agent-loop guard would be disabled fleet-wide. The
+# column is located structurally instead, so both renderings read identically.
+test_step_agent_pid_parses_unquoted_rendering() {
+  reset_fakes
+  local d local_head out dead_pid
+  d=$(new_case agent-pid-unquoted)
+  make_repo_on_branch "$d/wt" fm/feat-rawpid
+  local_head=$(git -C "$d/wt" rev-parse HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/raw.meta" "window=fm:fm-raw" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_pipeline_owned fm/feat-rawpid "$local_head" 29bcdbf1 25s "$$" '' '')"
+  out=$(run_crew_state "$d" raw)
+  assert_contains "$out" "step-agent: alive" "an unquoted live pid must read alive, exactly as a quoted one does"
+  sh -c 'exit 0' & dead_pid=$!
+  wait "$dead_pid" 2>/dev/null || true
+  FM_FAKE_AXI_STATUS="$(run_pipeline_owned fm/feat-rawpid "$local_head" 29bcdbf1 25s "$dead_pid" '' '')"
+  out=$(run_crew_state "$d" raw)
+  assert_contains "$out" "step-agent: gone" "an unquoted dead pid must read gone, exactly as a quoted one does"
+  pass "the agent pid is read from its own column, so dropping its quotes changes no verdict"
+}
+
+# The conservative default, and the direct regression for conflating "no agent"
+# with "could not read the agent": a pid column that is neither empty nor a plain
+# integer publishes NO step-agent field, so the consumer sees an uncertain
+# reading rather than a licence to absorb on recency alone.
+test_unreadable_agent_pid_publishes_no_step_agent_field() {
+  reset_fakes
+  local d local_head out
+  d=$(new_case agent-pid-unreadable)
+  make_repo_on_branch "$d/wt" fm/feat-badpid
+  local_head=$(git -C "$d/wt" rev-parse HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/bad.meta" "window=fm:fm-bad" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_pipeline_owned fm/feat-badpid "$local_head" 29bcdbf1 25s 'pid-40534')"
+  out=$(run_crew_state "$d" bad)
+  assert_contains "$out" "activity: 25s" "an unreadable pid must not suppress the activity reading"
+  assert_not_contains "$out" "step-agent:" "an unreadable pid column must publish no step-agent field at all"
+  pass "a pid column that cannot be read publishes no step-agent field rather than a no-agent reading"
 }
 
 # A row whose last_activity prose contains commas must still yield the pid.
@@ -1732,7 +1776,9 @@ test_unparseable_activity_rendering_omits_field
 test_step_agent_liveness_is_published
 test_step_activity_digest_tracks_the_message_not_the_clock
 test_prefixed_activity_rendering_still_parses
-test_agentless_step_publishes_no_step_agent_field
+test_agentless_step_publishes_step_agent_none
+test_step_agent_pid_parses_unquoted_rendering
+test_unreadable_agent_pid_publishes_no_step_agent_field
 test_step_agent_pid_survives_commas_in_activity_text
 
 echo "all fm-crew-state tests passed"

@@ -76,7 +76,25 @@ claude -p --verbose --output-format stream-json --json-schema ...
 
 It is populated only while a SUBPROCESS AGENT runs the step.
 Across this machine's recorded step results, every `completed`, `pending`, `failed` and `skipped` row had it cleared and only the `running` row carried a value, and no `ci` monitor row has ever carried one at all, because that step polls checks rather than running an agent.
-So its absence is ordinary and must not be read as a wedge; it means either no agent yet or a step kind that has none.
+So an empty column is ordinary and must not be read as a wedge; it means this step kind has no agent.
+
+Its QUOTING is not a stable contract, and the parser must not depend on it.
+The underlying column is declared `agent_pid INTEGER`, and the same status payload renders other integers unquoted: the `steps[]` table's own `findings` and `duration_ms` columns arrive as bare numbers in the same output.
+A reader that found the pid by grepping for a quoted integer would therefore extract nothing the day the quotes were dropped, which looks exactly like a genuinely agentless step.
+So the pid column is located structurally instead, by its position in the declared column list `{step,status,active_for,last_activity,agent_pid,round}`: `agent_pid` is the second-to-last comma-separated component of the row and `round` is the last.
+Counting from the right is what makes the free-text `last_activity` harmless, since its commas and quotes all lie to the left of those two columns.
+
+The verdict published from that column is three-valued and always positive:
+
+| column read | published |
+| --- | --- |
+| holds a pid, process signalable | `step-agent: alive` |
+| holds a pid, process not signalable | `step-agent: gone` |
+| genuinely empty | `step-agent: none` |
+| present but neither empty nor a plain integer | no `step-agent` field at all |
+
+`none` and a missing field are deliberately different states, because they license opposite treatment: `none` is what permits reading log recency alone as progress, while a missing field is an uncertain reading that escalates.
+Collapsing them would mean a single rendering change silently disabled the agent-loop guard fleet-wide with no alarm.
 
 ## Why last activity alone is not sufficient
 
@@ -126,13 +144,13 @@ no CI checks reported - still monitoring until merged or closed
 ```
 
 Requiring changed text there would escalate the canonical legitimate absorb case, a run sitting on a static pane waiting for CI, every `FM_STALE_ESCALATE_SECS` for as long as the tool's own `ci_timeout` allows.
-So where no step agent is published at all, log recency alone reads as advancing.
-The absence of the field is the discriminator: `step-agent: gone` means an agent existed and its process died, and that still has to prove change.
+So a step reporting `step-agent: none` is read on log recency alone.
+That reading has to be the explicit one: `step-agent: gone` means an agent existed and its process died, and that still has to prove change, while a step-agent field missing altogether is an unreadable pid column and stays uncertain.
 The recency-only path stays bounded, because such a step has no live-agent tier to fall back on once its age passes `FM_STEP_ACTIVITY_FRESH_SECS`, and because the `FM_STEP_PROGRESS_SURFACE_COUNT` ladder counts its absorbs like any other.
 
 ## Regression pointers
 
-- `tests/fm-crew-state.test.sh` pins pipeline-owned attribution, its stale-submitted-head and wrong-run rejections, the duration parsing including prefixed renderings, agent-pid liveness publication, the absence of a step-agent field for an agentless step, and the activity digest (stable for identical text, different for changed text).
-- `tests/fm-watch-triage.test.sh` pins both escalation directions through the watcher: an advancing step, a quiet-but-live agent, and an agentless step logging recently are absorbed, while a stopped activity age, an unchanged activity message with a dead agent, and a live agent past the stall ceiling all escalate.
+- `tests/fm-crew-state.test.sh` pins pipeline-owned attribution, its stale-submitted-head and wrong-run rejections, the duration parsing including prefixed renderings, agent-pid liveness publication from both quoted and unquoted renderings, `step-agent: none` for a genuinely empty pid column, no step-agent field at all for an unreadable one, and the activity digest (stable for identical text, different for changed text).
+- `tests/fm-watch-triage.test.sh` pins both escalation directions through the watcher: an advancing step, a quiet-but-live agent, and a step reporting no agent while logging recently are absorbed, while a stopped activity age, an unchanged activity message with a dead agent, an unchanged message whose pid column was unreadable, and a live agent past the stall ceiling all escalate.
 - `tests/fm-watch-triage.test.sh` also pins the two bounds: an absorb no longer clears the no-progress count, and a lane that keeps changing its log text without progressing surfaces one long-running notice per `FM_STEP_PROGRESS_SURFACE_COUNT` absorbs.
 - `tests/fm-daemon.test.sh` pins the same recheck and the same absorb ladder in away mode.

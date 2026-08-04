@@ -426,14 +426,22 @@ FM_STEP_PROGRESS_SURFACE_COUNT=${FM_STEP_PROGRESS_SURFACE_COUNT:-15}
 # markers are fixed strings that repeat verbatim between observations. It also
 # has no pid, so tier 2 can never absorb it. Requiring changed text there would
 # escalate the canonical legitimate absorb case (a run sitting on a static pane
-# waiting for CI) every STALE_ESCALATE_SECS, so where NO step-agent field was
-# published at all, recency alone is the correct reading. The absence of the
-# field is the discriminator: `step-agent: gone` means an agent existed and its
-# process died, which must still prove change.
+# waiting for CI) every STALE_ESCALATE_SECS, so a step that reports it has no
+# agent is read on recency alone.
+#
+# THAT LICENCE NEEDS THE POSITIVE READING `step-agent: none`, and an ABSENT
+# step-agent field must never substitute for it. The two mean opposite things: a
+# reader that read the pid column and found it empty knows there is no agent,
+# while a reader that could not read the column knows nothing. Publishing
+# nothing for both, and trusting absence, would mean one rendering change - the
+# pid losing its quotes, against a column that is an INTEGER - silently moved
+# every agent-run step onto the recency-only path and disabled the agent-loop
+# guard fleet-wide, with no alarm. So absence falls back to requiring a changed
+# digest, and tier 2 stays unavailable to it: an uncertain reading escalates.
 #
 # So the decision is two-tiered, and escalates only when BOTH are negative:
 #   tier 1  the step logged within FM_STEP_ACTIVITY_FRESH_SECS AND either logged
-#           something DIFFERENT from last time or has no agent to loop
+#           something DIFFERENT from last time or reports `step-agent: none`
 #           -> advancing
 #   tier 2  the step's agent process is still alive AND the silence has not yet
 #           reached FM_STEP_STALL_MAX_SECS -> advancing
@@ -460,11 +468,11 @@ FM_STEP_PROGRESS_SURFACE_COUNT=${FM_STEP_PROGRESS_SURFACE_COUNT:-15}
 # Fails to 1 on every uncertain reading - no run attributed, a run read from
 # anything but an authoritative run-step (crew-authored status-log prose can say
 # whatever it likes, including the word `activity:`), a terminal or
-# coarsely-attributed run, no activity reading, an unparseable age, an unchanged
-# digest on an agent-run step whose agent is not alive - so a missing answer
-# escalates exactly as before rather than silently suppressing a real wedge.
-# Costs one bounded fm-crew-state.sh read, so callers run it only at escalation
-# time, never every poll.
+# coarsely-attributed run, no activity reading, an unparseable age, an
+# unreadable agent-pid column, an unchanged digest on a step whose agent is not
+# alive - so a missing answer escalates exactly as before rather than silently
+# suppressing a real wedge. Costs one bounded fm-crew-state.sh read, so callers
+# run it only at escalation time, never every poll.
 crew_step_is_advancing() {  # <id> [activity-memo-file]
   local id=$1 memo=${2:-} line src age digest prev agent changed=no
   [ -n "$id" ] || return 1
@@ -496,8 +504,9 @@ crew_step_is_advancing() {  # <id> [activity-memo-file]
     [ "$prev" = "$digest" ] || changed=yes
     printf '%s' "$digest" > "$memo" 2>/dev/null || true
   fi
-  # An empty agent means the field was not published at all, which is this
-  # step kind having no subprocess agent - never a dead one.
+  # An empty agent means the field was not published at all, which says only
+  # that the reading is unavailable - never that no agent exists. Only the
+  # explicit `none` says that.
   case "$line" in
     *"step-agent: "*)
       agent=${line#*step-agent: }
@@ -506,11 +515,11 @@ crew_step_is_advancing() {  # <id> [activity-memo-file]
     *) agent='' ;;
   esac
   # Tier 1: a NEW log line is progress on its own, and so is any recent log line
-  # from a step that has no agent to loop. Written as an if rather than
-  # `test && return`, whose non-zero list status would abort a future caller that
-  # adds set -e.
+  # from a step that REPORTS it has no agent to loop. Written as an if rather
+  # than `test && return`, whose non-zero list status would abort a future caller
+  # that adds set -e.
   if [ "$age" -lt "$FM_STEP_ACTIVITY_FRESH_SECS" ] \
-    && { [ "$changed" = yes ] || [ -z "$agent" ]; }; then
+    && { [ "$changed" = yes ] || [ "$agent" = none ]; }; then
     return 0
   fi
   # Tier 2: a quiet but live agent, bounded.

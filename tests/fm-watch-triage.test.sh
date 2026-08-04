@@ -1839,16 +1839,30 @@ test_crew_step_is_advancing_classifier() {
   # live agent process.
   FM_FAKE_CREW_STATE='state: working · source: run-step · validating (fixing) · activity: 25s · activity-id: loop1 · step-agent: alive'
   crew_step_is_advancing a "$memo" || fail "an unchanged message with a live agent was treated as frozen"
+  # ... and an alive agent must still prove change to pass TIER 1, so the
+  # agent-loop guard is not weakened. Isolated by putting the age past tier 2's
+  # ceiling, which is the only way to observe tier 1 alone for a live agent.
+  FM_STEP_STALL_MAX_SECS=10 \
+    crew_step_is_advancing a "$memo" \
+    && fail "an unchanged message on a live agent passed tier 1 without proving change"
   # The change requirement is scoped to steps that HAVE an agent to loop. A ci
-  # monitor publishes no step-agent field at all and repeats one fixed marker
-  # verbatim, so recency alone is its correct reading - otherwise the canonical
-  # legitimate absorb, a run waiting on CI, escalates every window.
-  FM_FAKE_CREW_STATE='state: working · source: run-step · monitoring ci · activity: 300s · activity-id: cimarker'
+  # monitor REPORTS that it has none and repeats one fixed marker verbatim, so
+  # recency alone is its correct reading - otherwise the canonical legitimate
+  # absorb, a run waiting on CI, escalates every window.
+  FM_FAKE_CREW_STATE='state: working · source: run-step · monitoring ci · activity: 300s · activity-id: cimarker · step-agent: none'
   crew_step_is_advancing a "$memo" || fail "a ci monitor logging recently was not treated as advancing"
   crew_step_is_advancing a "$memo" || fail "a ci monitor repeating its fixed marker was treated as frozen"
   # It stays bounded: with no agent there is no tier 2, so a stale age escalates.
-  FM_FAKE_CREW_STATE='state: working · source: run-step · monitoring ci · activity: 9000s · activity-id: cimarker'
+  FM_FAKE_CREW_STATE='state: working · source: run-step · monitoring ci · activity: 9000s · activity-id: cimarker · step-agent: none'
   ! crew_step_is_advancing a "$memo" || fail "a ci monitor that stopped logging was treated as advancing"
+  # That licence needs the POSITIVE reading. A step-agent field missing because
+  # the pid column could not be read says nothing about whether an agent exists,
+  # so it must NOT take the recency-only path - otherwise one rendering change
+  # would disable the agent-loop guard fleet-wide with no alarm.
+  FM_FAKE_CREW_STATE='state: working · source: run-step · validating (fixing) · activity: 300s · activity-id: unreadpid'
+  crew_step_is_advancing a "$memo" || fail "the first sighting of an unreadable-pid reading was not treated as new"
+  ! crew_step_is_advancing a "$memo" \
+    || fail "an absent step-agent field was read as proof that no agent exists"
   # Tier 2, the quiet-build case: last_activity tracks log lines, so a step in a
   # long tool call goes quiet while working. A live agent process covers it.
   FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running) · activity: 3000s · step-agent: alive'
@@ -2188,9 +2202,9 @@ test_wedge_progress_ladder_surfaces_a_long_running_lane() {
 }
 
 # The canonical legitimate absorb, through the whole watcher: a run waiting on
-# CI. That step publishes no step agent at all and repeats one fixed marker
-# verbatim, so it must be read on log recency alone - and it must still be
-# bounded, reaching a human through the progress ladder rather than never.
+# CI. That step reports it has no agent and repeats one fixed marker verbatim, so
+# it must be read on log recency alone - and it must still be bounded, reaching a
+# human through the progress ladder rather than never.
 test_ci_monitor_absorbed_on_recency_and_still_ladder_bounded() {
   local dir state fakebin out capture_file window key pid
   dir=$(make_case wedge-ci-monitor); state="$dir/state"; fakebin="$dir/fakebin"
@@ -2198,8 +2212,8 @@ test_ci_monitor_absorbed_on_recency_and_still_ladder_bounded() {
   printf 'no-mistakes axi run: monitoring CI...' > "$capture_file"
   prime_absorbed_stale "$state" cimonitor "$window" "no-mistakes axi run: monitoring CI..."
   key=$(printf '%s' "$window" | tr ':/.' '___')
-  # Unchanged digest on every read, and no step-agent field at all.
-  export FM_FAKE_CREW_STATE='state: working · source: run-step · monitoring ci (waiting on checks) · activity: 300s · activity-id: cimarker'
+  # Unchanged digest on every read, and a positive no-agent reading.
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · monitoring ci (waiting on checks) · activity: 300s · activity-id: cimarker · step-agent: none'
 
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
