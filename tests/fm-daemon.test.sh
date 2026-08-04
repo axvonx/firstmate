@@ -238,6 +238,106 @@ test_handle_wake_paused_records_pause_marker() {
   pass "handle_wake on a paused stale records a pause marker, drops the wedge marker, and does not escalate"
 }
 
+# Away mode applies the same advancing-run check the always-on watcher does, so
+# a healthy fix round does not spend a digest slot on a false possible-wedge.
+# Both directions, over the real crew_step_is_advancing with a stubbed reader.
+test_housekeeping_stale_consults_step_progress() {
+  local dir state key win pane fakebin
+  dir=$(make_supercase housekeeping-step-progress)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  win="sess:fm-adv-w1"
+  printf 'working: handed to validation\n' > "$state/adv-w1.status"
+  pane="$dir/pane.txt"; printf 'no-mistakes axi run: validating...\n' > "$pane"
+  key=$(printf '%s' "adv-w1" | tr ':/.' '___')
+  cat > "$fakebin/fm-crew-state.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${FM_FAKE_CREW_STATE:-}"
+SH
+  chmod +x "$fakebin/fm-crew-state.sh"
+  printf 'window=%s\nkind=ship\n' "$win" > "$state/adv-w1.meta"
+
+  # Advancing: the marker is reset for another window, nothing is escalated.
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  (
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+      FM_FAKE_CREW_STATE='state: working · source: run-step · validating (fixing) · activity: 25s · activity-id: round4' \
+      FM_ESCALATE_BATCH_SECS=999999 housekeeping "$state"
+  )
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "away mode escalated a run whose step is still advancing"
+  [ -e "$state/.subsuper-stale-$key" ] \
+    || fail "away mode dropped the stale marker instead of resetting it for another window"
+
+  # Frozen: the same path still escalates.
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  (
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+      FM_FAKE_CREW_STATE='state: working · source: run-step · validating (fixing) · activity: 9000s' \
+      FM_ESCALATE_BATCH_SECS=999999 housekeeping "$state"
+  )
+  grep -F "possible wedge" "$state/.subsuper-escalations" >/dev/null \
+    || fail "away mode did not escalate a run whose step activity stopped moving"
+  pass "away-mode stale recheck absorbs an advancing run and still escalates a frozen one"
+}
+
+# Away mode gets the same bounded ladder: absorbing an advancing run is not
+# unlimited, or a lane that advances forever without finishing would never reach
+# the captain. At FM_STEP_PROGRESS_SURFACE_COUNT confirmed-progress rechecks one
+# long-running notice is escalated - in wording that is not a wedge report - and
+# the count restarts.
+test_housekeeping_absorb_ladder_surfaces_long_running_lane() {
+  local dir state key win pane fakebin
+  dir=$(make_supercase housekeeping-progress-ladder)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  win="sess:fm-endless-w1"
+  printf 'working: handed to validation\n' > "$state/endless-w1.status"
+  pane="$dir/pane.txt"; printf 'no-mistakes axi run: validating...\n' > "$pane"
+  key=$(printf '%s' "endless-w1" | tr ':/.' '___')
+  # A reading that CHANGES on every recheck, so tier 1 keeps confirming progress
+  # and only the ladder can end the absorbs.
+  cat > "$fakebin/fm-crew-state.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+n=$(cat "$FM_FAKE_SEQ" 2>/dev/null || echo 0)
+n=$((n + 1))
+printf '%s' "$n" > "$FM_FAKE_SEQ"
+printf 'state: working · source: run-step · validating (fixing) · activity: 25s · activity-id: round%s\n' "$n"
+SH
+  chmod +x "$fakebin/fm-crew-state.sh"
+  printf 'window=%s\nkind=ship\n' "$win" > "$state/endless-w1.meta"
+
+  # First recheck: absorbed, nothing escalated.
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  (
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+      FM_FAKE_SEQ="$dir/seq" FM_STEP_PROGRESS_SURFACE_COUNT=2 \
+      FM_ESCALATE_BATCH_SECS=999999 housekeeping "$state"
+  )
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "away mode escalated on the first confirmed-progress recheck"
+  # Second recheck reaches the ladder bound: one long-running notice, and the
+  # count restarts so the cadence repeats.
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  (
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+      FM_FAKE_SEQ="$dir/seq" FM_STEP_PROGRESS_SURFACE_COUNT=2 \
+      FM_ESCALATE_BATCH_SECS=999999 housekeeping "$state"
+  )
+  grep -F "LONG-RUNNING not wedged" "$state/.subsuper-escalations" >/dev/null \
+    || fail "away mode never surfaced a long-running notice for an endlessly advancing lane"
+  grep -F "possible wedge" "$state/.subsuper-escalations" >/dev/null \
+    && fail "away mode reported an advancing lane as a possible wedge"
+  [ "$(tr -d '[:space:]' < "$state/.subsuper-step-progress-$key")" = 0 ] \
+    || fail "away mode did not reset the confirmed-progress count after the notice"
+  [ -e "$state/.subsuper-stale-$key" ] \
+    || fail "away mode dropped the stale marker instead of keeping the lane on its cadence"
+  pass "away-mode absorbs are bounded by one long-running notice per ladder, then restart"
+}
+
 test_handle_wake_paused_signal_records_pause_marker() {
   local dir state key win
   dir=$(make_supercase handle-paused-signal)
@@ -1839,6 +1939,8 @@ test_stale_diagnostic_wedge_survives_busy_housekeeping
 test_stale_terminal_escalates
 test_stale_paused_classifies_pause
 test_handle_wake_paused_records_pause_marker
+test_housekeeping_stale_consults_step_progress
+test_housekeeping_absorb_ladder_surfaces_long_running_lane
 test_handle_wake_paused_signal_records_pause_marker
 test_handle_wake_terminal_signal_clears_pause_tracking
 test_housekeeping_migrates_watcher_pause_marker

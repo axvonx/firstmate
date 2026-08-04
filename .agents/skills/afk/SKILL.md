@@ -163,8 +163,8 @@ Classify each wake this way:
 - `check` -> always escalate. Check scripts print only when firstmate should wake.
 - `stale` with a terminal status or bare legacy captain-relevant line -> escalate.
   Nonterminal progress remains transient even when its prose contains a legacy free-text token or its seen-status marker already matches, so record a marker and self-handle.
-  If the pane is still idle past `FM_STALE_ESCALATE_SECS` (default 240s), housekeeping escalates it as a possible wedge.
-  This bounds wedge-detection latency to the threshold plus a tick: a delay, never a loss.
+  If the pane is still idle past `FM_STALE_ESCALATE_SECS` (default 240s), housekeeping rechecks whether the crew's own pipeline run is still advancing and escalates a possible wedge only when that check finds no progress; an advancing run is absorbed for another window instead, bounded by `FM_STEP_PROGRESS_SURFACE_COUNT` absorbs before one long-running notice.
+  `bin/fm-supervise-daemon.sh`'s header owns that contract and its exact latency bound.
   Healthy crewmates are autonomous and do not wait on firstmate mid-task.
 - `heartbeat` -> self-handle. The daemon runs its own cheap bash fleet scan
   every `FM_HEARTBEAT_SCAN_SECS` (default 300s) as the catch-all for a

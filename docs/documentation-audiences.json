@@ -328,6 +328,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/step-progress-signals.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/stow-memory.md",
       "audience": "maintainer-verification"
     },

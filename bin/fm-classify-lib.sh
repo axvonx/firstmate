@@ -363,6 +363,170 @@ crew_is_paused() {  # <id>
   [ "$(crew_absorb_class "$1")" = paused ]
 }
 
+# How recently a pipeline step must have LOGGED for that alone to prove it is
+# advancing. Deliberately far above the pane-silence threshold and calibrated
+# against measurement rather than taste: on 2026-08-03 this fleet's live
+# activity ages reached 445s and gaps between an agent's own progress lines in
+# real step logs reached 1213s, so anything near the 240s pane bound would
+# simply reproduce the false alarm this predicate exists to remove.
+FM_STEP_ACTIVITY_FRESH_SECS=${FM_STEP_ACTIVITY_FRESH_SECS:-1800}
+
+# The hard ceiling on how long a step may go without logging even while its
+# agent process is still alive. A live process is evidence of work but not proof
+# of progress - a hung agent is also a live process - so tier 2 below must
+# expire, or suppression would become a permanent blind spot, which is strictly
+# worse than the false alarm. Set well past any single legitimate silent tool
+# call (the pipeline's own steps run 10-55 minutes end to end).
+FM_STEP_STALL_MAX_SECS=${FM_STEP_STALL_MAX_SECS:-7200}
+
+# How many CONFIRMED-progress absorbs one window may collect before supervision
+# surfaces one long-running notice and starts the count again. This is the end of
+# the absorb ladder, and it must exist: a counter that never terminates would let
+# a run that keeps advancing without ever finishing stay invisible for as long as
+# it likes. The arithmetic: an absorb can happen at most once per
+# FM_STALE_ESCALATE_SECS per window, so at that 240s default 15 absorbs is a
+# first human glance at roughly one hour, then roughly hourly after that. An
+# hours-long run deserves exactly that one glance, because progressing and
+# finishing are different things, and only a human can decide the run has been
+# advancing for longer than the work is worth. The notice is NOT a wedge report
+# and says so in its own words, so it can never be confused with the
+# no-progress escalation ladder.
+FM_STEP_PROGRESS_SURFACE_COUNT=${FM_STEP_PROGRESS_SURFACE_COUNT:-15}
+
+# 0 if crew <id>'s own pipeline run shows it is GETTING ANYWHERE, from the
+# `activity: <N>s`, `activity-id: <hash>` and `step-agent: alive|gone` fields
+# bin/fm-crew-state.sh emits out of `axi status`.
+#
+# This is the question crew_is_provably_working cannot answer. That predicate is
+# a boolean about the current step's STATE, so a run whose step froze still
+# reads `working` forever, and the wedge ladder escalated on pane silence alone.
+#
+# WHY LAST-ACTIVITY ALONE IS NOT ENOUGH - the trap to avoid re-entering. That
+# field is the one that sounds like it means "is it working", and it does not:
+# it tracks the agent's LOG LINES. A step that begins with a long tool call - a
+# build, a full test suite, an install - logs its opening line and then goes
+# quiet for minutes while doing exactly what it should. Measured 2026-08-03 on
+# mkt-pr40-takeover's test step: last_activity read 6m18s old while that run's
+# gate worktree was writing build output 2 minutes old. It was compiling. It was
+# fine. Judging that on log recency alone calls a healthy build wedged.
+#
+# AND WHY RECENCY IS NOT CHANGE - the second half of the same trap. A fresh age
+# only says the agent wrote something recently, not that it got anywhere: a
+# retry/backoff loop, or a fix round re-entering the same failure, keeps logging
+# at a healthy cadence forever. So tier 1 requires the log MESSAGE to differ from
+# the one seen at the previous observation, through the activity-id digest, and
+# the previous digest is remembered in the caller's per-window memo file. A memo
+# file that does not exist yet is a first observation and counts as changed; an
+# absent digest, or a caller that supplies no memo path at all, cannot show
+# change and therefore cannot absorb an agent-run step through tier 1.
+#
+# THAT CHANGE REQUIREMENT IS SCOPED TO ITS PURPOSE, which is catching a looping
+# AGENT. A step with no subprocess agent - the ci monitor, which polls checks for
+# up to the tool's whole ci timeout - cannot loop that way, and its progress
+# markers are fixed strings that repeat verbatim between observations. It also
+# has no pid, so tier 2 can never absorb it. Requiring changed text there would
+# escalate the canonical legitimate absorb case (a run sitting on a static pane
+# waiting for CI) every STALE_ESCALATE_SECS, so a step that reports it has no
+# agent is read on recency alone.
+#
+# THAT LICENCE NEEDS THE POSITIVE READING `step-agent: none`, and an ABSENT
+# step-agent field must never substitute for it. The two mean opposite things: a
+# reader that read the pid column and found it empty knows there is no agent,
+# while a reader that could not read the column knows nothing. Publishing
+# nothing for both, and trusting absence, would mean one rendering change - the
+# pid losing its quotes, against a column that is an INTEGER - silently moved
+# every agent-run step onto the recency-only path and disabled the agent-loop
+# guard fleet-wide, with no alarm. So absence falls back to requiring a changed
+# digest, and tier 2 stays unavailable to it: an uncertain reading escalates.
+#
+# So the decision is two-tiered, and escalates only when BOTH are negative:
+#   tier 1  the step logged within FM_STEP_ACTIVITY_FRESH_SECS AND either logged
+#           something DIFFERENT from last time or reports `step-agent: none`
+#           -> advancing
+#   tier 2  the step's agent process is still alive AND the silence has not yet
+#           reached FM_STEP_STALL_MAX_SECS -> advancing
+# Tier 2 covers exactly the quiet-build case, and also the healthy step that
+# legitimately logs one identical line twice, so tier 1's change requirement
+# cannot escalate a working run on its own. Tier 2's ceiling is what keeps a
+# genuinely hung agent escalating rather than being suppressed forever, and the
+# recency-only path stays bounded the same way any absorb does: a monitor whose
+# age grows past FM_STEP_ACTIVITY_FRESH_SECS has no tier 2 to fall back on, so it
+# escalates.
+#
+# Neither tier bounds how MANY times one window may be absorbed, on purpose: an
+# advancing run is not a wedge and must not be reported as one. That total is
+# bounded by the callers instead, through FM_STEP_PROGRESS_SURFACE_COUNT, which
+# surfaces one long-running notice and starts over.
+#
+# Rejected alternatives, so they are not retried: `active_for` and the steps[]
+# table's duration_ms both measure elapsed time, so they climb for a frozen step
+# and cannot indicate progress at all; filesystem recency in the gate worktree
+# is the strongest signal but needs a path this reader does not have, and the
+# build output a naive filter would exclude was the very evidence that settled
+# the measurement above.
+#
+# Fails to 1 on every uncertain reading - no run attributed, a run read from
+# anything but an authoritative run-step (crew-authored status-log prose can say
+# whatever it likes, including the word `activity:`), a terminal or
+# coarsely-attributed run, no activity reading, an unparseable age, an
+# unreadable agent-pid column, an unchanged digest on a step whose agent is not
+# alive - so a missing answer escalates exactly as before rather than silently
+# suppressing a real wedge. Costs one bounded fm-crew-state.sh read, so callers
+# run it only at escalation time, never every poll.
+crew_step_is_advancing() {  # <id> [activity-memo-file]
+  local id=$1 memo=${2:-} line src age digest prev agent changed=no
+  [ -n "$id" ] || return 1
+  line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
+  case "$line" in state:*) ;; *) return 1 ;; esac
+  src=${line#*source: }
+  src=${src%% *}
+  [ "$src" = run-step ] || return 1
+  case "$line" in
+    *"activity: "*) ;;
+    *) return 1 ;;
+  esac
+  age=${line#*activity: }
+  age=${age%% *}
+  age=${age%s}
+  case "$age" in ''|*[!0-9]*) return 1 ;; esac
+  # Change detection. The memo is refreshed on every observation that carries a
+  # digest, including one that does not absorb, so the next comparison is always
+  # against the most recent reading.
+  case "$line" in
+    *"activity-id: "*)
+      digest=${line#*activity-id: }
+      digest=${digest%% *}
+      ;;
+    *) digest='' ;;
+  esac
+  if [ -n "$digest" ] && [ -n "$memo" ]; then
+    prev=$(cat "$memo" 2>/dev/null || true)
+    [ "$prev" = "$digest" ] || changed=yes
+    printf '%s' "$digest" > "$memo" 2>/dev/null || true
+  fi
+  # An empty agent means the field was not published at all, which says only
+  # that the reading is unavailable - never that no agent exists. Only the
+  # explicit `none` says that.
+  case "$line" in
+    *"step-agent: "*)
+      agent=${line#*step-agent: }
+      agent=${agent%% *}
+      ;;
+    *) agent='' ;;
+  esac
+  # Tier 1: a NEW log line is progress on its own, and so is any recent log line
+  # from a step that REPORTS it has no agent to loop. Written as an if rather
+  # than `test && return`, whose non-zero list status would abort a future caller
+  # that adds set -e.
+  if [ "$age" -lt "$FM_STEP_ACTIVITY_FRESH_SECS" ] \
+    && { [ "$changed" = yes ] || [ "$agent" = none ]; }; then
+    return 0
+  fi
+  # Tier 2: a quiet but live agent, bounded.
+  [ "$agent" = alive ] || return 1
+  [ "$age" -lt "$FM_STEP_STALL_MAX_SECS" ]
+}
+
 # 0 (benign/absorb) if EVERY task referenced by a no-verb "signal:" wake is provably
 # working; 1 (actionable/surface) if any is not, or no task can be resolved. Pass the
 # same space-separated file list as signal_reason_is_actionable. Files are mapped to
