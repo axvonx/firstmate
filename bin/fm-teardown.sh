@@ -48,6 +48,15 @@
 # leaves the teardown's outcome, order, and exit status untouched.
 # A forced secondmate-home teardown retires each child's session as the CHILD
 # home; bin/fm-browser-lib.sh owns naming, ownership, and reclaim.
+# NOT cleaned up by teardown, recorded and NOT fixed, out of the per-task
+# browser change's scope: firstmate's own long-lived helper processes have the
+# same no-owner gap that the browser retirement above closes for task sessions.
+# Teardown kills the task's recorded runtime endpoint and the processes in that
+# endpoint's tree, but a helper spawned detached reparents to PID 1 and was never
+# in that tree, so no tree-walk can reach it and only an explicitly
+# name-addressed retirement ever could; teardown performs none for these helpers.
+# Observed 2026-08-05: a lavish-axi server process had been running 29h22m with
+# PPID 1, long outliving the review session that started it.
 # Orca tasks use the same safety checks, then close the recorded terminal and
 # remove the recorded worktree through `orca worktree rm`; teardown never guesses
 # an Orca target from ambient CLI state.
