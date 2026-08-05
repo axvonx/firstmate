@@ -53,6 +53,10 @@ set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# Naming for the browser-session cases below comes from the production library,
+# so those assertions pin behavior rather than a hard-coded home digest.
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-browser-lib.sh"
 fm_git_identity fmtest fmtest@example.invalid
 
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
@@ -105,7 +109,22 @@ case "${1:-} ${2:-}" in
 esac
 exit 0
 SH
-  chmod +x "$fakebin/treehouse" "$fakebin/tmux" "$fakebin/gh-axi" "$fakebin/gh"
+  # Browser stand-in: records every call teardown makes together with the session
+  # it was aimed at, and simulates a successful stop the way the real CLI does, by
+  # removing the bridge record. FM_FAKE_CDA_EXIT=1 makes the stop fail instead.
+  cat > "$fakebin/chrome-devtools-axi" <<SH
+#!/usr/bin/env bash
+set -u
+printf '%s|%s\n' "\${CHROME_DEVTOOLS_AXI_SESSION:-}" "\$*" >> "$case_dir/cda.log"
+if [ "\${1:-}" = stop ] && [ "\${FM_FAKE_CDA_EXIT:-0}" = 0 ]; then
+  rm -f "\${FM_BROWSER_STATE_ROOT:-}/sessions/\${CHROME_DEVTOOLS_AXI_SESSION:-}/bridge.pid"
+fi
+exit "\${FM_FAKE_CDA_EXIT:-0}"
+SH
+  chmod +x "$fakebin/treehouse" "$fakebin/tmux" "$fakebin/gh-axi" "$fakebin/gh" \
+    "$fakebin/chrome-devtools-axi"
+  : > "$case_dir/cda.log"
+  mkdir -p "$case_dir/cda-root/sessions"
 
   # Bare origin so the clone has an `origin` remote and origin/HEAD.
   git init -q --bare "$case_dir/origin.git"
@@ -494,6 +513,7 @@ run_teardown() {
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_CONFIG_OVERRIDE="$case_dir/config" \
+  FM_BROWSER_STATE_ROOT="$case_dir/cda-root" \
   PATH="$case_dir/fakebin:$PATH" \
     "$TEARDOWN" task-x1 "$@"
 }
@@ -1824,7 +1844,198 @@ test_herdr_projection_teardown_retains_journal_when_close_unconfirmed() {
   pass "herdr projection teardown retains every record when post-close presence is unknown"
 }
 
+# --- per-task browser sessions ----------------------------------------------
+#
+# Teardown reclaims the task's private browser session as ordinary cleanup:
+# always attempted on an allowed teardown, never attempted on a refused one,
+# and never able to fail or delay a teardown that would otherwise succeed.
+# run_teardown leaves FM_HOME unset, so teardown resolves this home to
+# FM_ROOT_OVERRIDE; TEARDOWN_HOME below is that same directory, and the expected
+# names are derived from it exactly as teardown derives them.
+TEARDOWN_HOME=$ROOT
+
+# seed_browser_session <case-dir> <name> [pid]: a session state directory in the
+# case's browser root, with a bridge record naming <pid> when one is given.
+seed_browser_session() {
+  local case_dir=$1 name=$2 pid=${3:-}
+  mkdir -p "$case_dir/cda-root/sessions/$name"
+  [ -z "$pid" ] || printf '{"pid":%s,"port":9999}\n' "$pid" \
+    > "$case_dir/cda-root/sessions/$name/bridge.pid"
+}
+
+# dead_pid: a pid that is provably not running.
+dead_pid() {
+  local pid i=0
+  while [ "$i" -lt 20 ]; do
+    ( exit 0 ) &
+    pid=$!
+    wait "$pid" 2>/dev/null || true
+    kill -0 "$pid" 2>/dev/null || { printf '%s\n' "$pid"; return 0; }
+    i=$((i + 1))
+  done
+  return 1
+}
+
+test_teardown_retires_exactly_the_tasks_own_browser_session() {
+  local case_dir rc name foreign dead
+  case_dir=$(make_case browser-retire)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "browser work"
+  git -C "$case_dir/project" update-ref refs/heads/main "$(git -C "$case_dir/wt" rev-parse HEAD)"
+  dead=$(dead_pid) || fail "browser-retire: could not obtain a provably dead pid"
+
+  name=$(fm_browser_session_name "$TEARDOWN_HOME" task-x1)
+  printf 'browser_session=%s\n' "$name" >> "$case_dir/state/task-x1.meta"
+  seed_browser_session "$case_dir" "$name" "$dead"
+  foreign=$(fm_browser_session_name "$case_dir/other-home" task-x1)
+  seed_browser_session "$case_dir" "$foreign" "$dead"
+  seed_browser_session "$case_dir" default "$dead"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "browser-retire: teardown should succeed"$'\n'"$(cat "$case_dir/stderr")"
+  assert_grep "reclaimed browser session $name" "$case_dir/stdout" \
+    "browser-retire: teardown did not report the browser it reclaimed"
+  assert_absent "$case_dir/cda-root/sessions/$name" \
+    "browser-retire: the task's session state was not reclaimed"
+  assert_present "$case_dir/cda-root/sessions/$foreign" \
+    "browser-retire: another home's session was reclaimed"
+  assert_present "$case_dir/cda-root/sessions/default" \
+    "browser-retire: the shared default session was reclaimed"
+  pass "teardown reclaims the task's own browser session and leaves every other session alone"
+}
+
+test_refused_teardown_leaves_the_browser_session_untouched() {
+  local case_dir rc name
+  case_dir=$(make_case browser-refused)
+  write_meta "$case_dir" no-mistakes ship
+  # Real content that never reached a remote, a PR, or the default branch.
+  wt_commit_file "$case_dir" feature.txt hello "unlanded work"
+
+  name=$(fm_browser_session_name "$TEARDOWN_HOME" task-x1)
+  printf 'browser_session=%s\n' "$name" >> "$case_dir/state/task-x1.meta"
+  seed_browser_session "$case_dir" "$name" 999999
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  [ "$rc" -ne 0 ] || fail "browser-refused: teardown should refuse unlanded work"
+  grep -q REFUSED "$case_dir/stderr" || fail "browser-refused: expected a refusal"
+  [ ! -s "$case_dir/cda.log" ] \
+    || fail "browser-refused: a refused teardown still touched the browser:"$'\n'"$(cat "$case_dir/cda.log")"
+  assert_present "$case_dir/cda-root/sessions/$name/bridge.pid" \
+    "browser-refused: a refused teardown reclaimed the session the worker is still using"
+  pass "a refused teardown never reaches the browser, so a live worker keeps its pages"
+}
+
+test_failing_browser_stop_never_fails_teardown() {
+  local case_dir rc name pid
+  case_dir=$(make_case browser-stop-fails)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "browser work"
+  git -C "$case_dir/project" update-ref refs/heads/main "$(git -C "$case_dir/wt" rev-parse HEAD)"
+
+  name=$(fm_browser_session_name "$TEARDOWN_HOME" task-x1)
+  printf 'browser_session=%s\n' "$name" >> "$case_dir/state/task-x1.meta"
+  # A stand-in this suite owns that passes the bridge identity check teardown
+  # applies before trusting a recorded pid: a plain sleep would read as a dead
+  # bridge and reclaim, which is not the case under test.
+  pid=$(fm_test_fake_bridge_pid "$case_dir/fake-bridge")
+  seed_browser_session "$case_dir" "$name" "$pid"
+
+  # Exported, never an assignment prefix: a prefix on a bash function call
+  # persists after the call and would leak the failing stop into later cases.
+  export FM_FAKE_CDA_EXIT=1
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  unset FM_FAKE_CDA_EXIT
+
+  expect_code 0 "$rc" "browser-stop-fails: a failing browser stop must not fail teardown"$'\n'"$(cat "$case_dir/stderr")"
+  grep -q "teardown task-x1 complete" "$case_dir/stdout" \
+    || fail "browser-stop-fails: teardown did not complete:"$'\n'"$(cat "$case_dir/stdout")"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "browser-stop-fails: teardown printed a REFUSED line"
+  ! grep -q "^error:" "$case_dir/stderr" || fail "browser-stop-fails: teardown reported an error"
+  assert_no_grep "reclaimed browser session" "$case_dir/stdout" \
+    "browser-stop-fails: teardown claimed a reclaim that did not happen"
+  assert_present "$case_dir/cda-root/sessions/$name/bridge.pid" \
+    "browser-stop-fails: the record identifying a surviving bridge was deleted"
+  assert_absent "$case_dir/state/task-x1.meta" "browser-stop-fails: teardown left the task record behind"
+  kill -0 "$pid" 2>/dev/null || fail "browser-stop-fails: the fixture bridge died, so the case proved nothing"
+  kill "$pid" 2>/dev/null || true
+  pass "a browser that will not stop leaves teardown's outcome and output unchanged"
+}
+
+test_teardown_without_a_browser_session_says_nothing() {
+  local case_dir rc
+  case_dir=$(make_case browser-none)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "no browser work"
+  git -C "$case_dir/project" update-ref refs/heads/main "$(git -C "$case_dir/wt" rev-parse HEAD)"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "browser-none: teardown should succeed"$'\n'"$(cat "$case_dir/stderr")"
+  [ ! -s "$case_dir/cda.log" ] \
+    || fail "browser-none: a task with no browser still called the browser:"$'\n'"$(cat "$case_dir/cda.log")"
+  assert_no_grep "reclaimed browser session" "$case_dir/stdout" \
+    "browser-none: teardown reported reclaiming a browser that never existed"
+  pass "a task that never opened a browser adds no browser call and no extra output"
+}
+
+test_forced_secondmate_teardown_retires_children_as_their_own_home() {
+  local case_dir home rc child_name parent_name dead
+  case_dir=$(make_case browser-child)
+  write_meta "$case_dir" local-only secondmate
+  home="$case_dir/secondmate-home"
+  mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
+  printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
+  printf '%s\n' "home=$home" >> "$case_dir/state/task-x1.meta"
+  dead=$(dead_pid) || fail "browser-child: could not obtain a provably dead pid"
+
+  child_name=$(fm_browser_session_name "$home" child-tmux)
+  fm_write_meta "$home/state/child-tmux.meta" \
+    "window=firstmate:fm-child-tmux" \
+    "endpoint_task_id=child-tmux" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=local-only" \
+    "browser_session=$child_name"
+  seed_browser_session "$case_dir" "$child_name" "$dead"
+  # Same child task id, but named under the PARENT's identity: the parent must
+  # reclaim the child through the child's home, never through its own.
+  parent_name=$(fm_browser_session_name "$TEARDOWN_HOME" child-tmux)
+  seed_browser_session "$case_dir" "$parent_name" "$dead"
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "browser-child: forced secondmate teardown should succeed"$'\n'"$(cat "$case_dir/stderr")"
+  assert_absent "$case_dir/cda-root/sessions/$child_name" \
+    "browser-child: the child's own browser session was not reclaimed"
+  assert_present "$case_dir/cda-root/sessions/$parent_name" \
+    "browser-child: a same-named session under the parent's identity was reclaimed"
+  pass "a forced secondmate teardown reclaims each child's browser under the child home's identity"
+}
+
 test_local_only_fork_remote_allows
+test_teardown_retires_exactly_the_tasks_own_browser_session
+test_refused_teardown_leaves_the_browser_session_untouched
+test_failing_browser_stop_never_fails_teardown
+test_teardown_without_a_browser_session_says_nothing
+test_forced_secondmate_teardown_retires_children_as_their_own_home
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
 test_local_only_truly_unpushed_refuses

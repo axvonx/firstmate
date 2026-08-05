@@ -27,6 +27,9 @@ case "${1:-}" in
   list-windows) exit 0 ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
   send-keys)
+    # -l carries the launch command; everything else is a line typed into the
+    # pane shell (the spawn-time exports), recorded separately.
+    [ -z "${FM_FAKE_PANE_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_PANE_LOG"
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       prev=
       for a in "$@"; do
@@ -84,6 +87,9 @@ run_spawn() {
   local home=$1 wt=$2 fakebin=$3 launchlog=$4
   shift 4
   : > "$launchlog"
+  # Derived rather than passed, so no caller signature changes: the lines typed
+  # into the pane shell alongside the launch command.
+  : > "$launchlog.pane"
   # CLAUDE_CONFIG_DIR is forwarded onto claude launches by fm-spawn, so pin it
   # explicitly (empty by default) instead of leaking the invoking shell's value,
   # which would make launch assertions depend on the developer's environment.
@@ -93,7 +99,8 @@ run_spawn() {
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
-    FM_FAKE_LAUNCH_LOG="$launchlog" GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
+    FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_PANE_LOG="$launchlog.pane" \
+    GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" 2>&1
 }
 
@@ -103,6 +110,16 @@ $1
 EOF
 }
 
+# The per-task browser session fm-spawn records and puts on the launch command.
+# Read from the meta rather than recomputed, so assertions pin that the recorded
+# value and the launched value agree without hard-coding a home digest.
+recorded_browser_session() {
+  local meta=$1 value
+  value=$(grep '^browser_session=' "$meta" | tail -1 | cut -d= -f2-)
+  [ -n "$value" ] || fail "meta records no browser_session=: $meta"
+  printf '%s\n' "$value"
+}
+
 assert_meta_profile() {
   local meta=$1 harness=$2 model=$3 effort=$4
   assert_grep "harness=$harness" "$meta" "meta missing harness=$harness"
@@ -110,8 +127,88 @@ assert_meta_profile() {
   assert_grep "effort=$effort" "$meta" "meta missing effort=$effort"
 }
 
+# Every spawn hands its agent a browser session of its own: the name is recorded
+# in the task's durable record AND leads the launch command, so the agent and
+# every child it starts inherit it instead of the shared default session.
+test_every_spawn_records_and_launches_a_private_browser_session() {
+  local rec id out status launch session
+  id=profile-browser-z30
+  rec=$(make_spawn_case profile-browser claude "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "spawn should succeed"$'\n'"$out"
+
+  session=$(recorded_browser_session "$HOME_DIR/state/$id.meta")
+  case "$session" in
+    fm-*"-$id") : ;;
+    *) fail "recorded browser session is not this home's name for this task: $session" ;;
+  esac
+  [ "${#session}" -le 64 ] || fail "recorded browser session exceeds the 64-character limit: $session"
+
+  launch=$(cat "$LAUNCH_LOG")
+  case "$launch" in
+    "CHROME_DEVTOOLS_AXI_SESSION=$session "*) : ;;
+    *) fail "launch command does not lead with the recorded browser session"$'\n'"session: $session"$'\n'"launch:  $launch" ;;
+  esac
+  pass "a spawn records its private browser session and leads the launch command with it"
+}
+
+# Recovering a wedged crewmate means exiting the agent and typing a relaunch
+# into the SAME pane, without re-running fm-spawn. An assignment prefix binds to
+# one command only, so unless the session is also exported into the pane shell
+# the relaunched worker rejoins the shared default session while its brief tells
+# it the browser is private and forbids every form of cleanup. The exported line
+# is what makes the brief's promise true for the whole life of the task.
+test_the_private_browser_session_survives_an_in_pane_relaunch() {
+  local rec id out status session shell_out
+  id=profile-browser-z32
+  rec=$(make_spawn_case profile-browser-relaunch claude "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "spawn should succeed"$'\n'"$out"
+
+  session=$(recorded_browser_session "$HOME_DIR/state/$id.meta")
+  assert_grep "export CHROME_DEVTOOLS_AXI_SESSION=$session" "$LAUNCH_LOG.pane" \
+    "spawn never exported the private browser session into the pane shell"
+
+  # Replay what the pane shell actually received, then ask a later command in
+  # that same shell what it sees - the relaunch's view of the environment.
+  shell_out=$(
+    bash --noprofile --norc -c '
+      eval "$1"
+      printf "relaunch_sees=%s\n" "${CHROME_DEVTOOLS_AXI_SESSION:-UNSET}"
+    ' _ "$(grep -o "export CHROME_DEVTOOLS_AXI_SESSION=.*" "$LAUNCH_LOG.pane" | tail -1)"
+  )
+  [ "$shell_out" = "relaunch_sees=$session" ] \
+    || fail "a command relaunched in the pane would not inherit the task's browser session: $shell_out"
+  pass "the private browser session is exported into the pane, so an in-pane relaunch keeps it"
+}
+
+test_two_tasks_in_one_home_never_share_a_browser_session() {
+  local rec id_a id_b out status session_a session_b
+  id_a=profile-browser-z31a
+  id_b=profile-browser-z31b
+  rec=$(make_spawn_case profile-browser-pair claude "$id_a" "$id_b")
+  read_case_record "$rec"
+
+  for id in "$id_a" "$id_b"; do
+    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+    status=$?
+    expect_code 0 "$status" "spawn of $id should succeed"$'\n'"$out"
+  done
+  session_a=$(recorded_browser_session "$HOME_DIR/state/$id_a.meta")
+  session_b=$(recorded_browser_session "$HOME_DIR/state/$id_b.meta")
+  [ "$session_a" != "$session_b" ] \
+    || fail "two tasks in one home were given the same browser session: $session_a"
+  pass "two tasks in the same home are given separate browser sessions"
+}
+
 test_no_profile_keeps_claude_profile_defaults() {
-  local rec id out status expected launch
+  local rec id out status expected launch session
   id=profile-off-z1
   rec=$(make_spawn_case profile-off claude "$id")
   read_case_record "$rec"
@@ -123,7 +220,8 @@ test_no_profile_keeps_claude_profile_defaults() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
 
   launch=$(cat "$LAUNCH_LOG")
-  expected="CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
+  session=$(recorded_browser_session "$HOME_DIR/state/$id.meta")
+  expected="CHROME_DEVTOOLS_AXI_SESSION=$session CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch did not use the canonical launch kind"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "no --model/--effort records defaults and types the claude launch instructions"
 }
@@ -343,7 +441,7 @@ test_active_dispatch_profile_allows_positional_harness() {
 }
 
 test_active_dispatch_profile_allows_raw_launch_command() {
-  local rec id out status launch
+  local rec id out status launch session
   id=profile-raw-z15
   rec=$(make_spawn_case profile-raw claude "$id")
   read_case_record "$rec"
@@ -356,7 +454,9 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   assert_contains "$out" "spawned $id harness=custom-agent" "spawn did not report raw command harness"
   assert_meta_profile "$HOME_DIR/state/$id.meta" custom-agent default default
   launch=$(cat "$LAUNCH_LOG")
-  [ "$launch" = "custom-agent --flag" ] || fail "raw launch command changed"$'\n'"actual: $launch"
+  session=$(recorded_browser_session "$HOME_DIR/state/$id.meta")
+  [ "$launch" = "CHROME_DEVTOOLS_AXI_SESSION=$session custom-agent --flag" ] \
+    || fail "raw launch command changed"$'\n'"actual: $launch"
   pass "active crew-dispatch profile allows the raw launch-command escape hatch"
 }
 
@@ -667,6 +767,9 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
   pass "active crew-dispatch profile does not block secondmate launches"
 }
 
+test_every_spawn_records_and_launches_a_private_browser_session
+test_the_private_browser_session_survives_an_in_pane_relaunch
+test_two_tasks_in_one_home_never_share_a_browser_session
 test_no_profile_keeps_claude_profile_defaults
 test_relative_home_overrides_launch_with_absolute_cross_process_paths
 test_home_defaults_preserve_absolute_or_resolve_relative_paths

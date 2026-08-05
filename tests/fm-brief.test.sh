@@ -1072,9 +1072,11 @@ test_credential_rule_covers_ship_and_scout() {
   pass "fm-brief.sh: ship and scout briefs teach vault-backed credential access and never print a value"
 }
 
-# Ship and scout briefs both tell the worker to park the browser, and only to park it.
+# Ship and scout briefs carry ONE browser rule, identical in both variants: the
+# session is private to the task and needs no cleanup. The deleted shared-session
+# parking rule must not survive in either variant.
 test_browser_teardown_contract() {
-  local home brief
+  local home brief ship_rule scout_rule help
   home="$TMP_ROOT/browser-teardown-home"
   write_registry "$home"
 
@@ -1086,20 +1088,34 @@ test_browser_teardown_contract() {
   for id in brief-browser-ship brief-browser-scout; do
     brief="$home/data/$id/brief.md"
     assert_present "$brief" "$id: brief was not scaffolded"
-    assert_grep "park every page you opened with \`chrome-devtools-axi open about:blank\`" "$brief" \
-      "$id: brief must name the concrete park command and cover every page opened"
-    assert_grep "\`open\` navigates only the currently selected page" "$brief" \
-      "$id: brief must say why one park command is not enough"
-    assert_grep "one chrome-devtools-axi session serves every worker on this machine" "$brief" \
-      "$id: brief must state the shared-session consequence"
-    assert_grep "blanks whatever that worker was about to capture" "$brief" \
-      "$id: brief must name what parking someone else's page costs them"
-    assert_grep "Do not close or stop the browser" "$brief" \
-      "$id: brief must forbid tearing down the shared browser session"
+    assert_grep "Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations." "$brief" \
+      "$id: brief must still name the browser tool"
+    assert_grep "Your browser is private to this task - no other worker can see or touch your pages, and you cannot disturb theirs - so open what you need and leave it open." "$brief" \
+      "$id: brief must state the isolation fact before the instruction that depends on it"
+    assert_grep "Do not park, close, or stop anything, do not change \`CHROME_DEVTOOLS_AXI_SESSION\`, and do not add browser cleanup later: the whole session is retired for you when this task ends, however it ends." "$brief" \
+      "$id: brief must forbid every cleanup variant and say the session is retired for the worker"
+    assert_no_grep "park every page" "$brief" \
+      "$id: the deleted page-ownership parking rule reappeared"
+    assert_no_grep "about:blank" "$brief" \
+      "$id: the deleted about:blank parking rule reappeared"
+    assert_no_grep "serves every worker" "$brief" \
+      "$id: the deleted shared-session rationale reappeared, and it is now false"
     assert_no_grep "chrome-devtools-axi stop" "$brief" \
-      "$id: brief must never instruct stopping the shared browser session"
+      "$id: brief must never instruct stopping a browser session"
   done
-  pass "fm-brief.sh: browser work ends by parking on about:blank, never stopping"
+
+  # One rule, one spelling: the two variants must agree byte for byte.
+  ship_rule=$(grep -A 2 -F 'Use gh-axi for GitHub operations' "$home/data/brief-browser-ship/brief.md")
+  scout_rule=$(grep -A 2 -F 'Use gh-axi for GitHub operations' "$home/data/brief-browser-scout/brief.md")
+  [ "$ship_rule" = "$scout_rule" ] \
+    || fail "ship and scout briefs spell the browser rule differently"$'\n'"--- ship ---"$'\n'"$ship_rule"$'\n'"--- scout ---"$'\n'"$scout_rule"
+
+  help=$("$ROOT/bin/fm-brief.sh" --help 2>&1) || fail "fm-brief.sh --help exited non-zero"
+  assert_contains "$help" "private to its task and needs no" \
+    "fm-brief.sh --help does not document the generated private-session browser rule"
+  assert_contains "$help" "The old about:blank parking rule is deleted on purpose" \
+    "fm-brief.sh --help does not record that the parking rule was removed deliberately"
+  pass "fm-brief.sh: ship and scout briefs carry one private-session browser rule and no parking rule"
 }
 
 test_script_parses

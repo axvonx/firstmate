@@ -40,6 +40,12 @@ trap cleanup EXIT
 
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-gotmp-tests.XXXXXX")
 
+# This suite does not source tests/lib.sh, so the browser-session safety seam
+# that harness installs is absent here: pin the chrome-devtools-axi state root
+# into the fixture ourselves, so the real fm-teardown.sh can never reach a
+# session the developer or a live crewmate is using.
+export FM_BROWSER_STATE_ROOT="$TMP_ROOT/.chrome-devtools-axi"
+
 # Build a fake FM_HOME/FM_ROOT so the real fm-teardown.sh (symlinked in) resolves
 # state and helper scripts inside it. Stub the helper scripts fm-teardown calls so no
 # live tmux/treehouse/fleet state is touched. A nonexistent worktree path makes both
@@ -71,6 +77,10 @@ make_fake_root() {
   ln -s "$ROOT/bin/fm-public-followup-lib.sh" "$fake/bin/fm-public-followup-lib.sh"
   ln -s "$ROOT/bin/fm-x-lib.sh" "$fake/bin/fm-x-lib.sh"
   ln -s "$ROOT/bin/fm-secondmate-registry-lib.sh" "$fake/bin/fm-secondmate-registry-lib.sh"
+  # fm-browser-lib.sh: teardown sources it to retire the task's private browser
+  # session; the FM_BROWSER_STATE_ROOT export above keeps that reclaim inside
+  # the fixture.
+  ln -s "$ROOT/bin/fm-browser-lib.sh" "$fake/bin/fm-browser-lib.sh"
   # fm-guard.sh: stub (teardown calls it with `|| true`).
   cat > "$fake/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
@@ -144,6 +154,10 @@ test_teardown_skips_gracefully_without_tasktmp() {
   ln -s "$ROOT/bin/fm-public-followup-lib.sh" "$fake/bin/fm-public-followup-lib.sh"
   ln -s "$ROOT/bin/fm-x-lib.sh" "$fake/bin/fm-x-lib.sh"
   ln -s "$ROOT/bin/fm-secondmate-registry-lib.sh" "$fake/bin/fm-secondmate-registry-lib.sh"
+  # fm-browser-lib.sh: teardown sources it to retire the task's private browser
+  # session; the FM_BROWSER_STATE_ROOT export above keeps that reclaim inside
+  # the fixture.
+  ln -s "$ROOT/bin/fm-browser-lib.sh" "$fake/bin/fm-browser-lib.sh"
   cat > "$fake/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
 exit 0

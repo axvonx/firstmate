@@ -102,6 +102,10 @@ mkdir -p "$STATE"
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
+# Per-task browser sessions: naming, home-scoped ownership, retirement and the
+# orphan sweep the maintenance region below runs on a long cadence.
+# shellcheck source=bin/fm-browser-lib.sh
+. "$SCRIPT_DIR/fm-browser-lib.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
@@ -133,6 +137,13 @@ HEARTBEAT=${FM_HEARTBEAT:-600}        # base seconds between heartbeat scans
 HEARTBEAT_MAX=${FM_HEARTBEAT_MAX:-7200}  # heartbeat backoff cap
 CHECK_INTERVAL=${FM_CHECK_INTERVAL:-300}  # seconds between *.check.sh sweeps
 CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}     # seconds allowed per *.check.sh
+BROWSER_SWEEP_INTERVAL=${FM_BROWSER_SWEEP_INTERVAL:-900}  # seconds between orphan browser-session sweeps
+                                      # Long on purpose: an orphaned session only appears after a
+                                      # crash, a --force teardown, or a teardown whose retirement
+                                      # could not complete, and it costs a leaked bridge process
+                                      # rather than correctness, so a slow reclaim is sufficient.
+                                      # Like its siblings above, this is read once at process start;
+                                      # changing it needs a watcher restart.
 SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trailing
                                       # signals (a status write, then the same turn's
                                       # turn-end hook) coalesce into one wake
@@ -874,6 +885,28 @@ while :; do
   # Then deliver any queued-but-unsurfaced result, including one a runner
   # published while this watcher was between cycles.
   procevent_surface_queued
+
+  # Reclaim per-task browser sessions whose owning task is gone (crash, --force,
+  # or a teardown whose retirement could not complete). Home-scoped by session
+  # name, so a sibling home's live session is never a candidate. Cheap:
+  # filesystem-only unless a bridge is actually alive, and bounded per sweep.
+  # Placed in the maintenance region because every wake() exits the cycle, so a
+  # sweep after the check block or the signal scan would be starved on a chatty
+  # fleet - the same starvation the comment below documents. Cadence is marker
+  # based like .last-check so it survives watcher restarts, and the marker is
+  # touched whether or not anything was reclaimed. There is deliberately no
+  # pre-loop touch beside .last-check's: a restart is exactly when orphans
+  # appear, and age_of reports a missing marker as due, so the first cycle
+  # sweeps. Reporting goes to triage_log only - stdout is the wake reason
+  # channel, and reclaiming a stale browser is routine housekeeping with no
+  # legitimate wake kind and nothing the captain should be shown.
+  if [ "$(age_of "$STATE/.last-browser-sweep")" -ge "$BROWSER_SWEEP_INTERVAL" ]; then
+    fm_browser_sweep_orphans "$FM_HOME" "$STATE"
+    touch "$STATE/.last-browser-sweep"
+    if [ "$FM_BROWSER_SWEEP_COUNT" -gt 0 ]; then
+      triage_log "browser: reclaimed $FM_BROWSER_SWEEP_COUNT orphaned session(s):$FM_BROWSER_SWEEP_NAMES"
+    fi
+  fi
 
   # Slow per-task checks (firstmate writes these, e.g. a merged-PR poll).
   # Time-based via .last-check mtime so the cadence survives watcher restarts.

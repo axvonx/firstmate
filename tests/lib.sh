@@ -76,6 +76,54 @@ fm_test_tmproot() {
   printf '%s\n' "$root"
 }
 
+# --- browser-session safety seam --------------------------------------------
+#
+# bin/fm-browser-lib.sh reclaims a task's chrome-devtools-axi session under
+# $HOME/.chrome-devtools-axi by default, and many suites drive the real
+# fm-teardown.sh and fm-watch.sh. Point every suite at a throwaway root instead,
+# for the same reason the wedge-alarm recorder is installed in
+# tests/wake-helpers.sh: it is impossible to forget, because sourcing this
+# harness installs it, so no test - present or future - can stop a browser the
+# developer or a live crewmate is using. A suite that seeds its own sessions
+# still sets FM_BROWSER_STATE_ROOT per case, and that value wins.
+if [ -z "${FM_BROWSER_STATE_ROOT:-}" ]; then
+  _fm_browser_root=$(mktemp -d "${TMPDIR:-/tmp}/fm-browser-root.XXXXXX")
+  if [ "${#FM_TEST_CLEANUP_DIRS[@]}" -eq 0 ]; then trap fm_test_cleanup EXIT; fi
+  FM_TEST_CLEANUP_DIRS+=("$_fm_browser_root")
+  export FM_BROWSER_STATE_ROOT="$_fm_browser_root/.chrome-devtools-axi"
+fi
+
+# fm_test_fake_bridge_pid <dir> - start a long-lived process this suite owns
+# that a bridge-liveness check accepts, and echo its pid. bin/fm-browser-lib.sh
+# treats a recorded pid as live only when `ps -p <pid> -o command=` names a
+# chrome-devtools-axi-bridge - the same identity test chrome-devtools-axi itself
+# applies - so a plain sleep stands in for a DEAD bridge, not a live one. This
+# helper runs a script whose own path carries that name, so the check passes for
+# a process no real browser is behind. It sleeps in short steps, so if the
+# caller kills it the longest-lived leftover child is gone within a second.
+# The caller kills the returned pid; it exits on its own within ~5 minutes.
+fm_test_fake_bridge_pid() {
+  local dir=$1 script
+  mkdir -p "$dir"
+  script="$dir/chrome-devtools-axi-bridge"
+  if [ ! -x "$script" ]; then
+    cat > "$script" <<'SH'
+#!/bin/sh
+i=0
+while [ "$i" -lt 600 ]; do
+  sleep 0.5
+  i=$((i + 1))
+done
+SH
+    chmod +x "$script"
+  fi
+  # stdout and stderr are closed off the job deliberately: a background child
+  # holding a caller's command substitution open would block it until the child
+  # exited, which is the opposite of the point.
+  "$script" >/dev/null 2>&1 &
+  printf '%s\n' "$!"
+}
+
 # --- fakebin / PATH shims ---------------------------------------------------
 #
 # fm_fakebin <dir> creates <dir>/fakebin and echoes it; prepend it to PATH to

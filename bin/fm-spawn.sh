@@ -118,6 +118,13 @@
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
+# Every spawn derives a private chrome-devtools-axi session for the task, records it
+# as browser_session= in state/<id>.meta, and delivers CHROME_DEVTOOLS_AXI_SESSION two
+# ways: exported into the pane shell so it survives an in-pane relaunch of a wedged
+# agent, and on the launch command itself so a first launch can never quietly run on
+# the shared default session; a name that cannot be derived is recorded nowhere and
+# never blocks the spawn. bin/fm-browser-lib.sh owns session naming, home-scoped
+# ownership, and reclaim (fm-teardown.sh, fm-watch.sh).
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> mode=<mode> yolo=<on|off> window=<backend-target> worktree=<path>
 # mode/yolo are resolved per-project from data/projects.md for ship/scout tasks;
 # secondmate spawns record mode=secondmate, yolo=off, home=, and projects=.
@@ -177,6 +184,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-browser-lib.sh
+. "$SCRIPT_DIR/fm-browser-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -327,6 +336,7 @@ spawn_abort_cleanup() {
             echo "mode=${MODE:-no-mistakes}"
             echo "yolo=${YOLO:-off}"
             echo "tasktmp=${TASK_TMP:-}"
+            [ -z "${BROWSER_SESSION:-}" ] || echo "browser_session=${BROWSER_SESSION:-}"
             echo "model=${MODEL:-default}"
             echo "effort=${EFFORT:-default}"
             echo "backend=orca"
@@ -413,6 +423,11 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
 fi
 ID=${POS[0]}
 fm_task_id_creation_valid "$ID" || { echo "error: invalid task id" >&2; exit 2; }
+# Derive this task's private browser session here, before the meta write and
+# before the launch command, because both read it and because the EXIT trap's
+# Orca abort record can fire at any point from now on. An underivable name
+# degrades to no session rather than blocking the spawn (bin/fm-browser-lib.sh).
+BROWSER_SESSION=$(fm_browser_session_name "$FM_HOME" "$ID") || BROWSER_SESSION=
 SPAWN_TASK_LOCK="$STATE/.spawn-$ID.lock"
 if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
   echo "error: another spawn is already creating task $ID" >&2
@@ -1612,6 +1627,7 @@ META_WINDOW=$T
   echo "mode=$MODE"
   echo "yolo=$YOLO"
   echo "tasktmp=$TASK_TMP"
+  [ -z "$BROWSER_SESSION" ] || echo "browser_session=$BROWSER_SESSION"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
@@ -1675,6 +1691,32 @@ if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   sq_primary_home=$(shell_quote "$FM_HOME")
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home $LAUNCH"
+fi
+# Give the agent its own private chrome-devtools-axi session, so its browser
+# work cannot disturb the captain's or another worker's pages and needs no
+# cleanup rule of its own (bin/fm-browser-lib.sh owns naming, ownership and
+# reclaim). Applied last so it lands first on the command line, covering every
+# harness and every kind unconditionally. The agent and every child it spawns
+# (its shell tool, hence every chrome-devtools-axi call) inherit it. No
+# shell_quote: the name is charset-validated to [A-Za-z0-9._-]. Precedent for
+# prefixing LAUNCH unconditionally is the FM_PI_HARNESS prefix above.
+# The name is delivered TWICE on purpose, and the two deliveries answer
+# different failure modes rather than duplicating one contract. The pane export
+# below is what makes the session survive the agent process: relaunching a
+# wedged crewmate (stuck-crewmate-recovery step 4, `claude --continue`,
+# `codex resume`, ...) types a fresh command into this same pane and never
+# re-runs fm-spawn, and an assignment prefix binds to one command only, so
+# without the export the relaunched worker would silently rejoin the shared
+# default session while its brief tells it the browser is private and forbids
+# every form of cleanup. The launch prefix is what makes the FIRST launch
+# unmissable: if it is ever dropped the launch command is dropped with it, a
+# loud spawn failure, whereas a lone export that failed to land would fall back
+# to the shared default session silently - the exact defect this removes. Both
+# spellings read the one BROWSER_SESSION value, so they cannot disagree.
+if [ -n "$BROWSER_SESSION" ]; then
+  LAUNCH="CHROME_DEVTOOLS_AXI_SESSION=$BROWSER_SESSION $LAUNCH"
+  spawn_send_text_line "$T" "export CHROME_DEVTOOLS_AXI_SESSION=$BROWSER_SESSION"
+  sleep 0.3
 fi
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. Sent before the launch command so

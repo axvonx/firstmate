@@ -32,11 +32,19 @@ TMP_ROOT=$(fm_test_tmproot fm-watch-triage-tests)
 # points at the case's hermetic fake fm-crew-state.sh (installed by make_case) so the
 # absorb-only-when-provably-working triage reads a canned verdict; a test fixes that
 # verdict via FM_FAKE_CREW_STATE in its environment before calling watch_bg.
+# FM_BROWSER_STATE_ROOT is pinned inside the case for every run, not only the
+# browser cases: the watcher's orphan sweep is due on a fresh state dir, so
+# without it a test run would glob the developer's real chrome-devtools-axi
+# state. A case that does not create that root simply has nothing to sweep.
 watch_bg() {  # <state> <fakebin> <out> [extra env assignments...]
   local state=$1 fakebin=$2 out=$3
   shift 3
+  # Extra assignments go through env: a "$@" expansion is never re-read as a
+  # shell assignment prefix, so without env they would become the command.
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
-    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$@" "$WATCH" > "$out" &
+    FM_BROWSER_STATE_ROOT="$state/.cda-root" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    env "$@" "$WATCH" > "$out" &
 }
 
 # Wait up to <limit> 0.1s ticks while <pid> stays alive; 0 if still alive, 1 if it died.
@@ -2265,6 +2273,160 @@ test_absorb_does_not_clear_no_progress_escalation_count() {
   pass "an intervening absorb leaves the no-progress count intact, so demand-deep-inspection stays reachable"
 }
 
+# --- orphaned browser sessions ----------------------------------------------
+#
+# The watcher reclaims per-task browser sessions whose owning task is gone, on a
+# long cadence, home-scoped by session name, reporting only to the triage log.
+# Naming comes from the production library so these assertions pin behavior
+# rather than a hard-coded home digest.
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-browser-lib.sh"
+
+# install_browser_shim <fakebin> <log>: a chrome-devtools-axi stand-in that
+# records the session it was called for and simulates a successful stop.
+install_browser_shim() {
+  local fakebin=$1 log=$2
+  cat > "$fakebin/chrome-devtools-axi" <<SH
+#!/usr/bin/env bash
+set -u
+printf '%s|%s\n' "\${CHROME_DEVTOOLS_AXI_SESSION:-}" "\$*" >> "$log"
+if [ "\${1:-}" = stop ]; then
+  rm -f "\${FM_BROWSER_STATE_ROOT:-}/sessions/\${CHROME_DEVTOOLS_AXI_SESSION:-}/bridge.pid"
+fi
+exit 0
+SH
+  chmod +x "$fakebin/chrome-devtools-axi"
+  : > "$log"
+}
+
+# seed_browser_session <state> <name> <pid>: a session directory in the case's
+# browser state root, with a bridge record naming <pid>.
+seed_browser_session() {
+  local state=$1 name=$2 pid=$3
+  mkdir -p "$state/.cda-root/sessions/$name"
+  printf '{"pid":%s,"port":9999}\n' "$pid" > "$state/.cda-root/sessions/$name/bridge.pid"
+}
+
+# start_bridge_pid: a long-lived process this suite owns, standing in for a live
+# bridge. It must pass the bridge identity check bin/fm-browser-lib.sh applies
+# before trusting a recorded pid, so a plain sleep would read as a dead bridge.
+start_bridge_pid() {
+  fm_test_fake_bridge_pid "$TMP_ROOT/fake-bridge"
+}
+
+wait_for_path() {  # <path> [ticks]
+  local p=$1 limit=${2:-150} i=0
+  while [ "$i" -lt "$limit" ]; do
+    [ -e "$p" ] && return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
+wait_for_gone() {  # <path> [ticks]
+  local p=$1 limit=${2:-150} i=0
+  while [ "$i" -lt "$limit" ]; do
+    [ -e "$p" ] || return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
+# wait_full_poll_cycle <state>: return only after the watcher has completed a
+# whole poll cycle, including the maintenance region, since this call started.
+# Causal, not timed: the beacon is touched at the top of every cycle, so two
+# fresh touches bracket one cycle that ran to the end.
+wait_full_poll_cycle() {
+  local state=$1 n
+  for n in 1 2; do
+    rm -f "$state/.last-watcher-beat"
+    wait_for_path "$state/.last-watcher-beat" 300 || return 1
+  done
+  return 0
+}
+
+test_watcher_reclaims_orphaned_browser_sessions() {
+  local dir state fakebin out log pid live orphan foreign wpid
+  dir=$(make_case browser-sweep); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; log="$dir/cda.log"
+  install_browser_shim "$fakebin" "$log"
+  pid=$(start_bridge_pid)
+
+  # A task still on the books, plus its session.
+  live=$(fm_browser_session_name "$dir" task-live)
+  fm_write_meta "$state/task-live.meta" "window=test:fm-task-live" "kind=ship" "browser_session=$live"
+  seed_browser_session "$state" "$live" "$pid"
+  # A session whose task is gone, and one belonging to another home entirely.
+  orphan=$(fm_browser_session_name "$dir" task-gone)
+  seed_browser_session "$state" "$orphan" "$pid"
+  foreign=$(fm_browser_session_name "$dir/other-home" task-elsewhere)
+  seed_browser_session "$state" "$foreign" "$pid"
+
+  watch_bg "$state" "$fakebin" "$out" FM_HOME="$dir" FM_BROWSER_SWEEP_INTERVAL=0
+  wpid=$!
+  wait_for_gone "$state/.cda-root/sessions/$orphan" 300 \
+    || { reap "$wpid"; kill -9 "$pid" 2>/dev/null; fail "the watcher never reclaimed the orphaned browser session"; }
+  wait_full_poll_cycle "$state" || { reap "$wpid"; kill -9 "$pid" 2>/dev/null; fail "the watcher stopped polling"; }
+  kill -0 "$wpid" 2>/dev/null || { kill -9 "$pid" 2>/dev/null; fail "reclaiming a browser session exited the watcher: $(cat "$out")"; }
+
+  [ ! -s "$out" ] || { reap "$wpid"; kill -9 "$pid" 2>/dev/null; fail "the sweep wrote to the wake channel: $(cat "$out")"; }
+  grep -F "browser: reclaimed 1 orphaned session(s): $orphan" "$state/.watch-triage.log" >/dev/null \
+    || { reap "$wpid"; kill -9 "$pid" 2>/dev/null; fail "the sweep did not name what it reclaimed: $(cat "$state/.watch-triage.log" 2>&1)"; }
+  grep -F "$orphan|stop" "$log" >/dev/null \
+    || { reap "$wpid"; kill -9 "$pid" 2>/dev/null; fail "the orphan's bridge was never stopped: $(cat "$log")"; }
+  grep -F "$live|" "$log" >/dev/null \
+    && { reap "$wpid"; kill -9 "$pid" 2>/dev/null; fail "the sweep stopped a living task's browser: $(cat "$log")"; }
+  grep -F "$foreign|" "$log" >/dev/null \
+    && { reap "$wpid"; kill -9 "$pid" 2>/dev/null; fail "the sweep stopped another home's browser: $(cat "$log")"; }
+  [ -d "$state/.cda-root/sessions/$live" ] \
+    || { reap "$wpid"; kill -9 "$pid" 2>/dev/null; fail "the sweep removed a living task's session"; }
+  [ -d "$state/.cda-root/sessions/$foreign" ] \
+    || { reap "$wpid"; kill -9 "$pid" 2>/dev/null; fail "the sweep removed another home's session"; }
+
+  reap "$wpid"
+  kill -9 "$pid" 2>/dev/null || true
+  pass "the watcher reclaims an orphaned browser session, spares live and foreign ones, and reports it only to triage"
+}
+
+test_watcher_browser_sweep_runs_at_startup_then_holds_its_cadence() {
+  local dir state fakebin out log pid first second wpid
+  dir=$(make_case browser-sweep-cadence); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; log="$dir/cda.log"
+  install_browser_shim "$fakebin" "$log"
+  pid=$(start_bridge_pid)
+
+  first=$(fm_browser_session_name "$dir" task-first-orphan)
+  seed_browser_session "$state" "$first" "$pid"
+
+  # No cadence override: a restart is exactly when orphans appear, so the very
+  # first cycle must sweep even on the long default interval.
+  watch_bg "$state" "$fakebin" "$out" FM_HOME="$dir"
+  wpid=$!
+  wait_for_path "$state/.last-browser-sweep" 300 \
+    || { reap "$wpid"; kill -9 "$pid" 2>/dev/null; fail "the watcher did not sweep on its first cycle after starting"; }
+  wait_for_gone "$state/.cda-root/sessions/$first" 300 \
+    || { reap "$wpid"; kill -9 "$pid" 2>/dev/null; fail "the first-cycle sweep reclaimed nothing"; }
+
+  # A second orphan appears while the same watcher runs. The default cadence is
+  # long, so a full further cycle must pass without touching it.
+  second=$(fm_browser_session_name "$dir" task-second-orphan)
+  seed_browser_session "$state" "$second" "$pid"
+  wait_full_poll_cycle "$state" || { reap "$wpid"; kill -9 "$pid" 2>/dev/null; fail "the watcher stopped polling"; }
+  wait_full_poll_cycle "$state" || { reap "$wpid"; kill -9 "$pid" 2>/dev/null; fail "the watcher stopped polling"; }
+
+  [ -d "$state/.cda-root/sessions/$second" ] \
+    || { reap "$wpid"; kill -9 "$pid" 2>/dev/null; fail "the sweep ran again inside its cadence window"; }
+  grep -F "$second|" "$log" >/dev/null \
+    && { reap "$wpid"; kill -9 "$pid" 2>/dev/null; fail "the sweep called the browser again inside its cadence window: $(cat "$log")"; }
+  [ ! -s "$out" ] || { reap "$wpid"; kill -9 "$pid" 2>/dev/null; fail "the sweep wrote to the wake channel: $(cat "$out")"; }
+
+  reap "$wpid"
+  kill -9 "$pid" 2>/dev/null || true
+  pass "the browser sweep runs on the first cycle after a restart, then waits out its cadence"
+}
+
 test_signal_reason_is_actionable_classifier
 test_stale_is_terminal_classifier
 test_scan_captain_relevant_statuses_classifier
@@ -2321,3 +2483,5 @@ test_wedge_escalation_fires_when_activity_message_unchanged
 test_wedge_progress_ladder_surfaces_a_long_running_lane
 test_ci_monitor_absorbed_on_recency_and_still_ladder_bounded
 test_absorb_does_not_clear_no_progress_escalation_count
+test_watcher_reclaims_orphaned_browser_sessions
+test_watcher_browser_sweep_runs_at_startup_then_holds_its_cadence
