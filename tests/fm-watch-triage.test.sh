@@ -58,6 +58,26 @@ wait_live() {
   return 0
 }
 
+# Wait until <pid> has actually reached fm-watch.sh's supervision loop - proven by
+# the liveness beacon it touches as the second statement of every cycle - or until
+# it exits. 0 either way, 1 only if it is still in startup at the bound.
+# Startup is not instant: it sources the whole library set, runs the check
+# migration, takes the singleton lock, and only then parses the supervision loop.
+# Until this returns, "still alive after N ticks" measures startup latency rather
+# than an absorb decision, and a signal aimed at the watcher there can be lost
+# outright (see reap). Callers clear the beacon first, because a case that re-arms
+# a watcher reuses one state dir across rounds.
+wait_watcher_running() {  # <state> <pid> [ticks]
+  local state=$1 pid=$2 limit=${3:-100} i=0
+  while [ "$i" -lt "$limit" ]; do
+    [ ! -e "$state/.last-watcher-beat" ] || return 0
+    is_live_non_zombie "$pid" || return 0
+    sleep 0.05
+    i=$((i + 1))
+  done
+  return 1
+}
+
 wait_numeric_file() {
   local file=$1 limit=${2:-30} i=0 value
   while [ "$i" -lt "$limit" ]; do
@@ -117,7 +137,29 @@ record_pi_busy() {  # <state-dir> <id>
     --source pi-ext --event agent-start
 }
 
-reap() { kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }
+# Stop a backgrounded watcher and return only once it is actually gone. The TERM
+# is RE-SENT while the process is still live and escalated to KILL at the bound,
+# because a single TERM is not guaranteed to land: a watcher signalled while it is
+# still parsing its own supervision loop runs the pending signal trap from inside
+# the parser, the handler fails to parse there, and the watcher keeps polling as
+# if it had never been signalled. A plain `wait` on such a watcher never returns,
+# which is how one lost TERM used to stall this suite for minutes and turn a
+# time-throttled assertion below into a false failure. Bounded so a wedged
+# watcher fails fast and loudly instead of consuming the lane's time budget.
+# Liveness is is_live_non_zombie, never `kill -0`: an exited-but-unwaited child is
+# still signallable, so kill -0 would keep re-signalling a corpse for the full
+# bound on every reap in this file.
+reap() {
+  local pid=$1 i=0
+  while [ "$i" -lt 100 ]; do
+    is_live_non_zombie "$pid" || break
+    [ "$(( i % 20 ))" -ne 0 ] || kill "$pid" 2>/dev/null || true
+    sleep 0.05
+    i=$((i + 1))
+  done
+  ! is_live_non_zombie "$pid" || kill -9 "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+}
 
 # --- pure classifier predicates (fm-classify-lib.sh) ------------------------
 
@@ -709,13 +751,22 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
 
+  # Six unchanged polls, each a fresh watcher over the same state dir. The rounds
+  # must stay well inside FM_PAUSE_RESURFACE_SECS, because the re-surface throttle
+  # they are asserting is time based: a round that stalls long enough for the
+  # throttle to expire turns a correct bounded cadence into an apparent flood. So
+  # each round is gated on the watcher actually reaching its loop and bounded on
+  # the way out, never on a fixed guess about either end.
   round=1
   while [ "$round" -le 6 ]; do
+    rm -f "$state/.last-watcher-beat"
     PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
       FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_FAKE_CREW_STATE='state: stopped · source: pane · bare shell' \
       FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
       FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
     pid=$!
+    wait_watcher_running "$state" "$pid" \
+      || { reap "$pid"; fail "dead-agent watcher round $round never reached its supervision loop"; }
     if wait_live "$pid" 15; then reap "$pid"; else wait "$pid" || fail "dead-agent watcher round $round failed"; fi
     round=$((round + 1))
   done
