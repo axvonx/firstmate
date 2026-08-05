@@ -86,8 +86,15 @@ fm_test_tmproot() {
 # harness installs it, so no test - present or future - can stop a browser the
 # developer or a live crewmate is using. A suite that seeds its own sessions
 # still sets FM_BROWSER_STATE_ROOT per case, and that value wins.
+# The path is DERIVED AND NEVER CREATED, because pointing the library at a root
+# that does not exist is already the whole seam: retirement no-ops on a missing
+# session directory and the sweep no-ops on a missing sessions/ directory. A
+# mktemp here would leak one empty directory per run for every suite that
+# installs its own EXIT trap and so never reaches fm_test_cleanup. It is still
+# registered for removal, so a suite that does seed sessions under the inherited
+# root cleans them up when it does call fm_test_cleanup.
 if [ -z "${FM_BROWSER_STATE_ROOT:-}" ]; then
-  _fm_browser_root=$(mktemp -d "${TMPDIR:-/tmp}/fm-browser-root.XXXXXX")
+  _fm_browser_root="${TMPDIR:-/tmp}/fm-browser-root.$$"
   if [ "${#FM_TEST_CLEANUP_DIRS[@]}" -eq 0 ]; then trap fm_test_cleanup EXIT; fi
   FM_TEST_CLEANUP_DIRS+=("$_fm_browser_root")
   export FM_BROWSER_STATE_ROOT="$_fm_browser_root/.chrome-devtools-axi"
@@ -99,8 +106,11 @@ fi
 # chrome-devtools-axi-bridge - the same identity test chrome-devtools-axi itself
 # applies - so a plain sleep stands in for a DEAD bridge, not a live one. This
 # helper runs a script whose own path carries that name, so the check passes for
-# a process no real browser is behind. It sleeps in short steps, so if the
-# caller kills it the longest-lived leftover child is gone within a second.
+# a process no real browser is behind. That is only the first half of the
+# library's identity test: a case that needs the bridge treated as THIS session's
+# must also answer its /health probe, which fm_test_fake_health_curl below does.
+# It sleeps in short steps, so if the caller kills it the longest-lived leftover
+# child is gone within a second.
 # The caller kills the returned pid; it exits on its own within ~5 minutes.
 fm_test_fake_bridge_pid() {
   local dir=$1 script
@@ -122,6 +132,66 @@ SH
   # exited, which is the opposite of the point.
   "$script" >/dev/null 2>&1 &
   printf '%s\n' "$!"
+}
+
+# fm_test_fake_health_curl <fakebin> <health-dir> - install a curl stand-in that
+# answers the bridge /health probe bin/fm-browser-lib.sh uses to bind a recorded
+# pid to a session name, so a suite decides what a recorded bridge says about
+# itself without binding a port. Answers come from files, one per port, because
+# that is exactly the question the real probe asks: what does the bridge on the
+# port recorded in bridge.pid call itself?
+#   <health-dir>/ports/<port>  the answer for a probe of that port - a session
+#                              name on one line, or a literal body when the first
+#                              character is "{", which is how a suite produces a
+#                              malformed or session-less answer.
+#   <health-dir>/requests.log  every /health URL probed, one per line.
+# A port with no file answers the way nothing-listening does: curl's exit 7. Any
+# other URL falls through to the real curl, so installing this never takes the
+# tool away from the rest of a suite.
+fm_test_fake_health_curl() {
+  local fakebin=$1 health_dir=$2
+  mkdir -p "$fakebin" "$health_dir/ports"
+  : > "$health_dir/requests.log"
+  {
+    printf '#!/usr/bin/env bash\nset -u\nhealth_dir=%s\n' "$(printf '%q' "$health_dir")"
+    cat <<'SH'
+url=
+for arg in "$@"; do
+  case "$arg" in
+    http://*|https://*) url=$arg ;;
+  esac
+done
+case "$url" in
+  http://127.0.0.1:*/health*)
+    printf '%s\n' "$url" >> "$health_dir/requests.log"
+    port=${url#http://127.0.0.1:}
+    port=${port%%/*}
+    answer="$health_dir/ports/$port"
+    [ -f "$answer" ] || exit 7
+    body=$(cat "$answer")
+    case "$body" in
+      '{'*) printf '%s\n' "$body" ;;
+      *) printf '{"status":"ok","session":"%s"}\n' "$body" ;;
+    esac
+    exit 0
+    ;;
+esac
+for real in /usr/bin/curl /bin/curl /usr/local/bin/curl /opt/homebrew/bin/curl; do
+  [ -x "$real" ] && exec "$real" "$@"
+done
+exit 127
+SH
+  } > "$fakebin/curl"
+  chmod +x "$fakebin/curl"
+}
+
+# fm_test_fake_health_answer <health-dir> <port> <session-or-body> - record what
+# the fake bridge on <port> reports for itself. Drop the file to make that port
+# unanswerable again.
+fm_test_fake_health_answer() {
+  local health_dir=$1 port=$2 answer=$3
+  mkdir -p "$health_dir/ports"
+  printf '%s\n' "$answer" > "$health_dir/ports/$port"
 }
 
 # --- fakebin / PATH shims ---------------------------------------------------

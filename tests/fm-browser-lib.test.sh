@@ -8,11 +8,14 @@
 # the real bin/fm-teardown.sh, never by reading the implementation's source.
 # Two layers:
 #   - hermetic cases point FM_BROWSER_STATE_ROOT at the case directory and shim
-#     chrome-devtools-axi in a fakebin, so no case can read or write the real
-#     ~/.chrome-devtools-axi or disturb another actor's browser;
+#     chrome-devtools-axi and the bridge /health probe in a fakebin, so no case
+#     can read or write the real ~/.chrome-devtools-axi, reach a real bridge, or
+#     disturb another actor's browser;
 #   - one death case launches a REAL named throwaway browser session, SIGKILLs
 #     the simulated worker without any cleanup, and proves teardown reclaims the
 #     detached bridge together with its chrome-devtools-mcp and Chrome children.
+#     It runs against the real tool end to end, so it is also the case that
+#     proves the real bridge answers the identity probe with its own session name.
 #     That case skips cleanly when no browser can be launched.
 #
 # Session names are derived from a temp firstmate home, so every real session
@@ -76,7 +79,9 @@ make_browser_case() {
 }
 
 # use_case_env <case-dir> [KEY=VAL ...]: point the library at this case's state
-# root and fakebin. Set as real environment rather than as an assignment prefix,
+# root and fakebin, and install the /health stand-in every case needs, because a
+# live bridge is identified by what it reports about itself and no case may reach
+# a real one. Set as real environment rather than as an assignment prefix,
 # because a prefix on a bash FUNCTION call persists after the call returns and
 # would leak one case's PATH and state root into the next.
 use_case_env() {
@@ -88,9 +93,16 @@ use_case_env() {
   export FM_BROWSER_STATE_ROOT="$dir/root"
   export FM_FAKE_CDA_LOG="$dir/cda.log"
   : > "$FM_FAKE_CDA_LOG"
+  fm_test_fake_health_curl "$dir/fakebin" "$dir/health"
   for kv in "$@"; do
     export "${kv?}"
   done
+}
+
+# say_session_is <case-dir> <port> <session-or-body>: what the fake bridge on
+# <port> reports for itself when the library probes it.
+say_session_is() {
+  fm_test_fake_health_answer "$1/health" "$2" "$3"
 }
 
 # install_cda_shim <case-dir>: a chrome-devtools-axi stand-in that records the
@@ -118,12 +130,14 @@ SH
   chmod +x "$case_dir/fakebin/chrome-devtools-axi"
 }
 
-# make_session_dir <case-dir> <name> [pid]: create a session state directory,
-# with a bridge.pid naming <pid> when one is given.
+# make_session_dir <case-dir> <name> [pid] [port]: create a session state
+# directory, with a bridge.pid naming <pid> and <port> when a pid is given. The
+# port defaults to one nothing answers on, so a session is unidentifiable until a
+# case says otherwise through say_session_is.
 make_session_dir() {
-  local case_dir=$1 name=$2 pid=${3:-}
+  local case_dir=$1 name=$2 pid=${3:-} port=${4:-9999}
   mkdir -p "$case_dir/root/sessions/$name"
-  [ -z "$pid" ] || printf '{"pid":%s,"port":9999}\n' "$pid" \
+  [ -z "$pid" ] || printf '{"pid":%s,"port":%s}\n' "$pid" "$port" \
     > "$case_dir/root/sessions/$name/bridge.pid"
 }
 
@@ -334,9 +348,12 @@ test_retire_reclaims_a_dead_session_without_touching_the_cli() {
   [ ! -s "$dir/out" ] || fail "retire-dead: retirement wrote to stdout:"$'\n'"$(cat "$dir/out")"
   [ ! -s "$dir/err" ] || fail "retire-dead: retirement wrote to stderr:"$'\n'"$(cat "$dir/err")"
   [ "$FM_BROWSER_RETIRED" = 1 ] || fail "retire-dead: a dead-pid session was not reported reclaimed"
+  [ -z "$FM_BROWSER_ERROR" ] || fail "retire-dead: a quiet reclaim still reported an error: $FM_BROWSER_ERROR"
   assert_absent "$dir/root/sessions/$name" "retire-dead: the stale session directory survived"
   [ ! -s "$FM_FAKE_CDA_LOG" ] \
     || fail "retire-dead: a dead bridge still cost a browser call:"$'\n'"$(cat "$FM_FAKE_CDA_LOG")"
+  [ ! -s "$dir/health/requests.log" ] \
+    || fail "retire-dead: a dead bridge was still probed:"$'\n'"$(cat "$dir/health/requests.log")"
 
   # Idempotent: a second pass has nothing to reclaim and still succeeds quietly.
   fm_browser_retire "$home" "$name" || fail "retire-dead: the repeat pass returned failure"
@@ -354,20 +371,117 @@ test_retire_stops_a_live_bridge_for_exactly_its_own_session() {
   pid=$(start_helper_pid); HELPER_PIDS="$HELPER_PIDS $pid"
 
   name=$(fm_browser_session_name "$home" task-live)
-  make_session_dir "$dir" "$name" "$pid"
+  make_session_dir "$dir" "$name" "$pid" 9301
+  # The bridge on the port this session's record names identifies itself as this
+  # session: positive identification, the only case that may be signalled.
+  say_session_is "$dir" 9301 "$name"
 
   fm_browser_retire "$home" "$name" > "$dir/out" 2> "$dir/err" \
     || fail "retire-live: retirement returned failure"
   [ ! -s "$dir/out" ] || fail "retire-live: retirement wrote to stdout:"$'\n'"$(cat "$dir/out")"
   [ ! -s "$dir/err" ] || fail "retire-live: retirement wrote to stderr:"$'\n'"$(cat "$dir/err")"
+  [ -z "$FM_BROWSER_ERROR" ] \
+    || fail "retire-live: an identified bridge still reported an error: $FM_BROWSER_ERROR"
   [ "$FM_BROWSER_RETIRED" = 1 ] || fail "retire-live: a stopped bridge was not reported reclaimed"
   assert_grep "$name|stop" "$FM_FAKE_CDA_LOG" \
     "retire-live: the stop was not issued for this task's own session"
   lines=$(wc -l < "$FM_FAKE_CDA_LOG" | tr -d ' ')
   [ "$lines" = 1 ] \
     || fail "retire-live: expected exactly one browser call:"$'\n'"$(cat "$FM_FAKE_CDA_LOG")"
+  assert_grep "127.0.0.1:9301/health" "$dir/health/requests.log" \
+    "retire-live: the identity probe did not go to the port this session's own record names"
   assert_absent "$dir/root/sessions/$name" "retire-live: the session directory survived a successful stop"
-  pass "a live bridge is stopped under its own session name and its state directory is reclaimed"
+  pass "a live bridge that reports this session is stopped under its own name and its state is reclaimed"
+}
+
+# The pid recorded for a dead session can be handed to a live bridge belonging to
+# another session, another home, or the shared default session. Being a bridge is
+# not being OUR bridge, and the browser CLI applies no such check: its stop
+# signals whatever pid the record names, then SIGKILLs that pid's whole process
+# group. So a bridge that does not identify itself as this session must be left
+# strictly alone, and the refusal must be reported rather than swallowed.
+test_retire_refuses_a_live_bridge_that_reports_another_session() {
+  local dir home name foreign pid
+  dir=$(make_browser_case retire-foreign-bridge)
+  home="$dir/home"
+  install_cda_shim "$dir"
+  use_case_env "$dir"
+  pid=$(start_helper_pid); HELPER_PIDS="$HELPER_PIDS $pid"
+
+  name=$(fm_browser_session_name "$home" task-ours)
+  foreign=$(fm_browser_session_name "$dir/other-home" task-theirs)
+  make_session_dir "$dir" "$name" "$pid" 9302
+  make_session_dir "$dir" "$foreign" "$pid" 9302
+  # Our stale record names a pid the kernel has since handed to the bridge of a
+  # different session, which is what answers on that port.
+  say_session_is "$dir" 9302 "$foreign"
+
+  fm_browser_retire "$home" "$name" > "$dir/out" 2> "$dir/err" \
+    || fail "retire-foreign-bridge: a refusal must still return success"
+  [ ! -s "$dir/out" ] || fail "retire-foreign-bridge: retirement wrote to stdout:"$'\n'"$(cat "$dir/out")"
+  [ ! -s "$dir/err" ] || fail "retire-foreign-bridge: retirement wrote to stderr:"$'\n'"$(cat "$dir/err")"
+  [ "$FM_BROWSER_RETIRED" = 0 ] || fail "retire-foreign-bridge: claimed a reclaim it refused to perform"
+  [ -n "$FM_BROWSER_ERROR" ] || fail "retire-foreign-bridge: the refusal was silent"
+  assert_contains "$FM_BROWSER_ERROR" "$pid" \
+    "retire-foreign-bridge: the refusal does not name the pid it would have signalled"
+  assert_contains "$FM_BROWSER_ERROR" "$name" \
+    "retire-foreign-bridge: the refusal does not name the session it expected"
+  [ ! -s "$FM_FAKE_CDA_LOG" ] \
+    || fail "retire-foreign-bridge: a foreign bridge was signalled:"$'\n'"$(cat "$FM_FAKE_CDA_LOG")"
+  sleep 0.5
+  kill -0 "$pid" 2>/dev/null || fail "retire-foreign-bridge: the foreign bridge was killed"
+  assert_present "$dir/root/sessions/$name/bridge.pid" \
+    "retire-foreign-bridge: our own state was removed on a refusal"
+  assert_present "$dir/root/sessions/$foreign/bridge.pid" \
+    "retire-foreign-bridge: the foreign session's state was removed"
+  pass "a live bridge reporting another session is refused: no signal, nothing removed, and it is reported"
+}
+
+# An unanswerable probe is not a licence to guess in either direction: treating
+# the bridge as ours would signal an unidentified process, and treating it as dead
+# would delete the record that identifies whatever is still running.
+test_retire_refuses_a_live_bridge_it_cannot_identify() {
+  local dir home name pid answered
+  dir=$(make_browser_case retire-unidentified)
+  home="$dir/home"
+  install_cda_shim "$dir"
+  use_case_env "$dir"
+  pid=$(start_helper_pid); HELPER_PIDS="$HELPER_PIDS $pid"
+
+  name=$(fm_browser_session_name "$home" task-silent)
+  make_session_dir "$dir" "$name" "$pid" 9303
+
+  fm_browser_retire "$home" "$name" > "$dir/out" 2> "$dir/err" \
+    || fail "retire-unidentified: a refusal must still return success"
+  [ ! -s "$dir/out" ] || fail "retire-unidentified: retirement wrote to stdout:"$'\n'"$(cat "$dir/out")"
+  [ ! -s "$dir/err" ] || fail "retire-unidentified: retirement wrote to stderr:"$'\n'"$(cat "$dir/err")"
+  [ "$FM_BROWSER_RETIRED" = 0 ] || fail "retire-unidentified: claimed a reclaim it refused to perform"
+  [ -n "$FM_BROWSER_ERROR" ] || fail "retire-unidentified: an unanswerable probe refused silently"
+  assert_contains "$FM_BROWSER_ERROR" "$pid" \
+    "retire-unidentified: the refusal does not name the pid it would have signalled"
+  assert_contains "$FM_BROWSER_ERROR" "$name" \
+    "retire-unidentified: the refusal does not name the session it expected"
+  [ ! -s "$FM_FAKE_CDA_LOG" ] \
+    || fail "retire-unidentified: an unidentified bridge was signalled:"$'\n'"$(cat "$FM_FAKE_CDA_LOG")"
+  sleep 0.5
+  kill -0 "$pid" 2>/dev/null || fail "retire-unidentified: the unidentified process was killed"
+  assert_present "$dir/root/sessions/$name/bridge.pid" \
+    "retire-unidentified: the record identifying a live process was removed"
+
+  # A well-formed answer that carries no session name is unanswerable too: there
+  # is nothing in it to identify.
+  say_session_is "$dir" 9303 '{"status":"ok"}'
+  fm_browser_retire "$home" "$name" || fail "retire-unidentified: a session-less answer must still return success"
+  [ "$FM_BROWSER_RETIRED" = 0 ] || fail "retire-unidentified: a session-less answer was treated as identification"
+  [ -n "$FM_BROWSER_ERROR" ] || fail "retire-unidentified: a session-less answer refused silently"
+  [ ! -s "$FM_FAKE_CDA_LOG" ] \
+    || fail "retire-unidentified: a session-less answer still reached the browser CLI"
+  assert_present "$dir/root/sessions/$name/bridge.pid" \
+    "retire-unidentified: a session-less answer still removed the bridge record"
+  answered=$(wc -l < "$dir/health/requests.log" | tr -d ' ')
+  [ "$answered" = 2 ] \
+    || fail "retire-unidentified: expected one probe per retirement, saw $answered"
+  pass "a live bridge whose probe cannot answer is refused just as loudly and just as completely"
 }
 
 # A session directory only reaches a reclaim because its bridge already died
@@ -396,6 +510,8 @@ test_retire_never_signals_a_recycled_pid() {
     || fail "retire-recycled: the browser CLI was aimed at a recycled pid:"$'\n'"$(cat "$FM_FAKE_CDA_LOG")"
   [ "$FM_BROWSER_RETIRED" = 1 ] \
     || fail "retire-recycled: the stale directory behind a recycled pid was not reclaimed"
+  [ -z "$FM_BROWSER_ERROR" ] \
+    || fail "retire-recycled: a pid on an unrelated process should reclaim quietly, not report: $FM_BROWSER_ERROR"
   assert_absent "$dir/root/sessions/$name" "retire-recycled: the stale directory survived"
   pass "a recycled pid reads as dead: no signal, no browser call, and the stale directory is still reclaimed"
 }
@@ -409,10 +525,13 @@ test_retire_never_orphans_a_bridge_that_survived_the_stop() {
   pid=$(start_helper_pid); HELPER_PIDS="$HELPER_PIDS $pid"
 
   name=$(fm_browser_session_name "$home" task-survivor)
-  make_session_dir "$dir" "$name" "$pid"
+  make_session_dir "$dir" "$name" "$pid" 9304
+  say_session_is "$dir" 9304 "$name"
 
   fm_browser_retire "$home" "$name" || fail "retire-survivor: a failed stop must not fail retirement"
   [ "$FM_BROWSER_RETIRED" = 0 ] || fail "retire-survivor: reported reclaiming a bridge that is still running"
+  assert_grep "$name|stop" "$FM_FAKE_CDA_LOG" \
+    "retire-survivor: the identified bridge was never asked to stop, so the case proved nothing"
   assert_present "$dir/root/sessions/$name/bridge.pid" \
     "retire-survivor: the record identifying a live bridge was deleted"
   kill -0 "$pid" 2>/dev/null || fail "retire-survivor: the fixture bridge died, so the case proved nothing"
@@ -426,14 +545,19 @@ test_retire_is_a_silent_success_without_the_browser_cli() {
   use_case_env "$dir"
   pid=$(start_helper_pid); HELPER_PIDS="$HELPER_PIDS $pid"
   dead=$(reaped_pid) || fail "retire-no-cli: could not obtain a provably dead pid"
-  # No shim, and a PATH with no chrome-devtools-axi anywhere on it.
-  PATH="/usr/bin:/bin"
+  # No chrome-devtools-axi stand-in, and a PATH with no chrome-devtools-axi
+  # anywhere on it; the case's own fakebin stays first so the identity probe is
+  # still answered from the fixture and never reaches a real port.
+  PATH="$dir/fakebin:/usr/bin:/bin"
 
   name=$(fm_browser_session_name "$home" task-nocli-live)
-  make_session_dir "$dir" "$name" "$pid"
+  make_session_dir "$dir" "$name" "$pid" 9305
+  say_session_is "$dir" 9305 "$name"
   fm_browser_retire "$home" "$name" \
     || fail "retire-no-cli: a missing browser CLI must not fail retirement"
   [ "$FM_BROWSER_RETIRED" = 0 ] || fail "retire-no-cli: claimed a reclaim with no browser CLI available"
+  [ -z "$FM_BROWSER_ERROR" ] \
+    || fail "retire-no-cli: an identified bridge with no CLI to stop it is a no-op, not an error: $FM_BROWSER_ERROR"
   assert_present "$dir/root/sessions/$name/bridge.pid" "retire-no-cli: a live bridge's record was deleted"
 
   # A dead bridge needs no CLI at all, so it still reclaims.
@@ -578,6 +702,42 @@ test_sweep_is_bounded_per_call_and_finishes_across_calls() {
   [ -z "$remaining" ] \
     || fail "sweep-bounded: sessions remain after the backlog drained:"$'\n'"$remaining"
   pass "the sweep acts on a bounded number of candidates per call and drains the backlog across calls"
+}
+
+test_sweep_reports_a_refusal_and_keeps_sweeping() {
+  local dir home dead pid refused reclaimable
+  dir=$(make_browser_case sweep-refusal)
+  home="$dir/home"
+  install_cda_shim "$dir"
+  use_case_env "$dir"
+  dead=$(reaped_pid) || fail "sweep-refusal: could not obtain a provably dead pid"
+  pid=$(start_helper_pid); HELPER_PIDS="$HELPER_PIDS $pid"
+
+  # An orphan whose recorded pid is on a live bridge that will not say which
+  # session it is, and an ordinary stale orphan behind it in the same sweep.
+  refused=$(fm_browser_session_name "$home" task-unidentified)
+  make_session_dir "$dir" "$refused" "$pid" 9306
+  reclaimable=$(fm_browser_session_name "$home" task-stale)
+  make_session_dir "$dir" "$reclaimable" "$dead"
+
+  fm_browser_sweep_orphans "$home" "$home/state" > "$dir/out" 2> "$dir/err" \
+    || fail "sweep-refusal: the sweep returned failure"
+  [ ! -s "$dir/out" ] || fail "sweep-refusal: the sweep wrote to stdout:"$'\n'"$(cat "$dir/out")"
+  [ ! -s "$dir/err" ] || fail "sweep-refusal: the sweep wrote to stderr:"$'\n'"$(cat "$dir/err")"
+  [ "$FM_BROWSER_SWEEP_COUNT" = 1 ] \
+    || fail "sweep-refusal: expected exactly the reclaimable orphan, got $FM_BROWSER_SWEEP_COUNT"
+  assert_contains "$FM_BROWSER_SWEEP_ERRORS" "$refused" \
+    "sweep-refusal: the refusal was not reported: '$FM_BROWSER_SWEEP_ERRORS'"
+  assert_contains "$FM_BROWSER_SWEEP_ERRORS" "$pid" \
+    "sweep-refusal: the refusal does not name the pid it would have signalled"
+  assert_absent "$dir/root/sessions/$reclaimable" \
+    "sweep-refusal: one refusal stopped the sweep from reclaiming a stale orphan behind it"
+  assert_present "$dir/root/sessions/$refused/bridge.pid" \
+    "sweep-refusal: the refused session's record was removed anyway"
+  [ ! -s "$FM_FAKE_CDA_LOG" ] \
+    || fail "sweep-refusal: an unidentified bridge was signalled:"$'\n'"$(cat "$FM_FAKE_CDA_LOG")"
+  kill -0 "$pid" 2>/dev/null || fail "sweep-refusal: the unidentified process was killed"
+  pass "a sweep reports a bridge it refused to identify and still reclaims every other orphan"
 }
 
 # --- the death case: a real browser, a killed worker, real reclamation -------
@@ -756,6 +916,8 @@ test_underivable_inputs_return_failure_with_no_output
 test_retire_refuses_every_name_this_home_does_not_own
 test_retire_reclaims_a_dead_session_without_touching_the_cli
 test_retire_stops_a_live_bridge_for_exactly_its_own_session
+test_retire_refuses_a_live_bridge_that_reports_another_session
+test_retire_refuses_a_live_bridge_it_cannot_identify
 test_retire_never_signals_a_recycled_pid
 test_retire_never_orphans_a_bridge_that_survived_the_stop
 test_retire_is_a_silent_success_without_the_browser_cli
@@ -763,4 +925,5 @@ test_retire_tolerates_absent_and_unreadable_records
 test_sweep_reclaims_orphans_and_spares_every_living_task
 test_sweep_never_considers_another_homes_sessions
 test_sweep_is_bounded_per_call_and_finishes_across_calls
+test_sweep_reports_a_refusal_and_keeps_sweeping
 test_teardown_reclaims_the_browser_of_a_worker_killed_without_cleanup

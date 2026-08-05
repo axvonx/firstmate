@@ -900,11 +900,20 @@ while :; do
   # sweeps. Reporting goes to triage_log only - stdout is the wake reason
   # channel, and reclaiming a stale browser is routine housekeeping with no
   # legitimate wake kind and nothing the captain should be shown.
+  # A candidate whose live bridge will not identify itself as the session being
+  # reclaimed is refused, not signalled, and the refusal is logged here and left
+  # behind for the next sweep to retry: the sweep reports and moves on, it never
+  # wedges and never shortens itself over one refusal.
   if [ "$(age_of "$STATE/.last-browser-sweep")" -ge "$BROWSER_SWEEP_INTERVAL" ]; then
     fm_browser_sweep_orphans "$FM_HOME" "$STATE"
     touch "$STATE/.last-browser-sweep"
     if [ "$FM_BROWSER_SWEEP_COUNT" -gt 0 ]; then
       triage_log "browser: reclaimed $FM_BROWSER_SWEEP_COUNT orphaned session(s):$FM_BROWSER_SWEEP_NAMES"
+    fi
+    if [ -n "$FM_BROWSER_SWEEP_ERRORS" ]; then
+      printf '%s\n' "$FM_BROWSER_SWEEP_ERRORS" | while IFS= read -r browser_refusal; do
+        [ -z "$browser_refusal" ] || triage_log "browser: $browser_refusal"
+      done
     fi
   fi
 

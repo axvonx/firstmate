@@ -125,6 +125,11 @@ SH
     "$fakebin/chrome-devtools-axi"
   : > "$case_dir/cda.log"
   mkdir -p "$case_dir/cda-root/sessions"
+  # Bridge identity: teardown signals a recorded pid only once the bridge on the
+  # port that record names calls itself this session, so every case that seeds a
+  # LIVE bridge must also decide what that bridge says about itself. Installed for
+  # every case so none can probe a real port.
+  fm_test_fake_health_curl "$fakebin" "$case_dir/health"
 
   # Bare origin so the clone has an `origin` remote and origin/HEAD.
   git init -q --bare "$case_dir/origin.git"
@@ -1854,13 +1859,21 @@ test_herdr_projection_teardown_retains_journal_when_close_unconfirmed() {
 # names are derived from it exactly as teardown derives them.
 TEARDOWN_HOME=$ROOT
 
-# seed_browser_session <case-dir> <name> [pid]: a session state directory in the
-# case's browser root, with a bridge record naming <pid> when one is given.
+# seed_browser_session <case-dir> <name> [pid] [port]: a session state directory
+# in the case's browser root, with a bridge record naming <pid> and <port> when a
+# pid is given. The port defaults to one the fixture answers nothing on, so a
+# seeded bridge is unidentifiable until a case says otherwise.
 seed_browser_session() {
-  local case_dir=$1 name=$2 pid=${3:-}
+  local case_dir=$1 name=$2 pid=${3:-} port=${4:-9999}
   mkdir -p "$case_dir/cda-root/sessions/$name"
-  [ -z "$pid" ] || printf '{"pid":%s,"port":9999}\n' "$pid" \
+  [ -z "$pid" ] || printf '{"pid":%s,"port":%s}\n' "$pid" "$port" \
     > "$case_dir/cda-root/sessions/$name/bridge.pid"
+}
+
+# say_session_is <case-dir> <port> <session>: what the fake bridge on <port>
+# reports for itself when teardown probes it.
+say_session_is() {
+  fm_test_fake_health_answer "$1/health" "$2" "$3"
 }
 
 # dead_pid: a pid that is provably not running.
@@ -1942,11 +1955,14 @@ test_failing_browser_stop_never_fails_teardown() {
 
   name=$(fm_browser_session_name "$TEARDOWN_HOME" task-x1)
   printf 'browser_session=%s\n' "$name" >> "$case_dir/state/task-x1.meta"
-  # A stand-in this suite owns that passes the bridge identity check teardown
-  # applies before trusting a recorded pid: a plain sleep would read as a dead
-  # bridge and reclaim, which is not the case under test.
+  # A stand-in this suite owns that passes both halves of the identity check
+  # teardown applies before trusting a recorded pid: it looks like a bridge to ps,
+  # and the fixture has it report this very session. A plain sleep would read as a
+  # dead bridge and reclaim, and an unidentified one would be refused before the
+  # stop, and neither is the case under test.
   pid=$(fm_test_fake_bridge_pid "$case_dir/fake-bridge")
-  seed_browser_session "$case_dir" "$name" "$pid"
+  seed_browser_session "$case_dir" "$name" "$pid" 9401
+  say_session_is "$case_dir" 9401 "$name"
 
   # Exported, never an assignment prefix: a prefix on a bash function call
   # persists after the call and would leak the failing stop into later cases.
@@ -1967,9 +1983,56 @@ test_failing_browser_stop_never_fails_teardown() {
   assert_present "$case_dir/cda-root/sessions/$name/bridge.pid" \
     "browser-stop-fails: the record identifying a surviving bridge was deleted"
   assert_absent "$case_dir/state/task-x1.meta" "browser-stop-fails: teardown left the task record behind"
+  grep -q "$name|stop" "$case_dir/cda.log" \
+    || fail "browser-stop-fails: the identified bridge was never asked to stop:"$'\n'"$(cat "$case_dir/cda.log")"
   kill -0 "$pid" 2>/dev/null || fail "browser-stop-fails: the fixture bridge died, so the case proved nothing"
   kill "$pid" 2>/dev/null || true
   pass "a browser that will not stop leaves teardown's outcome and output unchanged"
+}
+
+# The loud half of the identity rule, at the boundary that matters most: a
+# refusal must be reported and must still leave the teardown that reported it
+# complete and successful, because teardown always running is the whole reason
+# this cleanup lives here rather than in the worker.
+test_teardown_reports_an_unidentified_bridge_and_still_completes() {
+  local case_dir rc name pid
+  case_dir=$(make_case browser-unidentified)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "browser work"
+  git -C "$case_dir/project" update-ref refs/heads/main "$(git -C "$case_dir/wt" rev-parse HEAD)"
+
+  name=$(fm_browser_session_name "$TEARDOWN_HOME" task-x1)
+  printf 'browser_session=%s\n' "$name" >> "$case_dir/state/task-x1.meta"
+  # A live bridge on the recorded pid, and deliberately no answer for the port
+  # that record names: the pid may have been recycled onto someone else's bridge,
+  # so nothing may be aimed at it.
+  pid=$(fm_test_fake_bridge_pid "$case_dir/fake-bridge")
+  seed_browser_session "$case_dir" "$name" "$pid" 9402
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "browser-unidentified: a refused browser must not fail teardown"$'\n'"$(cat "$case_dir/stderr")"
+  grep -q "teardown task-x1 complete" "$case_dir/stdout" \
+    || fail "browser-unidentified: teardown did not complete:"$'\n'"$(cat "$case_dir/stdout")"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "browser-unidentified: teardown refused the whole teardown"
+  assert_grep "refused to retire browser session $name" "$case_dir/stderr" \
+    "browser-unidentified: the refusal was not reported"
+  assert_grep "$pid" "$case_dir/stderr" \
+    "browser-unidentified: the report does not name the pid it would have signalled"
+  assert_no_grep "reclaimed browser session" "$case_dir/stdout" \
+    "browser-unidentified: teardown claimed a reclaim it refused to perform"
+  [ ! -s "$case_dir/cda.log" ] \
+    || fail "browser-unidentified: an unidentified bridge was signalled:"$'\n'"$(cat "$case_dir/cda.log")"
+  assert_present "$case_dir/cda-root/sessions/$name/bridge.pid" \
+    "browser-unidentified: the record identifying a live process was removed"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "browser-unidentified: a reported refusal stopped teardown from finishing its work"
+  kill -0 "$pid" 2>/dev/null || fail "browser-unidentified: the unidentified process was killed"
+  kill "$pid" 2>/dev/null || true
+  pass "an unidentifiable browser is reported on stderr and teardown still completes successfully"
 }
 
 test_teardown_without_a_browser_session_says_nothing() {
@@ -2034,6 +2097,7 @@ test_local_only_fork_remote_allows
 test_teardown_retires_exactly_the_tasks_own_browser_session
 test_refused_teardown_leaves_the_browser_session_untouched
 test_failing_browser_stop_never_fails_teardown
+test_teardown_reports_an_unidentified_bridge_and_still_completes
 test_teardown_without_a_browser_session_says_nothing
 test_forced_secondmate_teardown_retires_children_as_their_own_home
 test_teardown_prompts_tasks_axi_done_when_compatible

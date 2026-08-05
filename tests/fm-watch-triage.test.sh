@@ -2282,10 +2282,13 @@ test_absorb_does_not_clear_no_progress_escalation_count() {
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-browser-lib.sh"
 
-# install_browser_shim <fakebin> <log>: a chrome-devtools-axi stand-in that
-# records the session it was called for and simulates a successful stop.
+# install_browser_shim <fakebin> <log> <health-dir>: a chrome-devtools-axi
+# stand-in that records the session it was called for and simulates a successful
+# stop, plus the bridge /health stand-in the sweep identifies a recorded pid
+# with, so no case can probe a real port.
 install_browser_shim() {
-  local fakebin=$1 log=$2
+  local fakebin=$1 log=$2 health_dir=$3
+  fm_test_fake_health_curl "$fakebin" "$health_dir"
   cat > "$fakebin/chrome-devtools-axi" <<SH
 #!/usr/bin/env bash
 set -u
@@ -2299,12 +2302,20 @@ SH
   : > "$log"
 }
 
-# seed_browser_session <state> <name> <pid>: a session directory in the case's
-# browser state root, with a bridge record naming <pid>.
+# seed_browser_session <state> <name> <pid> [port]: a session directory in the
+# case's browser state root, with a bridge record naming <pid> and <port>. The
+# port defaults to one the fixture answers nothing on, so a seeded bridge is
+# unidentifiable - and therefore untouchable - until a case says otherwise.
 seed_browser_session() {
-  local state=$1 name=$2 pid=$3
+  local state=$1 name=$2 pid=$3 port=${4:-9999}
   mkdir -p "$state/.cda-root/sessions/$name"
-  printf '{"pid":%s,"port":9999}\n' "$pid" > "$state/.cda-root/sessions/$name/bridge.pid"
+  printf '{"pid":%s,"port":%s}\n' "$pid" "$port" > "$state/.cda-root/sessions/$name/bridge.pid"
+}
+
+# say_session_is <case-dir> <port> <session>: what the fake bridge on <port>
+# reports for itself when the sweep probes it.
+say_session_is() {
+  fm_test_fake_health_answer "$1/health" "$2" "$3"
 }
 
 # start_bridge_pid: a long-lived process this suite owns, standing in for a live
@@ -2351,18 +2362,21 @@ test_watcher_reclaims_orphaned_browser_sessions() {
   local dir state fakebin out log pid live orphan foreign wpid
   dir=$(make_case browser-sweep); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; log="$dir/cda.log"
-  install_browser_shim "$fakebin" "$log"
+  install_browser_shim "$fakebin" "$log" "$dir/health"
   pid=$(start_bridge_pid)
 
   # A task still on the books, plus its session.
   live=$(fm_browser_session_name "$dir" task-live)
   fm_write_meta "$state/task-live.meta" "window=test:fm-task-live" "kind=ship" "browser_session=$live"
-  seed_browser_session "$state" "$live" "$pid"
+  seed_browser_session "$state" "$live" "$pid" 9501
+  say_session_is "$dir" 9501 "$live"
   # A session whose task is gone, and one belonging to another home entirely.
   orphan=$(fm_browser_session_name "$dir" task-gone)
-  seed_browser_session "$state" "$orphan" "$pid"
+  seed_browser_session "$state" "$orphan" "$pid" 9502
+  say_session_is "$dir" 9502 "$orphan"
   foreign=$(fm_browser_session_name "$dir/other-home" task-elsewhere)
-  seed_browser_session "$state" "$foreign" "$pid"
+  seed_browser_session "$state" "$foreign" "$pid" 9503
+  say_session_is "$dir" 9503 "$foreign"
 
   watch_bg "$state" "$fakebin" "$out" FM_HOME="$dir" FM_BROWSER_SWEEP_INTERVAL=0
   wpid=$!
@@ -2394,11 +2408,12 @@ test_watcher_browser_sweep_runs_at_startup_then_holds_its_cadence() {
   local dir state fakebin out log pid first second wpid
   dir=$(make_case browser-sweep-cadence); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; log="$dir/cda.log"
-  install_browser_shim "$fakebin" "$log"
+  install_browser_shim "$fakebin" "$log" "$dir/health"
   pid=$(start_bridge_pid)
 
   first=$(fm_browser_session_name "$dir" task-first-orphan)
-  seed_browser_session "$state" "$first" "$pid"
+  seed_browser_session "$state" "$first" "$pid" 9511
+  say_session_is "$dir" 9511 "$first"
 
   # No cadence override: a restart is exactly when orphans appear, so the very
   # first cycle must sweep even on the long default interval.
@@ -2409,10 +2424,12 @@ test_watcher_browser_sweep_runs_at_startup_then_holds_its_cadence() {
   wait_for_gone "$state/.cda-root/sessions/$first" 300 \
     || { reap "$wpid"; kill -9 "$pid" 2>/dev/null; fail "the first-cycle sweep reclaimed nothing"; }
 
-  # A second orphan appears while the same watcher runs. The default cadence is
-  # long, so a full further cycle must pass without touching it.
+  # A second orphan appears while the same watcher runs, identifiable exactly like
+  # the first so a sweep would certainly reclaim it. The default cadence is long,
+  # so a full further cycle must pass without touching it.
   second=$(fm_browser_session_name "$dir" task-second-orphan)
-  seed_browser_session "$state" "$second" "$pid"
+  seed_browser_session "$state" "$second" "$pid" 9512
+  say_session_is "$dir" 9512 "$second"
   wait_full_poll_cycle "$state" || { reap "$wpid"; kill -9 "$pid" 2>/dev/null; fail "the watcher stopped polling"; }
   wait_full_poll_cycle "$state" || { reap "$wpid"; kill -9 "$pid" 2>/dev/null; fail "the watcher stopped polling"; }
 
@@ -2425,6 +2442,47 @@ test_watcher_browser_sweep_runs_at_startup_then_holds_its_cadence() {
   reap "$wpid"
   kill -9 "$pid" 2>/dev/null || true
   pass "the browser sweep runs on the first cycle after a restart, then waits out its cadence"
+}
+
+# A session whose recorded pid is on a live bridge that will not identify itself
+# may have had that pid recycled onto another actor's browser, so the sweep must
+# refuse it. The watcher's half of that rule: say so in the triage log, keep
+# sweeping the rest, keep the wake channel clean, and never wedge.
+test_watcher_reports_a_browser_session_it_cannot_identify() {
+  local dir state fakebin out log pid refused stale wpid
+  dir=$(make_case browser-sweep-refusal); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; log="$dir/cda.log"
+  install_browser_shim "$fakebin" "$log" "$dir/health"
+  pid=$(start_bridge_pid)
+
+  refused=$(fm_browser_session_name "$dir" task-unidentified)
+  seed_browser_session "$state" "$refused" "$pid" 9521
+  stale=$(fm_browser_session_name "$dir" task-stale)
+  seed_browser_session "$state" "$stale" 999999
+
+  watch_bg "$state" "$fakebin" "$out" FM_HOME="$dir" FM_BROWSER_SWEEP_INTERVAL=0
+  wpid=$!
+  wait_for_gone "$state/.cda-root/sessions/$stale" 300 \
+    || { reap "$wpid"; kill -9 "$pid" 2>/dev/null; fail "a refusal stopped the sweep from reclaiming the stale orphan behind it"; }
+  wait_full_poll_cycle "$state" || { reap "$wpid"; kill -9 "$pid" 2>/dev/null; fail "the watcher stopped polling"; }
+  kill -0 "$wpid" 2>/dev/null \
+    || { kill -9 "$pid" 2>/dev/null; fail "a refused browser session exited the watcher: $(cat "$out")"; }
+
+  grep -F "browser: refused to retire browser session $refused" "$state/.watch-triage.log" >/dev/null \
+    || { reap "$wpid"; kill -9 "$pid" 2>/dev/null; fail "the refusal was not reported: $(cat "$state/.watch-triage.log" 2>&1)"; }
+  grep -F "$pid" "$state/.watch-triage.log" >/dev/null \
+    || { reap "$wpid"; kill -9 "$pid" 2>/dev/null; fail "the report does not name the pid it would have signalled"; }
+  [ ! -s "$out" ] || { reap "$wpid"; kill -9 "$pid" 2>/dev/null; fail "the refusal reached the wake channel: $(cat "$out")"; }
+  grep -F "$refused|" "$log" >/dev/null \
+    && { reap "$wpid"; kill -9 "$pid" 2>/dev/null; fail "an unidentified bridge was signalled: $(cat "$log")"; }
+  [ -f "$state/.cda-root/sessions/$refused/bridge.pid" ] \
+    || { reap "$wpid"; kill -9 "$pid" 2>/dev/null; fail "the record identifying a live process was removed"; }
+  kill -0 "$pid" 2>/dev/null \
+    || { reap "$wpid"; fail "the unidentified process was killed"; }
+
+  reap "$wpid"
+  kill -9 "$pid" 2>/dev/null || true
+  pass "the watcher reports a browser session it could not identify, sweeps on, and stays running"
 }
 
 test_signal_reason_is_actionable_classifier
@@ -2485,3 +2543,4 @@ test_ci_monitor_absorbed_on_recency_and_still_ladder_bounded
 test_absorb_does_not_clear_no_progress_escalation_count
 test_watcher_reclaims_orphaned_browser_sessions
 test_watcher_browser_sweep_runs_at_startup_then_holds_its_cadence
+test_watcher_reports_a_browser_session_it_cannot_identify
