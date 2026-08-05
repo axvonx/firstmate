@@ -34,6 +34,29 @@
 # device. It refuses and preserves task state when that proof fails; otherwise
 # it removes the task's check, trust record, PR sidecar, publication record, and
 # quarantine entries with the rest of the volatile state.
+# Teardown also retires the task's private browser session unconditionally,
+# best-effort, after every state-preserving refusal and before the destructive
+# sequence, so a task whose worker died without cleaning up still has its bridge
+# reclaimed.
+# It never refuses, never changes the exit status, and prints nothing on stdout
+# unless something was actually reclaimed; a missing chrome-devtools-axi, an
+# absent browser_session= (the name is then derived from the task id), a foreign
+# name, and a stop that leaves the bridge alive are all silent no-ops that leave
+# the orphan for the watcher sweep.
+# The one case it reports on stderr is a live bridge it refused to signal because
+# the bridge would not identify itself as this task's session; that refusal too
+# leaves the teardown's outcome, order, and exit status untouched.
+# A forced secondmate-home teardown retires each child's session as the CHILD
+# home; bin/fm-browser-lib.sh owns naming, ownership, and reclaim.
+# NOT cleaned up by teardown, recorded and NOT fixed, out of the per-task
+# browser change's scope: firstmate's own long-lived helper processes have the
+# same no-owner gap that the browser retirement above closes for task sessions.
+# Teardown kills the task's recorded runtime endpoint and the processes in that
+# endpoint's tree, but a helper spawned detached reparents to PID 1 and was never
+# in that tree, so no tree-walk can reach it and only an explicitly
+# name-addressed retirement ever could; teardown performs none for these helpers.
+# Observed 2026-08-05: a lavish-axi server process had been running 29h22m with
+# PPID 1, long outliving the review session that started it.
 # Orca tasks use the same safety checks, then close the recorded terminal and
 # remove the recorded worktree through `orca worktree rm`; teardown never guesses
 # an Orca target from ambient CLI state.
@@ -110,6 +133,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-public-followup-lib.sh"
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
+# shellcheck source=bin/fm-browser-lib.sh
+. "$SCRIPT_DIR/fm-browser-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2
@@ -1355,7 +1380,7 @@ preflight_firstmate_home_herdr_children() {  # <home>
 }
 
 cleanup_firstmate_home_children() {
-  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc child_busy_gen
+  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc child_busy_gen child_browser
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -1432,6 +1457,15 @@ cleanup_firstmate_home_children() {
     fi
     remove_grok_turnend_auth "$sub_state" "$child_id"
     remove_kimi_turnend_auth "$sub_state" "$child_id"
+    # The child's session name carries the CHILD home's digest, so retire it as
+    # that home - the parent's digest would refuse it. Never an assignment
+    # prefix on the call: in bash that would persist after the function returns.
+    # Non-fatal by construction, because a return here would abort forced
+    # cleanup of the whole recursed subtree.
+    child_browser=$(meta_value "$child_meta" browser_session)
+    [ -n "$child_browser" ] || child_browser=$(fm_browser_session_name "$home" "$child_id" 2>/dev/null || true)
+    fm_browser_retire "$home" "$child_browser"
+    [ -z "$FM_BROWSER_ERROR" ] || echo "teardown $ID: child $child_id: $FM_BROWSER_ERROR" >&2
     remove_pr_poll_artifacts "$sub_state" "$child_id" || return 1
     child_busy_gen=$(meta_value "$child_meta" busy_gen)
     if [ -z "$child_busy_gen" ]; then
@@ -1562,6 +1596,27 @@ if [ "$BACKEND" = herdr ]; then
   TEARDOWN_HERDR_SESSION=$FM_BACKEND_HERDR_SESSION
   TEARDOWN_HERDR_PANE=$FM_BACKEND_HERDR_PANE
 fi
+
+# Retire this task's private browser session. Cleanup, never a gate: it sits
+# after every state-preserving refusal above and before the destructive
+# sequence below, so an aborted teardown (a failed treehouse return, a herdr
+# pane that will not confirm gone) has still reclaimed the bridge, and a rerun
+# retires again harmlessly. The bridge is a DETACHED process group, so neither
+# treehouse return nor the pane kill reaps it - that is the leak.
+# browser_session= is absent on pre-change tasks and on the Orca abort record, so
+# fall back to deriving it; an empty or foreign name is a silent no-op inside
+# fm_browser_retire, which never fails and never changes teardown's exit status.
+# A live bridge that cannot be positively identified as this task's is REFUSED
+# rather than signalled, and that refusal is reported here on stderr and then
+# left behind: it is a leaked bridge for the watcher sweep to retry, never a
+# reason to block, delay, or fail a teardown that would otherwise succeed.
+BROWSER_SESSION=$(meta_value "$META" browser_session)
+[ -n "$BROWSER_SESSION" ] || BROWSER_SESSION=$(fm_browser_session_name "$FM_HOME" "$ID" 2>/dev/null || true)
+fm_browser_retire "$FM_HOME" "$BROWSER_SESSION"
+if [ "$FM_BROWSER_RETIRED" = 1 ]; then
+  echo "teardown $ID: reclaimed browser session $BROWSER_SESSION"
+fi
+[ -z "$FM_BROWSER_ERROR" ] || echo "teardown $ID: $FM_BROWSER_ERROR" >&2
 
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then

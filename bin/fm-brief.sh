@@ -121,6 +121,21 @@
 # from its home's AGENTS.md, which keeps a one-line reinforcement of the
 # invariant and points here for the contract, so this script is the single owner
 # of the credential rule for every audience.
+# Ship and scout briefs both carry a browser rule, byte-identical in the two
+# variants: the worker's browser session is private to its task and needs no
+# cleanup, because fm-spawn gives the task a per-task
+# CHROME_DEVTOOLS_AXI_SESSION and teardown plus the watcher's orphan sweep
+# reclaim it (bin/fm-browser-lib.sh owns naming, ownership, and reclaim). The
+# rule's promise holds for the whole life of the task, including after a wedged
+# agent is relaunched in its pane, because fm-spawn exports that session into
+# the pane shell as well as putting it on the launch command.
+# The old about:blank parking rule is deleted on purpose, and the trade-off is
+# deliberate: pages a worker leaves open now burn CPU only inside that worker's
+# own session and die with it, so the brief buys a rule that cannot be
+# misapplied - no page-ownership judgement, no half-applied cleanup command - at
+# the cost of some in-task CPU. A browser that cannot start at all, for example
+# a session whose hashed port collides, routes through the existing `blocked:`
+# protocol and needs no rule of its own.
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -392,9 +407,8 @@ The report is the only thing that survives, so anything worth keeping must be in
 1. Never push to any remote and never open a PR.
 2. Stay inside this worktree; the only files you may write outside it are the report and the status file below.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
-   When browser work is finished, park every page you opened with \`chrome-devtools-axi open about:blank\`; \`open\` navigates only the currently selected page, so use \`pages\` and \`selectpage\` to reach each one you opened. An abandoned page keeps rendering at full CPU indefinitely; parked on about:blank it measures 0.0%, so parking captures the entire saving.
-   Park only the pages you opened, because one chrome-devtools-axi session serves every worker on this machine: parking a page you did not open blanks whatever that worker was about to capture.
-   Do not close or stop the browser, and do not add that later: that same shared session means \`stop\` would kill the browsers of the other crew still working. Parking is deliberately the whole instruction.
+   Your browser is private to this task - no other worker can see or touch your pages, and you cannot disturb theirs - so open what you need and leave it open.
+   Do not park, close, or stop anything, do not change \`CHROME_DEVTOOLS_AXI_SESSION\`, and do not add browser cleanup later: the whole session is retired for you when this task ends, however it ends.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
@@ -555,9 +569,8 @@ If the top-level path is the primary checkout or not the worktree you were launc
 $RULE1
 $RULE2
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
-   When browser work is finished, park every page you opened with \`chrome-devtools-axi open about:blank\`; \`open\` navigates only the currently selected page, so use \`pages\` and \`selectpage\` to reach each one you opened. An abandoned page keeps rendering at full CPU indefinitely; parked on about:blank it measures 0.0%, so parking captures the entire saving.
-   Park only the pages you opened, because one chrome-devtools-axi session serves every worker on this machine: parking a page you did not open blanks whatever that worker was about to capture.
-   Do not close or stop the browser, and do not add that later: that same shared session means \`stop\` would kill the browsers of the other crew still working. Parking is deliberately the whole instruction.
+   Your browser is private to this task - no other worker can see or touch your pages, and you cannot disturb theirs - so open what you need and leave it open.
+   Do not park, close, or stop anything, do not change \`CHROME_DEVTOOLS_AXI_SESSION\`, and do not add browser cleanup later: the whole session is retired for you when this task ends, however it ends.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
