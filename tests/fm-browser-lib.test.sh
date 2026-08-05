@@ -8,15 +8,16 @@
 # the real bin/fm-teardown.sh, never by reading the implementation's source.
 # Two layers:
 #   - hermetic cases point FM_BROWSER_STATE_ROOT at the case directory and shim
-#     chrome-devtools-axi and the bridge /health probe in a fakebin, so no case
-#     can read or write the real ~/.chrome-devtools-axi, reach a real bridge, or
-#     disturb another actor's browser;
-#   - one death case launches a REAL named throwaway browser session, SIGKILLs
-#     the simulated worker without any cleanup, and proves teardown reclaims the
-#     detached bridge together with its chrome-devtools-mcp and Chrome children.
-#     It runs against the real tool end to end, so it is also the case that
-#     proves the real bridge answers the identity probe with its own session name.
-#     That case skips cleanly when no browser can be launched.
+#     chrome-devtools-axi in a fakebin, so no case can read or write the real
+#     ~/.chrome-devtools-axi or disturb another actor's browser. A live bridge is
+#     stood in for by a process this file starts whose command name and whose own
+#     environment are what the library identifies it by;
+#   - two cases drive the REAL tool in a named throwaway session. The death case
+#     SIGKILLs the simulated worker without any cleanup and proves teardown
+#     reclaims the detached bridge together with its chrome-devtools-mcp and
+#     Chrome children. The dead-child case kills the bridge's browser children
+#     instead and proves the surviving bridge is still identified and still
+#     reclaimed. Both skip cleanly when no browser can be launched.
 #
 # Session names are derived from a temp firstmate home, so every real session
 # this file creates carries a digest unique to its own throwaway directory: it
@@ -79,9 +80,7 @@ make_browser_case() {
 }
 
 # use_case_env <case-dir> [KEY=VAL ...]: point the library at this case's state
-# root and fakebin, and install the /health stand-in every case needs, because a
-# live bridge is identified by what it reports about itself and no case may reach
-# a real one. Set as real environment rather than as an assignment prefix,
+# root and fakebin. Set as real environment rather than as an assignment prefix,
 # because a prefix on a bash FUNCTION call persists after the call returns and
 # would leak one case's PATH and state root into the next.
 use_case_env() {
@@ -93,16 +92,9 @@ use_case_env() {
   export FM_BROWSER_STATE_ROOT="$dir/root"
   export FM_FAKE_CDA_LOG="$dir/cda.log"
   : > "$FM_FAKE_CDA_LOG"
-  fm_test_fake_health_curl "$dir/fakebin" "$dir/health"
   for kv in "$@"; do
     export "${kv?}"
   done
-}
-
-# say_session_is <case-dir> <port> <session-or-body>: what the fake bridge on
-# <port> reports for itself when the library probes it.
-say_session_is() {
-  fm_test_fake_health_answer "$1/health" "$2" "$3"
 }
 
 # install_cda_shim <case-dir>: a chrome-devtools-axi stand-in that records the
@@ -130,23 +122,23 @@ SH
   chmod +x "$case_dir/fakebin/chrome-devtools-axi"
 }
 
-# make_session_dir <case-dir> <name> [pid] [port]: create a session state
-# directory, with a bridge.pid naming <pid> and <port> when a pid is given. The
-# port defaults to one nothing answers on, so a session is unidentifiable until a
-# case says otherwise through say_session_is.
+# make_session_dir <case-dir> <name> [pid]: create a session state directory,
+# with a bridge.pid naming <pid> when one is given, in the {"pid":n,"port":n}
+# shape the real bridge writes.
 make_session_dir() {
-  local case_dir=$1 name=$2 pid=${3:-} port=${4:-9999}
+  local case_dir=$1 name=$2 pid=${3:-}
   mkdir -p "$case_dir/root/sessions/$name"
-  [ -z "$pid" ] || printf '{"pid":%s,"port":%s}\n' "$pid" "$port" \
+  [ -z "$pid" ] || printf '{"pid":%s,"port":9999}\n' "$pid" \
     > "$case_dir/root/sessions/$name/bridge.pid"
 }
 
-# start_helper_pid: a live process this file owns that PASSES the bridge
-# identity check, so it stands in for a live bridge. Echoes its pid; the caller
-# records it in HELPER_PIDS (this runs in a command substitution, so it cannot
-# record it itself).
+# start_helper_pid [session]: a live process this file owns that PASSES the
+# pid-is-a-bridge check and whose own environment names <session>, so it stands in
+# for that session's live bridge. With no argument its environment names no
+# session at all. Echoes its pid; the caller records it in HELPER_PIDS (this runs
+# in a command substitution, so it cannot record it itself).
 start_helper_pid() {
-  fm_test_fake_bridge_pid "$TMP_ROOT/fake-bridge"
+  fm_test_fake_bridge_pid "$TMP_ROOT/fake-bridge" "${1:-}"
 }
 
 # start_bystander_pid: a live process this file owns that FAILS the bridge
@@ -352,8 +344,6 @@ test_retire_reclaims_a_dead_session_without_touching_the_cli() {
   assert_absent "$dir/root/sessions/$name" "retire-dead: the stale session directory survived"
   [ ! -s "$FM_FAKE_CDA_LOG" ] \
     || fail "retire-dead: a dead bridge still cost a browser call:"$'\n'"$(cat "$FM_FAKE_CDA_LOG")"
-  [ ! -s "$dir/health/requests.log" ] \
-    || fail "retire-dead: a dead bridge was still probed:"$'\n'"$(cat "$dir/health/requests.log")"
 
   # Idempotent: a second pass has nothing to reclaim and still succeeds quietly.
   fm_browser_retire "$home" "$name" || fail "retire-dead: the repeat pass returned failure"
@@ -368,13 +358,11 @@ test_retire_stops_a_live_bridge_for_exactly_its_own_session() {
   home="$dir/home"
   install_cda_shim "$dir"
   use_case_env "$dir"
-  pid=$(start_helper_pid); HELPER_PIDS="$HELPER_PIDS $pid"
-
   name=$(fm_browser_session_name "$home" task-live)
-  make_session_dir "$dir" "$name" "$pid" 9301
-  # The bridge on the port this session's record names identifies itself as this
-  # session: positive identification, the only case that may be signalled.
-  say_session_is "$dir" 9301 "$name"
+  # A live bridge whose own environment names this session: positive
+  # identification, the only case that may be signalled.
+  pid=$(start_helper_pid "$name"); HELPER_PIDS="$HELPER_PIDS $pid"
+  make_session_dir "$dir" "$name" "$pid"
 
   fm_browser_retire "$home" "$name" > "$dir/out" 2> "$dir/err" \
     || fail "retire-live: retirement returned failure"
@@ -388,10 +376,8 @@ test_retire_stops_a_live_bridge_for_exactly_its_own_session() {
   lines=$(wc -l < "$FM_FAKE_CDA_LOG" | tr -d ' ')
   [ "$lines" = 1 ] \
     || fail "retire-live: expected exactly one browser call:"$'\n'"$(cat "$FM_FAKE_CDA_LOG")"
-  assert_grep "127.0.0.1:9301/health" "$dir/health/requests.log" \
-    "retire-live: the identity probe did not go to the port this session's own record names"
   assert_absent "$dir/root/sessions/$name" "retire-live: the session directory survived a successful stop"
-  pass "a live bridge that reports this session is stopped under its own name and its state is reclaimed"
+  pass "a live bridge whose environment names this session is stopped under its own name and reclaimed"
 }
 
 # The pid recorded for a dead session can be handed to a live bridge belonging to
@@ -406,15 +392,14 @@ test_retire_refuses_a_live_bridge_that_reports_another_session() {
   home="$dir/home"
   install_cda_shim "$dir"
   use_case_env "$dir"
-  pid=$(start_helper_pid); HELPER_PIDS="$HELPER_PIDS $pid"
 
   name=$(fm_browser_session_name "$home" task-ours)
   foreign=$(fm_browser_session_name "$dir/other-home" task-theirs)
-  make_session_dir "$dir" "$name" "$pid" 9302
-  make_session_dir "$dir" "$foreign" "$pid" 9302
-  # Our stale record names a pid the kernel has since handed to the bridge of a
-  # different session, which is what answers on that port.
-  say_session_is "$dir" 9302 "$foreign"
+  # Our stale record names a pid the kernel has since handed to the live bridge of
+  # a different session, and that process says so itself.
+  pid=$(start_helper_pid "$foreign"); HELPER_PIDS="$HELPER_PIDS $pid"
+  make_session_dir "$dir" "$name" "$pid"
+  make_session_dir "$dir" "$foreign" "$pid"
 
   fm_browser_retire "$home" "$name" > "$dir/out" 2> "$dir/err" \
     || fail "retire-foreign-bridge: a refusal must still return success"
@@ -426,6 +411,8 @@ test_retire_refuses_a_live_bridge_that_reports_another_session() {
     "retire-foreign-bridge: the refusal does not name the pid it would have signalled"
   assert_contains "$FM_BROWSER_ERROR" "$name" \
     "retire-foreign-bridge: the refusal does not name the session it expected"
+  assert_contains "$FM_BROWSER_ERROR" "$foreign" \
+    "retire-foreign-bridge: the refusal does not name the session the process actually reported"
   [ ! -s "$FM_FAKE_CDA_LOG" ] \
     || fail "retire-foreign-bridge: a foreign bridge was signalled:"$'\n'"$(cat "$FM_FAKE_CDA_LOG")"
   sleep 0.5
@@ -437,51 +424,83 @@ test_retire_refuses_a_live_bridge_that_reports_another_session() {
   pass "a live bridge reporting another session is refused: no signal, nothing removed, and it is reported"
 }
 
-# An unanswerable probe is not a licence to guess in either direction: treating
-# the bridge as ours would signal an unidentified process, and treating it as dead
-# would delete the record that identifies whatever is still running.
+# A bridge that will not say which session it belongs to is not a licence to guess
+# in either direction: treating it as ours would signal an unidentified process,
+# and treating it as dead would delete the record identifying whatever is still
+# running. Both no-session-at-all and cannot-read-the-environment refuse, and each
+# says which of the two it was.
 test_retire_refuses_a_live_bridge_it_cannot_identify() {
-  local dir home name pid answered
+  local dir home name pid
   dir=$(make_browser_case retire-unidentified)
   home="$dir/home"
   install_cda_shim "$dir"
   use_case_env "$dir"
-  pid=$(start_helper_pid); HELPER_PIDS="$HELPER_PIDS $pid"
 
   name=$(fm_browser_session_name "$home" task-silent)
-  make_session_dir "$dir" "$name" "$pid" 9303
+  # A live bridge carrying no session in its environment at all.
+  pid=$(start_helper_pid); HELPER_PIDS="$HELPER_PIDS $pid"
+  make_session_dir "$dir" "$name" "$pid"
 
   fm_browser_retire "$home" "$name" > "$dir/out" 2> "$dir/err" \
     || fail "retire-unidentified: a refusal must still return success"
   [ ! -s "$dir/out" ] || fail "retire-unidentified: retirement wrote to stdout:"$'\n'"$(cat "$dir/out")"
   [ ! -s "$dir/err" ] || fail "retire-unidentified: retirement wrote to stderr:"$'\n'"$(cat "$dir/err")"
   [ "$FM_BROWSER_RETIRED" = 0 ] || fail "retire-unidentified: claimed a reclaim it refused to perform"
-  [ -n "$FM_BROWSER_ERROR" ] || fail "retire-unidentified: an unanswerable probe refused silently"
+  [ -n "$FM_BROWSER_ERROR" ] || fail "retire-unidentified: a session-less bridge refused silently"
   assert_contains "$FM_BROWSER_ERROR" "$pid" \
     "retire-unidentified: the refusal does not name the pid it would have signalled"
   assert_contains "$FM_BROWSER_ERROR" "$name" \
     "retire-unidentified: the refusal does not name the session it expected"
+  assert_contains "$FM_BROWSER_ERROR" none \
+    "retire-unidentified: a bridge carrying no session was not reported as none: $FM_BROWSER_ERROR"
   [ ! -s "$FM_FAKE_CDA_LOG" ] \
     || fail "retire-unidentified: an unidentified bridge was signalled:"$'\n'"$(cat "$FM_FAKE_CDA_LOG")"
   sleep 0.5
   kill -0 "$pid" 2>/dev/null || fail "retire-unidentified: the unidentified process was killed"
   assert_present "$dir/root/sessions/$name/bridge.pid" \
     "retire-unidentified: the record identifying a live process was removed"
+  pass "a live bridge carrying no session is refused as none: no signal, nothing removed, and it is reported"
+}
 
-  # A well-formed answer that carries no session name is unanswerable too: there
-  # is nothing in it to identify.
-  say_session_is "$dir" 9303 '{"status":"ok"}'
-  fm_browser_retire "$home" "$name" || fail "retire-unidentified: a session-less answer must still return success"
-  [ "$FM_BROWSER_RETIRED" = 0 ] || fail "retire-unidentified: a session-less answer was treated as identification"
-  [ -n "$FM_BROWSER_ERROR" ] || fail "retire-unidentified: a session-less answer refused silently"
+test_retire_refuses_a_live_bridge_whose_environment_cannot_be_read() {
+  local dir home name pid
+  if ! fm_test_ps_reads_environments; then
+    echo "skip: this host reads process environments from /proc, which no shim can blind"
+    return 0
+  fi
+  dir=$(make_browser_case retire-unreadable)
+  home="$dir/home"
+  install_cda_shim "$dir"
+  use_case_env "$dir"
+
+  name=$(fm_browser_session_name "$home" task-opaque)
+  # The process really does belong to this session, but its environment cannot be
+  # read, which is exactly what a bridge owned by another user looks like. Absence
+  # of contradiction is not identification, so this refuses too.
+  pid=$(start_helper_pid "$name"); HELPER_PIDS="$HELPER_PIDS $pid"
+  make_session_dir "$dir" "$name" "$pid"
+  fm_test_fake_blind_ps "$dir/fakebin"
+
+  fm_browser_retire "$home" "$name" > "$dir/out" 2> "$dir/err" \
+    || fail "retire-unreadable: a refusal must still return success"
+  [ ! -s "$dir/out" ] || fail "retire-unreadable: retirement wrote to stdout:"$'\n'"$(cat "$dir/out")"
+  [ ! -s "$dir/err" ] || fail "retire-unreadable: retirement wrote to stderr:"$'\n'"$(cat "$dir/err")"
+  [ "$FM_BROWSER_RETIRED" = 0 ] || fail "retire-unreadable: claimed a reclaim it refused to perform"
+  [ -n "$FM_BROWSER_ERROR" ] || fail "retire-unreadable: an unreadable environment refused silently"
+  assert_contains "$FM_BROWSER_ERROR" "$pid" \
+    "retire-unreadable: the refusal does not name the pid it would have signalled"
+  assert_contains "$FM_BROWSER_ERROR" "$name" \
+    "retire-unreadable: the refusal does not name the session it expected"
+  assert_contains "$FM_BROWSER_ERROR" unreadable \
+    "retire-unreadable: an unreadable environment was not reported as unreadable: $FM_BROWSER_ERROR"
   [ ! -s "$FM_FAKE_CDA_LOG" ] \
-    || fail "retire-unidentified: a session-less answer still reached the browser CLI"
+    || fail "retire-unreadable: an unidentified bridge was signalled:"$'\n'"$(cat "$FM_FAKE_CDA_LOG")"
+  sleep 0.5
+  kill -0 "$pid" 2>/dev/null || fail "retire-unreadable: the unidentified process was killed"
   assert_present "$dir/root/sessions/$name/bridge.pid" \
-    "retire-unidentified: a session-less answer still removed the bridge record"
-  answered=$(wc -l < "$dir/health/requests.log" | tr -d ' ')
-  [ "$answered" = 2 ] \
-    || fail "retire-unidentified: expected one probe per retirement, saw $answered"
-  pass "a live bridge whose probe cannot answer is refused just as loudly and just as completely"
+    "retire-unreadable: the record identifying a live process was removed"
+  rm -f "$dir/fakebin/ps"
+  pass "a live bridge whose environment cannot be read is refused as unreadable, just as loudly"
 }
 
 # A session directory only reaches a reclaim because its bridge already died
@@ -522,11 +541,10 @@ test_retire_never_orphans_a_bridge_that_survived_the_stop() {
   home="$dir/home"
   install_cda_shim "$dir"
   use_case_env "$dir" FM_FAKE_CDA_STOP=noop FM_FAKE_CDA_EXIT=1
-  pid=$(start_helper_pid); HELPER_PIDS="$HELPER_PIDS $pid"
 
   name=$(fm_browser_session_name "$home" task-survivor)
-  make_session_dir "$dir" "$name" "$pid" 9304
-  say_session_is "$dir" 9304 "$name"
+  pid=$(start_helper_pid "$name"); HELPER_PIDS="$HELPER_PIDS $pid"
+  make_session_dir "$dir" "$name" "$pid"
 
   fm_browser_retire "$home" "$name" || fail "retire-survivor: a failed stop must not fail retirement"
   [ "$FM_BROWSER_RETIRED" = 0 ] || fail "retire-survivor: reported reclaiming a bridge that is still running"
@@ -543,16 +561,16 @@ test_retire_is_a_silent_success_without_the_browser_cli() {
   dir=$(make_browser_case retire-no-cli)
   home="$dir/home"
   use_case_env "$dir"
-  pid=$(start_helper_pid); HELPER_PIDS="$HELPER_PIDS $pid"
   dead=$(reaped_pid) || fail "retire-no-cli: could not obtain a provably dead pid"
-  # No chrome-devtools-axi stand-in, and a PATH with no chrome-devtools-axi
-  # anywhere on it; the case's own fakebin stays first so the identity probe is
-  # still answered from the fixture and never reaches a real port.
-  PATH="$dir/fakebin:/usr/bin:/bin"
 
   name=$(fm_browser_session_name "$home" task-nocli-live)
-  make_session_dir "$dir" "$name" "$pid" 9305
-  say_session_is "$dir" 9305 "$name"
+  pid=$(start_helper_pid "$name"); HELPER_PIDS="$HELPER_PIDS $pid"
+  # No chrome-devtools-axi stand-in, and a PATH with no chrome-devtools-axi
+  # anywhere on it. Identification needs nothing but ps, which /usr/bin carries,
+  # so the bridge here is positively ours and simply has nothing to stop it with.
+  PATH="/usr/bin:/bin"
+
+  make_session_dir "$dir" "$name" "$pid"
   fm_browser_retire "$home" "$name" \
     || fail "retire-no-cli: a missing browser CLI must not fail retirement"
   [ "$FM_BROWSER_RETIRED" = 0 ] || fail "retire-no-cli: claimed a reclaim with no browser CLI available"
@@ -716,7 +734,7 @@ test_sweep_reports_a_refusal_and_keeps_sweeping() {
   # An orphan whose recorded pid is on a live bridge that will not say which
   # session it is, and an ordinary stale orphan behind it in the same sweep.
   refused=$(fm_browser_session_name "$home" task-unidentified)
-  make_session_dir "$dir" "$refused" "$pid" 9306
+  make_session_dir "$dir" "$refused" "$pid"
   reclaimable=$(fm_browser_session_name "$home" task-stale)
   make_session_dir "$dir" "$reclaimable" "$dead"
 
@@ -738,6 +756,55 @@ test_sweep_reports_a_refusal_and_keeps_sweeping() {
     || fail "sweep-refusal: an unidentified bridge was signalled:"$'\n'"$(cat "$FM_FAKE_CDA_LOG")"
   kill -0 "$pid" 2>/dev/null || fail "sweep-refusal: the unidentified process was killed"
   pass "a sweep reports a bridge it refused to identify and still reclaims every other orphan"
+}
+
+# A refusal leaves its candidate exactly where it was, so a candidate that always
+# refuses is selected again on every call. With a fixed scan order and a fixed
+# budget, enough of them would fill that budget from the head of the scan forever
+# and no orphan behind them would ever be examined again - and for a session whose
+# task is gone, the sweep is the only reclaim path there is, so its bridge would
+# leak for good. The budget must therefore rotate rather than restart.
+test_sweep_rotates_so_refusals_cannot_starve_the_rest() {
+  local dir home dead pid i name reclaimable sweep
+  dir=$(make_browser_case sweep-rotation)
+  home="$dir/home"
+  install_cda_shim "$dir"
+  # Exactly as many permanent refusals as the whole per-call budget.
+  use_case_env "$dir" FM_BROWSER_SWEEP_MAX=3
+  dead=$(reaped_pid) || fail "sweep-rotation: could not obtain a provably dead pid"
+  pid=$(start_helper_pid); HELPER_PIDS="$HELPER_PIDS $pid"
+
+  # Names chosen so the refusing candidates sort ahead of the reclaimable one, and
+  # so nothing depends on which order the fixture happens to create them in.
+  for i in 1 2 3; do
+    name=$(fm_browser_session_name "$home" "aaa-refuses-$i")
+    make_session_dir "$dir" "$name" "$pid"
+  done
+  reclaimable=$(fm_browser_session_name "$home" zzz-stale)
+  make_session_dir "$dir" "$reclaimable" "$dead"
+
+  # Three refusals fill the budget on the first call, which is the bound working
+  # as intended. The reclaimable orphan behind them must still be reached within a
+  # bounded number of further calls rather than never.
+  for sweep in 1 2 3 4; do
+    fm_browser_sweep_orphans "$home" "$home/state" > "$dir/out" 2> "$dir/err" \
+      || fail "sweep-rotation: sweep $sweep returned failure"
+    [ ! -s "$dir/out" ] || fail "sweep-rotation: sweep $sweep wrote to stdout:"$'\n'"$(cat "$dir/out")"
+    [ ! -s "$dir/err" ] || fail "sweep-rotation: sweep $sweep wrote to stderr:"$'\n'"$(cat "$dir/err")"
+    [ -d "$dir/root/sessions/$reclaimable" ] || break
+  done
+
+  assert_absent "$dir/root/sessions/$reclaimable" \
+    "sweep-rotation: permanent refusals at the head of the scan starved the orphan behind them"
+  for i in 1 2 3; do
+    name=$(fm_browser_session_name "$home" "aaa-refuses-$i")
+    assert_present "$dir/root/sessions/$name/bridge.pid" \
+      "sweep-rotation: a refused session's record was removed"
+  done
+  [ ! -s "$FM_FAKE_CDA_LOG" ] \
+    || fail "sweep-rotation: an unidentified bridge was signalled:"$'\n'"$(cat "$FM_FAKE_CDA_LOG")"
+  kill -0 "$pid" 2>/dev/null || fail "sweep-rotation: the unidentified process was killed"
+  pass "the sweep rotates its bounded budget, so candidates that always refuse never starve the rest"
 }
 
 # --- the death case: a real browser, a killed worker, real reclamation -------
@@ -909,6 +976,93 @@ test_teardown_reclaims_the_browser_of_a_worker_killed_without_cleanup() {
   pass "teardown reclaims the detached bridge, its browser children, and its state after its worker is killed"
 }
 
+# The other real failure this machinery exists for: the bridge outlives its
+# browser. chrome-devtools-mcp or Chrome dies or hangs, and the bridge keeps
+# running with a browser it can no longer drive - the tab measured at 165% CPU was
+# reached this way. Identification must not depend on that child answering
+# anything, because a bridge in this state can no longer say anything about itself
+# over its own HTTP surface, and a bridge that cannot be identified is a bridge
+# that is never reclaimed. Its environment still names its session, which is why
+# identity is read from the process.
+test_retire_reclaims_a_bridge_whose_browser_children_are_dead() {
+  local dir home cda_root id name pidfile bridge_pid tree child i
+  local prev_home prev_root
+  command -v chrome-devtools-axi >/dev/null 2>&1 \
+    || { echo "skip: chrome-devtools-axi not found (real dead-child case)"; return 0; }
+
+  dir=$(make_browser_case dead-child-case)
+  home="$dir/home"
+  cda_root="$home/.chrome-devtools-axi"
+  id=browser-deadchild-x1
+  mkdir -p "$home/state"
+  # No chrome-devtools-axi stand-in anywhere: this case drives the real tool.
+  PATH="$dir/fakebin:$BASE_PATH"
+  name=$(fm_browser_session_name "$home" "$id") || fail "dead-child: could not derive the session name"
+  assert_valid_session_name "$name" dead-child
+  pidfile="$cda_root/sessions/$name/bridge.pid"
+
+  # HOME is redirected into the case directory, so the real chrome-devtools-axi
+  # keeps its whole state inside this fixture and can never see, name, or touch the
+  # shared default session.
+  HOME="$home" CHROME_DEVTOOLS_AXI_SESSION="$name" \
+    chrome-devtools-axi open https://example.com > "$dir/open.log" 2>&1 || true
+  if [ ! -f "$pidfile" ]; then
+    echo "skip: no browser could be launched here (real dead-child case): $(head -3 "$dir/open.log" 2>/dev/null | tr '\n' ' ')"
+    return 0
+  fi
+  bridge_pid=$(sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$pidfile" | head -1)
+  [ -n "$bridge_pid" ] || fail "dead-child: the browser recorded no bridge pid"
+  LIVE_BRIDGE_PIDS="$LIVE_BRIDGE_PIDS $bridge_pid"
+  LIVE_SESSION_NAME=$name
+  LIVE_SESSION_HOME=$home
+  tree=$(descendant_pids "$bridge_pid")
+  [ "$(printf '%s\n' "$tree" | wc -l | tr -d ' ')" -ge 2 ] \
+    || fail "dead-child: the bridge started no child processes, so the case proves nothing"
+
+  # Kill everything the bridge started, and only that, leaving the bridge itself
+  # running with a dead browser underneath it.
+  for child in $tree; do
+    [ "$child" = "$bridge_pid" ] && continue
+    kill -9 "$child" 2>/dev/null || true
+  done
+  sleep 1
+  if ! kill -0 "$bridge_pid" 2>/dev/null; then
+    LIVE_SESSION_NAME=
+    echo "skip: this bridge does not outlive its browser children, so there is no dead-child state to prove"
+    return 0
+  fi
+
+  # HOME and the state root are set as real environment around the call and put
+  # back straight after, never as an assignment prefix on a bash function call,
+  # which would persist past the call and leak the fixture into later cases.
+  prev_home=$HOME
+  prev_root=${FM_BROWSER_STATE_ROOT:-}
+  HOME=$home
+  export FM_BROWSER_STATE_ROOT="$cda_root"
+  fm_browser_retire "$home" "$name" > "$dir/out" 2> "$dir/err" \
+    || { HOME=$prev_home; export FM_BROWSER_STATE_ROOT="$prev_root"; fail "dead-child: retirement returned failure"; }
+  HOME=$prev_home
+  export FM_BROWSER_STATE_ROOT="$prev_root"
+  [ ! -s "$dir/out" ] || fail "dead-child: retirement wrote to stdout:"$'\n'"$(cat "$dir/out")"
+  [ ! -s "$dir/err" ] || fail "dead-child: retirement wrote to stderr:"$'\n'"$(cat "$dir/err")"
+  [ -z "$FM_BROWSER_ERROR" ] \
+    || fail "dead-child: a bridge with a dead browser was refused instead of identified: $FM_BROWSER_ERROR"
+  [ "$FM_BROWSER_RETIRED" = 1 ] \
+    || fail "dead-child: a bridge with a dead browser was not reported reclaimed"
+
+  i=0
+  while [ "$i" -lt 150 ]; do
+    kill -0 "$bridge_pid" 2>/dev/null || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  LIVE_SESSION_NAME=
+  kill -0 "$bridge_pid" 2>/dev/null \
+    && fail "dead-child: the bridge survived retirement:"$'\n'"$(ps -o pid,ppid,command -p "$bridge_pid" 2>&1)"
+  assert_absent "$cda_root/sessions/$name" "dead-child: the session state directory was not reclaimed"
+  pass "a bridge whose browser children are dead is still identified from its environment and still reclaimed"
+}
+
 test_session_name_is_deterministic_and_scoped_to_its_home
 test_long_ids_clamp_to_the_limit_and_stay_distinct
 test_no_two_task_ids_share_a_session_name
@@ -918,6 +1072,7 @@ test_retire_reclaims_a_dead_session_without_touching_the_cli
 test_retire_stops_a_live_bridge_for_exactly_its_own_session
 test_retire_refuses_a_live_bridge_that_reports_another_session
 test_retire_refuses_a_live_bridge_it_cannot_identify
+test_retire_refuses_a_live_bridge_whose_environment_cannot_be_read
 test_retire_never_signals_a_recycled_pid
 test_retire_never_orphans_a_bridge_that_survived_the_stop
 test_retire_is_a_silent_success_without_the_browser_cli
@@ -926,4 +1081,6 @@ test_sweep_reclaims_orphans_and_spares_every_living_task
 test_sweep_never_considers_another_homes_sessions
 test_sweep_is_bounded_per_call_and_finishes_across_calls
 test_sweep_reports_a_refusal_and_keeps_sweeping
+test_sweep_rotates_so_refusals_cannot_starve_the_rest
 test_teardown_reclaims_the_browser_of_a_worker_killed_without_cleanup
+test_retire_reclaims_a_bridge_whose_browser_children_are_dead

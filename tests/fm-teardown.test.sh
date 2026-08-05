@@ -125,11 +125,6 @@ SH
     "$fakebin/chrome-devtools-axi"
   : > "$case_dir/cda.log"
   mkdir -p "$case_dir/cda-root/sessions"
-  # Bridge identity: teardown signals a recorded pid only once the bridge on the
-  # port that record names calls itself this session, so every case that seeds a
-  # LIVE bridge must also decide what that bridge says about itself. Installed for
-  # every case so none can probe a real port.
-  fm_test_fake_health_curl "$fakebin" "$case_dir/health"
 
   # Bare origin so the clone has an `origin` remote and origin/HEAD.
   git init -q --bare "$case_dir/origin.git"
@@ -1859,21 +1854,16 @@ test_herdr_projection_teardown_retains_journal_when_close_unconfirmed() {
 # names are derived from it exactly as teardown derives them.
 TEARDOWN_HOME=$ROOT
 
-# seed_browser_session <case-dir> <name> [pid] [port]: a session state directory
-# in the case's browser root, with a bridge record naming <pid> and <port> when a
-# pid is given. The port defaults to one the fixture answers nothing on, so a
-# seeded bridge is unidentifiable until a case says otherwise.
+# seed_browser_session <case-dir> <name> [pid]: a session state directory in the
+# case's browser root, with a bridge record naming <pid> when one is given, in the
+# {"pid":n,"port":n} shape the real bridge writes. Teardown identifies a live
+# bridge from the recorded process itself, so a case that seeds a LIVE pid decides
+# what that bridge is by how it starts it (fm_test_fake_bridge_pid).
 seed_browser_session() {
-  local case_dir=$1 name=$2 pid=${3:-} port=${4:-9999}
+  local case_dir=$1 name=$2 pid=${3:-}
   mkdir -p "$case_dir/cda-root/sessions/$name"
-  [ -z "$pid" ] || printf '{"pid":%s,"port":%s}\n' "$pid" "$port" \
+  [ -z "$pid" ] || printf '{"pid":%s,"port":9999}\n' "$pid" \
     > "$case_dir/cda-root/sessions/$name/bridge.pid"
-}
-
-# say_session_is <case-dir> <port> <session>: what the fake bridge on <port>
-# reports for itself when teardown probes it.
-say_session_is() {
-  fm_test_fake_health_answer "$1/health" "$2" "$3"
 }
 
 # dead_pid: a pid that is provably not running.
@@ -1957,12 +1947,11 @@ test_failing_browser_stop_never_fails_teardown() {
   printf 'browser_session=%s\n' "$name" >> "$case_dir/state/task-x1.meta"
   # A stand-in this suite owns that passes both halves of the identity check
   # teardown applies before trusting a recorded pid: it looks like a bridge to ps,
-  # and the fixture has it report this very session. A plain sleep would read as a
+  # and its own environment names this very session. A plain sleep would read as a
   # dead bridge and reclaim, and an unidentified one would be refused before the
   # stop, and neither is the case under test.
-  pid=$(fm_test_fake_bridge_pid "$case_dir/fake-bridge")
-  seed_browser_session "$case_dir" "$name" "$pid" 9401
-  say_session_is "$case_dir" 9401 "$name"
+  pid=$(fm_test_fake_bridge_pid "$case_dir/fake-bridge" "$name")
+  seed_browser_session "$case_dir" "$name" "$pid"
 
   # Exported, never an assignment prefix: a prefix on a bash function call
   # persists after the call and would leak the failing stop into later cases.
@@ -2003,11 +1992,11 @@ test_teardown_reports_an_unidentified_bridge_and_still_completes() {
 
   name=$(fm_browser_session_name "$TEARDOWN_HOME" task-x1)
   printf 'browser_session=%s\n' "$name" >> "$case_dir/state/task-x1.meta"
-  # A live bridge on the recorded pid, and deliberately no answer for the port
-  # that record names: the pid may have been recycled onto someone else's bridge,
-  # so nothing may be aimed at it.
+  # A live bridge on the recorded pid whose environment names no session at all:
+  # the pid may have been recycled onto someone else's bridge, so nothing may be
+  # aimed at it.
   pid=$(fm_test_fake_bridge_pid "$case_dir/fake-bridge")
-  seed_browser_session "$case_dir" "$name" "$pid" 9402
+  seed_browser_session "$case_dir" "$name" "$pid"
 
   set +e
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"

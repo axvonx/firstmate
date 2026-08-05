@@ -2282,13 +2282,10 @@ test_absorb_does_not_clear_no_progress_escalation_count() {
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-browser-lib.sh"
 
-# install_browser_shim <fakebin> <log> <health-dir>: a chrome-devtools-axi
-# stand-in that records the session it was called for and simulates a successful
-# stop, plus the bridge /health stand-in the sweep identifies a recorded pid
-# with, so no case can probe a real port.
+# install_browser_shim <fakebin> <log>: a chrome-devtools-axi stand-in that
+# records the session it was called for and simulates a successful stop.
 install_browser_shim() {
-  local fakebin=$1 log=$2 health_dir=$3
-  fm_test_fake_health_curl "$fakebin" "$health_dir"
+  local fakebin=$1 log=$2
   cat > "$fakebin/chrome-devtools-axi" <<SH
 #!/usr/bin/env bash
 set -u
@@ -2302,27 +2299,21 @@ SH
   : > "$log"
 }
 
-# seed_browser_session <state> <name> <pid> [port]: a session directory in the
-# case's browser state root, with a bridge record naming <pid> and <port>. The
-# port defaults to one the fixture answers nothing on, so a seeded bridge is
-# unidentifiable - and therefore untouchable - until a case says otherwise.
+# seed_browser_session <state> <name> <pid>: a session directory in the case's
+# browser state root, with a bridge record naming <pid> in the {"pid":n,"port":n}
+# shape the real bridge writes.
 seed_browser_session() {
-  local state=$1 name=$2 pid=$3 port=${4:-9999}
+  local state=$1 name=$2 pid=$3
   mkdir -p "$state/.cda-root/sessions/$name"
-  printf '{"pid":%s,"port":%s}\n' "$pid" "$port" > "$state/.cda-root/sessions/$name/bridge.pid"
+  printf '{"pid":%s,"port":9999}\n' "$pid" > "$state/.cda-root/sessions/$name/bridge.pid"
 }
 
-# say_session_is <case-dir> <port> <session>: what the fake bridge on <port>
-# reports for itself when the sweep probes it.
-say_session_is() {
-  fm_test_fake_health_answer "$1/health" "$2" "$3"
-}
-
-# start_bridge_pid: a long-lived process this suite owns, standing in for a live
-# bridge. It must pass the bridge identity check bin/fm-browser-lib.sh applies
-# before trusting a recorded pid, so a plain sleep would read as a dead bridge.
+# start_bridge_pid [session]: a long-lived process this suite owns, standing in
+# for the live bridge of <session>. It must pass both halves of the identity check
+# bin/fm-browser-lib.sh applies before trusting a recorded pid: a plain sleep would
+# read as a dead bridge, and one whose environment names no session is refused.
 start_bridge_pid() {
-  fm_test_fake_bridge_pid "$TMP_ROOT/fake-bridge"
+  fm_test_fake_bridge_pid "$TMP_ROOT/fake-bridge" "${1:-}"
 }
 
 wait_for_path() {  # <path> [ticks]
@@ -2362,21 +2353,20 @@ test_watcher_reclaims_orphaned_browser_sessions() {
   local dir state fakebin out log pid live orphan foreign wpid
   dir=$(make_case browser-sweep); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; log="$dir/cda.log"
-  install_browser_shim "$fakebin" "$log" "$dir/health"
-  pid=$(start_bridge_pid)
+  install_browser_shim "$fakebin" "$log"
+  # One live bridge stand-in, and it belongs to the orphan: that is the only one
+  # of the three the sweep is allowed to look at, let alone stop.
+  orphan=$(fm_browser_session_name "$dir" task-gone)
+  pid=$(start_bridge_pid "$orphan")
 
   # A task still on the books, plus its session.
   live=$(fm_browser_session_name "$dir" task-live)
   fm_write_meta "$state/task-live.meta" "window=test:fm-task-live" "kind=ship" "browser_session=$live"
-  seed_browser_session "$state" "$live" "$pid" 9501
-  say_session_is "$dir" 9501 "$live"
+  seed_browser_session "$state" "$live" "$pid"
   # A session whose task is gone, and one belonging to another home entirely.
-  orphan=$(fm_browser_session_name "$dir" task-gone)
-  seed_browser_session "$state" "$orphan" "$pid" 9502
-  say_session_is "$dir" 9502 "$orphan"
+  seed_browser_session "$state" "$orphan" "$pid"
   foreign=$(fm_browser_session_name "$dir/other-home" task-elsewhere)
-  seed_browser_session "$state" "$foreign" "$pid" 9503
-  say_session_is "$dir" 9503 "$foreign"
+  seed_browser_session "$state" "$foreign" "$pid"
 
   watch_bg "$state" "$fakebin" "$out" FM_HOME="$dir" FM_BROWSER_SWEEP_INTERVAL=0
   wpid=$!
@@ -2405,15 +2395,14 @@ test_watcher_reclaims_orphaned_browser_sessions() {
 }
 
 test_watcher_browser_sweep_runs_at_startup_then_holds_its_cadence() {
-  local dir state fakebin out log pid first second wpid
+  local dir state fakebin out log pid second_pid first second wpid
   dir=$(make_case browser-sweep-cadence); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; log="$dir/cda.log"
-  install_browser_shim "$fakebin" "$log" "$dir/health"
-  pid=$(start_bridge_pid)
+  install_browser_shim "$fakebin" "$log"
 
   first=$(fm_browser_session_name "$dir" task-first-orphan)
-  seed_browser_session "$state" "$first" "$pid" 9511
-  say_session_is "$dir" 9511 "$first"
+  pid=$(start_bridge_pid "$first")
+  seed_browser_session "$state" "$first" "$pid"
 
   # No cadence override: a restart is exactly when orphans appear, so the very
   # first cycle must sweep even on the long default interval.
@@ -2424,12 +2413,13 @@ test_watcher_browser_sweep_runs_at_startup_then_holds_its_cadence() {
   wait_for_gone "$state/.cda-root/sessions/$first" 300 \
     || { reap "$wpid"; kill -9 "$pid" 2>/dev/null; fail "the first-cycle sweep reclaimed nothing"; }
 
-  # A second orphan appears while the same watcher runs, identifiable exactly like
-  # the first so a sweep would certainly reclaim it. The default cadence is long,
-  # so a full further cycle must pass without touching it.
+  # A second orphan appears while the same watcher runs, with a live bridge of its
+  # own that identifies itself exactly as the first one did, so a sweep would
+  # certainly reclaim it. The default cadence is long, so a full further cycle must
+  # pass without touching it.
   second=$(fm_browser_session_name "$dir" task-second-orphan)
-  seed_browser_session "$state" "$second" "$pid" 9512
-  say_session_is "$dir" 9512 "$second"
+  second_pid=$(start_bridge_pid "$second")
+  seed_browser_session "$state" "$second" "$second_pid"
   wait_full_poll_cycle "$state" || { reap "$wpid"; kill -9 "$pid" 2>/dev/null; fail "the watcher stopped polling"; }
   wait_full_poll_cycle "$state" || { reap "$wpid"; kill -9 "$pid" 2>/dev/null; fail "the watcher stopped polling"; }
 
@@ -2441,6 +2431,7 @@ test_watcher_browser_sweep_runs_at_startup_then_holds_its_cadence() {
 
   reap "$wpid"
   kill -9 "$pid" 2>/dev/null || true
+  kill -9 "$second_pid" 2>/dev/null || true
   pass "the browser sweep runs on the first cycle after a restart, then waits out its cadence"
 }
 
@@ -2452,11 +2443,13 @@ test_watcher_reports_a_browser_session_it_cannot_identify() {
   local dir state fakebin out log pid refused stale wpid
   dir=$(make_case browser-sweep-refusal); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; log="$dir/cda.log"
-  install_browser_shim "$fakebin" "$log" "$dir/health"
+  install_browser_shim "$fakebin" "$log"
+  # A live bridge carrying no session in its environment: unidentifiable, so the
+  # sweep must refuse it rather than signal it.
   pid=$(start_bridge_pid)
 
   refused=$(fm_browser_session_name "$dir" task-unidentified)
-  seed_browser_session "$state" "$refused" "$pid" 9521
+  seed_browser_session "$state" "$refused" "$pid"
   stale=$(fm_browser_session_name "$dir" task-stale)
   seed_browser_session "$state" "$stale" 999999
 

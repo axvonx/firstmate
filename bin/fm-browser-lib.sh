@@ -105,20 +105,42 @@
 #      CLI itself uses. It proves the pid is A bridge and never WHICH one: every
 #      bridge is spawned as `node .../chrome-devtools-axi-bridge.js` with neither
 #      the session name nor the port anywhere in its argv.
-#   2. the bridge listening on the port recorded in that same bridge.pid reports
-#      THIS session name from its /health endpoint. That is the comparison
-#      chrome-devtools-axi's own checkBridgeHealth makes when it is passed
-#      expectedSession, mirrored here rather than invented.
-# For a pid that is alive AND a bridge there are exactly three outcomes, and none
+#   2. that running process's OWN ENVIRONMENT names this session in
+#      CHROME_DEVTOOLS_AXI_SESSION. spawnBridgeProcess (dist/src/client.js) puts
+#      the session name into the bridge's environment at launch and nothing
+#      changes it afterwards, so the process carries its own identity for as long
+#      as it lives. Verified against every live bridge on this machine: each one's
+#      environment names exactly the session directory whose bridge.pid records
+#      it.
+# The environment is read from /proc/<pid>/environ where that exists and is
+# readable, and from `ps eww -p <pid> -o command=` otherwise, which is what macOS
+# uses. Neither adds a dependency, because part 1 already needs ps. Both readers
+# are same-user only, and that is CORRECT rather than a limitation to work around:
+# a bridge this user cannot inspect is not this home's bridge and must be refused.
+# macOS additionally hides the environment of a platform-signed binary, so a
+# bridge running under such an interpreter would read as unreadable and be
+# refused; a real bridge runs under the node chrome-devtools-axi itself requires,
+# whose environment ps reports normally, which is how every live bridge on this
+# machine was confirmed to name its own session.
+# Reading the PROCESS rather than asking the bridge over HTTP is deliberate, and
+# it is the difference between reclaiming the primary leak and leaking it forever.
+# A bridge whose chrome-devtools-mcp child has died or hung keeps running, and its
+# /health then answers 503 with no session name for the rest of its life, because
+# bridge.js gates that route on client.listTools(). An HTTP identity check could
+# therefore never reclaim the exact case this machinery exists for, while the
+# process environment still names the session perfectly.
+# For a pid that is alive AND a bridge there are exactly four outcomes, and none
 # of them is a silent guess:
-#   - the reported session EQUALS the expected name: positively identified as
-#     ours, so its bridge is stopped and its directory reclaimed.
-#   - the reported session DIFFERS: a foreign bridge. REFUSED - no signal sent,
-#     no state directory removed, and an error naming the pid and the expected
-#     session.
-#   - the probe cannot answer at all (connection refused, a timeout, a body
-#     carrying no session field, or no curl to probe with): REFUSED IDENTICALLY.
-#     Absence of contradiction is not identification.
+#   - the environment names the EXPECTED session: positively identified as ours,
+#     so its bridge is stopped and its directory reclaimed.
+#   - the environment names a DIFFERENT session: a foreign bridge. REFUSED.
+#   - the environment carries NO CHROME_DEVTOOLS_AXI_SESSION: the observed value
+#     is reported as the marker "none". REFUSED.
+#   - the environment CANNOT BE READ: the observed value is reported as the marker
+#     "unreadable". REFUSED.
+# Every refusal sends no signal, removes no state directory, and reports one line
+# naming the pid, the expected session, and the observed value, so the two cases
+# with no name to report still say which of them happened.
 # A wrong answer in either direction is worse than a refusal, so there is no
 # fall-through that treats an unidentified bridge as live and none that treats it
 # as dead.
@@ -130,11 +152,11 @@
 # refuse, or fail an otherwise-successful teardown, because teardown always
 # running is the whole point of this machinery, and it must never wedge the
 # watcher.
-# The ordinary paths are unchanged, because only a live bridge needs a probe: a
-# pid that is not alive, and a live pid that is not a bridge at all (the recycled
-# number), both read as DEAD, are never signalled, and their stale directories
-# are still reclaimed quietly with zero process cost. Refusing those would leak
-# state for no safety gain.
+# The ordinary paths are unchanged, because only a live bridge needs identifying:
+# a pid that is not alive, and a live pid that is not a bridge at all (the
+# recycled number), both read as DEAD, are never signalled, and their stale
+# directories are still reclaimed quietly with zero process cost. Refusing those
+# would leak state for no safety gain.
 #
 # WHY THIS LIB REMOVES SESSION STATE DIRECTORIES ITSELF
 # chrome-devtools-axi never does: stopBridge() reads the pid file and returns
@@ -164,11 +186,16 @@
 # namespace for a problem that has not occurred.
 #
 # ACCEPTED RESIDUALS
-#   - A live bridge that cannot be positively identified is left running with its
-#     state directory in place, so it leaks until some later reclaim can identify
-#     it. That is the chosen direction of the PID IDENTITY rule above and it is
-#     reported every time rather than hidden: a leaked bridge costs CPU, while a
-#     misaimed signal kills another actor's work.
+#   - A live bridge that cannot be positively identified is never reclaimed by
+#     this home, and that does NOT self-heal: its state directory stays and every
+#     teardown or sweep that reaches it refuses again and reports again. Reaching
+#     it takes a pid recycled onto another actor's bridge, a bridge owned by
+#     another user, a bridge under an interpreter whose environment this OS hides,
+#     or a bridge launched by hand with no session in its environment, and in the
+#     first three a signal would land on a process that is not provably ours,
+#     which is worse than the leak. A dead or hung chrome-devtools-mcp
+#     child is NOT in this class: such a bridge's environment still names its
+#     session, so it is identified and reclaimed like any other.
 #   - Two homes whose FM_HOME realpaths collide in 8 hex (2^-32).
 #   - Moving a home changes its digest, so sessions named under the old digest
 #     become unsweepable by anyone - the same accepted limitation
@@ -181,8 +208,6 @@
 #                           agrees with the CLI because Node's os.homedir()
 #                           reads $HOME on POSIX.
 #   FM_BROWSER_STOP_TIMEOUT default 5; seconds allowed for one stop invocation.
-#   FM_BROWSER_PROBE_TIMEOUT default 2; seconds allowed for one /health probe of
-#                           a live bridge, on connect and in total.
 #   FM_BROWSER_SWEEP_MAX    default 3; candidates acted on per sweep call.
 
 # Out-globals, initialized at file scope so a set -u caller may read them before
@@ -236,8 +261,8 @@ fm_browser_is_bridge_pid() {  # <pid>
 
 # fm_browser_json_number <file> <key> - print the first numeric value the file
 # records for the JSON key, or nothing. The bridge writes bridge.pid as
-# {"pid":<n>,"port":<n>} (dist/src/bridge.js), and its own readPidFile treats the
-# record as usable only when BOTH are numbers.
+# {"pid":<n>,"port":<n>} (dist/src/bridge.js), and this lib reads the pid from it;
+# the port is never needed, because identity comes from the process itself.
 fm_browser_json_number() {  # <file> <key>
   local file=${1-} key=${2-} val
   [ -f "$file" ] || return 0
@@ -248,66 +273,72 @@ fm_browser_json_number() {  # <file> <key>
   printf '%s\n' "$val"
 }
 
-# fm_browser_probe_session <port> - print the session name the bridge listening
-# on <port> reports for itself, rc 0. rc 1 with no output whenever the probe
-# cannot answer: no port recorded, no curl to probe with, nothing listening, a
-# timeout, a body that is not a healthy /health answer, or one carrying no
-# session field. Part 2 of the PID IDENTITY rule, and it is positive
-# identification only: an unanswered probe is a refusal upstream, never an
-# assumption in either direction.
-# Bounded by FM_BROWSER_PROBE_TIMEOUT on connect and in total, so it can never
-# hang a teardown or a watcher sweep. curl is the same dependency
-# bin/fm-x-poll.sh already reaches the network with, so this adds none; the
-# loopback /health route needs no token and no header beyond curl's own Host,
-# which is what the bridge's anti-rebinding gate checks.
-fm_browser_probe_session() {  # <port>
-  local port=${1-} probe_timeout body status session
-  case "$port" in
-    ''|*[!0-9]*) return 1 ;;
+# fm_browser_pid_session <pid> - print the session name the running process
+# itself carries in CHROME_DEVTOOLS_AXI_SESSION, rc 0. rc 1 with no output when
+# the environment was read and carries no such variable, rc 2 with no output when
+# the environment cannot be read at all. Part 2 of the PID IDENTITY rule: it asks
+# the process what it IS, rather than asking a browser whether it feels well, so a
+# bridge whose chrome-devtools-mcp child died is still identified and still
+# reclaimed.
+# /proc/<pid>/environ is preferred where it exists, because it is NUL separated
+# and exact; `ps eww -p <pid> -o command=` is the fallback and is what macOS uses,
+# where it prints nothing at all for a pid whose environment it will not report.
+fm_browser_pid_session() {  # <pid>
+  local pid=${1-} dump session
+  case "$pid" in
+    ''|*[!0-9]*) return 2 ;;
   esac
-  command -v curl >/dev/null 2>&1 || return 1
-  probe_timeout=${FM_BROWSER_PROBE_TIMEOUT:-2}
-  case "$probe_timeout" in
-    ''|*[!0-9]*) probe_timeout=2 ;;
-  esac
-  [ "$probe_timeout" -ge 1 ] || probe_timeout=2
-  body=$(curl -fsS --connect-timeout "$probe_timeout" --max-time "$probe_timeout" \
-    "http://127.0.0.1:$port/health" 2>/dev/null) || return 1
-  status=$(printf '%s' "$body" | sed -n 's/.*"status"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
-  [ "$status" = ok ] || return 1
-  session=$(printf '%s' "$body" | sed -n 's/.*"session"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+  if [ -r "/proc/$pid/environ" ]; then
+    dump=$(tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null) || dump=
+  else
+    dump=$(ps eww -p "$pid" -o command= 2>/dev/null | tr ' ' '\n') || dump=
+  fi
+  [ -n "$dump" ] || return 2
+  session=$(printf '%s\n' "$dump" \
+    | sed -n 's/^CHROME_DEVTOOLS_AXI_SESSION=\(.*\)$/\1/p' | head -1)
   [ -n "$session" ] || return 1
   printf '%s\n' "$session"
 }
 
 # fm_browser_live_pid <pidfile> <expected-session> - decide, for one session's
 # bridge record, whether anything is alive there and whether it is positively
-# THIS session's bridge. The rc distinguishes the three outcomes of the PID
-# IDENTITY rule, because a caller must react differently to each:
-#   rc 0 and a pid on stdout - alive, a chrome-devtools-axi bridge, and it
-#                              reports <expected-session>: positively ours, so it
-#                              may be signalled.
-#   rc 0 and no output       - nothing live to act on: no record, an unparseable
-#                              record, a pid that is gone, or a live pid that is
-#                              not a bridge at all (a recycled number).
-#   rc 2 and a pid on stdout - a live bridge reporting a DIFFERENT session.
-#   rc 3 and a pid on stdout - a live bridge whose probe could not answer.
-# rc 2 and rc 3 are refusals and neither may be read as ours or as dead. A caller
-# that only needs "is anything still alive here" can ignore the rc and read
-# stdout, because every live case prints its pid.
+# THIS session's bridge.
+# Prints "<pid> <observed>" for every live bridge, where <observed> is the session
+# its own environment names, or the marker "none" when that environment carries no
+# session, or the marker "unreadable" when it cannot be read. The rc says what the
+# caller must do, because the four outcomes of the PID IDENTITY rule are not
+# interchangeable:
+#   rc 0 with a line     - alive, a chrome-devtools-axi bridge, and it names
+#                          <expected-session>: positively ours, so it may be
+#                          signalled.
+#   rc 0 with no output  - nothing live to act on: no record, an unparseable
+#                          record, a pid that is gone, or a live pid that is not a
+#                          bridge at all (a recycled number).
+#   rc 2 with a line     - a live bridge that is NOT positively ours. The observed
+#                          field says which of the three refusal cases it is.
+# A markerless comparison would be ambiguous, so the rc of the environment read
+# gates the decision before any string is compared: a bridge whose environment
+# says the literal "none" can never be mistaken for an unreadable one.
+# A caller that only needs "is anything still alive here" can ignore the rc and
+# test stdout for emptiness, because every live case prints a line.
 fm_browser_live_pid() {  # <pidfile> <expected-session>
-  local pidfile=${1-} expected=${2-} pid port reported
+  local pidfile=${1-} expected=${2-} pid observed env_rc=0
   [ -n "$pidfile" ] || return 0
   [ -f "$pidfile" ] || return 0
   pid=$(fm_browser_json_number "$pidfile" pid)
   [ -n "$pid" ] || return 0
   kill -0 "$pid" 2>/dev/null || return 0
   fm_browser_is_bridge_pid "$pid" || return 0
-  port=$(fm_browser_json_number "$pidfile" port)
-  printf '%s\n' "$pid"
-  reported=$(fm_browser_probe_session "$port") || return 3
-  [ -n "$expected" ] || return 3
-  [ "$reported" = "$expected" ] || return 2
+  observed=$(fm_browser_pid_session "$pid") || env_rc=$?
+  case "$env_rc" in
+    0) ;;
+    1) observed=none ;;
+    *) observed=unreadable ;;
+  esac
+  printf '%s %s\n' "$pid" "$observed"
+  [ "$env_rc" = 0 ] || return 2
+  [ -n "$expected" ] || return 2
+  [ "$observed" = "$expected" ] || return 2
   return 0
 }
 
@@ -356,7 +387,8 @@ fm_browser_session_name() {  # <fm-home> <task-id>
 # dead, or naming a recycled pid now on an unrelated process, and a missing
 # chrome-devtools-axi binary are all ordinary silent no-ops, not errors.
 fm_browser_retire() {  # <fm-home> <session-name>
-  local home=${1-} name=${2-} prefix root dir pidfile pid stop_timeout live_rc
+  local home=${1-} name=${2-} prefix root dir pidfile live pid observed
+  local stop_timeout live_rc
   FM_BROWSER_RETIRED=0
   FM_BROWSER_ERROR=
   local LC_ALL=C
@@ -377,21 +409,17 @@ fm_browser_retire() {  # <fm-home> <session-name>
   pidfile="$dir/bridge.pid"
   [ -d "$dir" ] || return 0
 
-  # Nothing may be aimed at the recorded pid until the bridge itself says which
-  # session it is. A refusal reports and stops here: no signal, no removal.
+  # Nothing may be aimed at the recorded pid until the process itself says which
+  # session it belongs to. A refusal reports both session values and stops here:
+  # no signal, no removal.
   live_rc=0
-  pid=$(fm_browser_live_pid "$pidfile" "$name") || live_rc=$?
-  case "$live_rc" in
-    0) ;;
-    2)
-      FM_BROWSER_ERROR="refused to retire browser session $name: live bridge pid $pid reports a different session, so no signal was sent and nothing was removed"
-      return 0
-      ;;
-    *)
-      FM_BROWSER_ERROR="refused to retire browser session $name: live bridge pid $pid could not be identified as $name because its /health probe did not answer, so no signal was sent and nothing was removed"
-      return 0
-      ;;
-  esac
+  live=$(fm_browser_live_pid "$pidfile" "$name") || live_rc=$?
+  pid=${live%% *}
+  observed=${live#* }
+  if [ "$live_rc" != 0 ]; then
+    FM_BROWSER_ERROR="refused to retire browser session $name: live bridge pid $pid reports session=$observed, expected session=$name, so no signal was sent and nothing was removed"
+    return 0
+  fi
 
   if [ -n "$pid" ] && command -v chrome-devtools-axi >/dev/null 2>&1; then
     stop_timeout=${FM_BROWSER_STOP_TIMEOUT:-5}
@@ -411,12 +439,12 @@ fm_browser_retire() {  # <fm-home> <session-name>
 
   # Re-read: only reclaim the directory once no live pid remains, so a bridge
   # that survived the stop keeps the pid file that identifies it and the next
-  # sweep retries instead of orphaning it. Every live outcome prints its pid, so
+  # sweep retries instead of orphaning it. Every live outcome prints a line, so
   # this asks only whether anything is still alive - an identity refusal here is
   # not reported a second time, because the signal already went to a pid that WAS
   # positively identified above.
-  pid=$(fm_browser_live_pid "$pidfile" "$name") || true
-  [ -z "$pid" ] || return 0
+  live=$(fm_browser_live_pid "$pidfile" "$name") || true
+  [ -z "$live" ] || return 0
   rm -rf "$dir" 2>/dev/null || true
   [ -d "$dir" ] || FM_BROWSER_RETIRED=1
   return 0
@@ -429,7 +457,8 @@ fm_browser_retire() {  # <fm-home> <session-name>
 # FM_BROWSER_SWEEP_NAMES (space-prefixed list of reclaimed names, empty when
 # none), and FM_BROWSER_SWEEP_ERRORS (one newline-separated line per identity
 # refusal, empty when none) for the caller to report and move on: a refusal is
-# never allowed to wedge a sweep or shorten it.
+# never allowed to wedge a sweep or shorten it. Its only write outside the browser
+# state root is the one-line rotation cursor described below.
 # A session is an orphan for this home if and only if it passes the ownership
 # prefix AND is absent from the live set. The live set is built from this home's
 # own state dir only and is the union, over every existing <state-dir>/*.meta,
@@ -445,9 +474,24 @@ fm_browser_retire() {  # <fm-home> <session-name>
 # rest wait for the next sweep. Filesystem-only unless a bridge is actually
 # alive. Reads browser_session= with an inline grep rather than sourcing
 # bin/fm-backend.sh so the lib never depends on a caller's sourcing order.
+# ROTATED, and that is what keeps the bound from becoming starvation. An identity
+# refusal leaves its candidate in place, so it is still a candidate next time,
+# while the directory scan order is stable: without rotation a handful of
+# permanently unidentifiable sessions would fill the budget from the head of the
+# scan on every single call and no orphan behind them would ever be examined
+# again, which for a session whose task is gone means its bridge leaks forever
+# because this sweep is its only reclaim path. So the name of the last candidate
+# acted on is kept in <state-dir>/.last-browser-sweep-cursor - the same
+# .last-* watcher-internal marker pattern .last-browser-sweep itself uses - and
+# the scan resumes AFTER it, wrapping to the head once for the ones before it.
+# Every candidate is therefore reached within a bounded number of calls whatever
+# the refusals do, and the per-call cost stays capped. A cursor that cannot be
+# written or no longer exists costs nothing but that call's rotation.
 fm_browser_sweep_orphans() {  # <fm-home> <state-dir>
   local home=${1-} state_dir=${2-} root prefix meta id val d name max
+  local cursor_file cursor pass skipping last='' done_names=''
   local seen='' acted=0 nl=$'\n'
+  local LC_ALL=C
   FM_BROWSER_SWEEP_COUNT=0
   FM_BROWSER_SWEEP_NAMES=
   FM_BROWSER_SWEEP_ERRORS=
@@ -482,26 +526,57 @@ fm_browser_sweep_orphans() {  # <fm-home> <state-dir>
   case "$max" in
     ''|*[!0-9]*) max=3 ;;
   esac
-  for d in "$root"/sessions/*/; do
-    [ -d "$d" ] || continue
+  cursor_file="$state_dir/.last-browser-sweep-cursor"
+  cursor=$(head -1 "$cursor_file" 2>/dev/null || true)
+  case "$cursor" in
+    *[!A-Za-z0-9._-]*) cursor= ;;
+  esac
+
+  # Pass 1 walks past the cursor and acts on what follows it; pass 2 wraps to the
+  # head for the ones before it. done_names keeps one candidate from being acted
+  # on twice in a single call, and a cursor whose directory is gone simply leaves
+  # pass 1 with nothing to do.
+  for pass in 1 2; do
     [ "$acted" -lt "$max" ] || break
-    name=$(basename "$d")
-    case "$name" in
-      "$prefix"*) ;;
-      *) continue ;;
-    esac
-    case "$seen" in
-      *"|$name|"*) continue ;;
-    esac
-    acted=$((acted + 1))
-    fm_browser_retire "$home" "$name"
-    if [ "$FM_BROWSER_RETIRED" = 1 ]; then
-      FM_BROWSER_SWEEP_COUNT=$((FM_BROWSER_SWEEP_COUNT + 1))
-      FM_BROWSER_SWEEP_NAMES="$FM_BROWSER_SWEEP_NAMES $name"
+    skipping=0
+    if [ "$pass" = 1 ] && [ -n "$cursor" ]; then
+      skipping=1
     fi
-    if [ -n "$FM_BROWSER_ERROR" ]; then
-      FM_BROWSER_SWEEP_ERRORS="$FM_BROWSER_SWEEP_ERRORS${FM_BROWSER_SWEEP_ERRORS:+$nl}$FM_BROWSER_ERROR"
-    fi
+    for d in "$root"/sessions/*/; do
+      [ -d "$d" ] || continue
+      [ "$acted" -lt "$max" ] || break
+      name=$(basename "$d")
+      if [ "$skipping" = 1 ]; then
+        if [ "$name" = "$cursor" ]; then
+          skipping=0
+        fi
+        continue
+      fi
+      case "$name" in
+        "$prefix"*) ;;
+        *) continue ;;
+      esac
+      case "$seen" in
+        *"|$name|"*) continue ;;
+      esac
+      case "$done_names" in
+        *"|$name|"*) continue ;;
+      esac
+      acted=$((acted + 1))
+      done_names="$done_names|$name|"
+      last=$name
+      fm_browser_retire "$home" "$name"
+      if [ "$FM_BROWSER_RETIRED" = 1 ]; then
+        FM_BROWSER_SWEEP_COUNT=$((FM_BROWSER_SWEEP_COUNT + 1))
+        FM_BROWSER_SWEEP_NAMES="$FM_BROWSER_SWEEP_NAMES $name"
+      fi
+      if [ -n "$FM_BROWSER_ERROR" ]; then
+        FM_BROWSER_SWEEP_ERRORS="$FM_BROWSER_SWEEP_ERRORS${FM_BROWSER_SWEEP_ERRORS:+$nl}$FM_BROWSER_ERROR"
+      fi
+    done
   done
+  if [ -n "$last" ]; then
+    printf '%s\n' "$last" > "$cursor_file" 2>/dev/null || true
+  fi
   return 0
 }

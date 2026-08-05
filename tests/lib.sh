@@ -100,24 +100,36 @@ if [ -z "${FM_BROWSER_STATE_ROOT:-}" ]; then
   export FM_BROWSER_STATE_ROOT="$_fm_browser_root/.chrome-devtools-axi"
 fi
 
-# fm_test_fake_bridge_pid <dir> - start a long-lived process this suite owns
-# that a bridge-liveness check accepts, and echo its pid. bin/fm-browser-lib.sh
-# treats a recorded pid as live only when `ps -p <pid> -o command=` names a
-# chrome-devtools-axi-bridge - the same identity test chrome-devtools-axi itself
-# applies - so a plain sleep stands in for a DEAD bridge, not a live one. This
-# helper runs a script whose own path carries that name, so the check passes for
-# a process no real browser is behind. That is only the first half of the
-# library's identity test: a case that needs the bridge treated as THIS session's
-# must also answer its /health probe, which fm_test_fake_health_curl below does.
-# It sleeps in short steps, so if the caller kills it the longest-lived leftover
-# child is gone within a second.
+# fm_test_fake_bridge_pid <dir> [session] - start a long-lived process this suite
+# owns that stands in for a live bridge, and echo its pid. bin/fm-browser-lib.sh
+# identifies a recorded pid in two parts: `ps -p <pid> -o command=` must name a
+# chrome-devtools-axi-bridge - the same test chrome-devtools-axi itself applies, so
+# a plain sleep stands in for a DEAD bridge rather than a live one - and the
+# process's own environment must carry CHROME_DEVTOOLS_AXI_SESSION. This helper
+# runs a script whose own path carries the bridge name, and puts <session> in that
+# process's environment exactly as the real tool does at launch.
+# Pass no session to get a bridge whose environment carries none, which is the
+# refusal case the library reports as "none"; the variable is unset explicitly so
+# an ambient value in the suite's own environment cannot leak into it.
+# The stand-in runs under node where node exists, because that is what a real
+# bridge runs under and because macOS hides the environment of a platform-signed
+# interpreter such as /bin/sh even from its own user - a shell stand-in would read
+# as "unreadable" there and prove the wrong thing. The shell form is the fallback
+# for a host with no node, where /proc/<pid>/environ answers regardless.
 # The caller kills the returned pid; it exits on its own within ~5 minutes.
 fm_test_fake_bridge_pid() {
-  local dir=$1 script
+  local dir=$1 session=${2:-} script node_bin pid i=0
   mkdir -p "$dir"
   script="$dir/chrome-devtools-axi-bridge"
   if [ ! -x "$script" ]; then
-    cat > "$script" <<'SH'
+    node_bin=$(command -v node 2>/dev/null) || node_bin=
+    if [ -n "$node_bin" ]; then
+      # An ABSOLUTE interpreter path, never `#!/usr/bin/env node`: env is itself a
+      # platform binary, so a stand-in caught during that first exec would look
+      # like a bridge with an unreadable environment and prove the wrong thing.
+      printf '#!%s\nsetTimeout(function () { process.exit(0); }, 300000);\n' "$node_bin" > "$script"
+    else
+      cat > "$script" <<'SH'
 #!/bin/sh
 i=0
 while [ "$i" -lt 600 ]; do
@@ -125,73 +137,76 @@ while [ "$i" -lt 600 ]; do
   i=$((i + 1))
 done
 SH
+    fi
     chmod +x "$script"
   fi
   # stdout and stderr are closed off the job deliberately: a background child
   # holding a caller's command substitution open would block it until the child
   # exited, which is the opposite of the point.
-  "$script" >/dev/null 2>&1 &
-  printf '%s\n' "$!"
+  if [ -n "$session" ]; then
+    CHROME_DEVTOOLS_AXI_SESSION="$session" "$script" >/dev/null 2>&1 &
+  else
+    ( unset CHROME_DEVTOOLS_AXI_SESSION; exec "$script" ) >/dev/null 2>&1 &
+  fi
+  pid=$!
+  # Return only once the process is actually identifiable, so a caller can drive
+  # retirement immediately: until the exec completes, the pid still carries the
+  # forking shell's command line and none of the environment asked for here.
+  while [ "$i" -lt 100 ]; do
+    if ps -p "$pid" -o command= 2>/dev/null | grep -q chrome-devtools-axi-bridge; then
+      [ -n "$session" ] || break
+      if fm_test_pid_environ "$pid" | grep -q "^CHROME_DEVTOOLS_AXI_SESSION=$session$"; then
+        break
+      fi
+    fi
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  printf '%s\n' "$pid"
 }
 
-# fm_test_fake_health_curl <fakebin> <health-dir> - install a curl stand-in that
-# answers the bridge /health probe bin/fm-browser-lib.sh uses to bind a recorded
-# pid to a session name, so a suite decides what a recorded bridge says about
-# itself without binding a port. Answers come from files, one per port, because
-# that is exactly the question the real probe asks: what does the bridge on the
-# port recorded in bridge.pid call itself?
-#   <health-dir>/ports/<port>  the answer for a probe of that port - a session
-#                              name on one line, or a literal body when the first
-#                              character is "{", which is how a suite produces a
-#                              malformed or session-less answer.
-#   <health-dir>/requests.log  every /health URL probed, one per line.
-# A port with no file answers the way nothing-listening does: curl's exit 7. Any
-# other URL falls through to the real curl, so installing this never takes the
-# tool away from the rest of a suite.
-fm_test_fake_health_curl() {
-  local fakebin=$1 health_dir=$2
-  mkdir -p "$fakebin" "$health_dir/ports"
-  : > "$health_dir/requests.log"
-  {
-    printf '#!/usr/bin/env bash\nset -u\nhealth_dir=%s\n' "$(printf '%q' "$health_dir")"
-    cat <<'SH'
-url=
+# fm_test_pid_environ <pid> - the process's environment, one VAR=value per line,
+# by the same two readers bin/fm-browser-lib.sh uses. For fixture readiness only.
+fm_test_pid_environ() {
+  local pid=$1
+  if [ -r "/proc/$pid/environ" ]; then
+    tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null
+  else
+    ps eww -p "$pid" -o command= 2>/dev/null | tr ' ' '\n'
+  fi
+}
+
+# fm_test_fake_blind_ps <fakebin> - install a ps stand-in that still answers the
+# pid-is-a-bridge question but reports NO environment, so a suite can drive the
+# library's "environment cannot be read" refusal without another user's process.
+# Only meaningful where the library reads environments through ps: a host with
+# /proc/<pid>/environ never consults ps for that, so a case using this must skip
+# itself there (fm_test_ps_reads_environments below).
+fm_test_fake_blind_ps() {
+  local fakebin=$1
+  mkdir -p "$fakebin"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
 for arg in "$@"; do
-  case "$arg" in
-    http://*|https://*) url=$arg ;;
-  esac
-done
-case "$url" in
-  http://127.0.0.1:*/health*)
-    printf '%s\n' "$url" >> "$health_dir/requests.log"
-    port=${url#http://127.0.0.1:}
-    port=${port%%/*}
-    answer="$health_dir/ports/$port"
-    [ -f "$answer" ] || exit 7
-    body=$(cat "$answer")
-    case "$body" in
-      '{'*) printf '%s\n' "$body" ;;
-      *) printf '{"status":"ok","session":"%s"}\n' "$body" ;;
-    esac
+  if [ "$arg" = eww ] || [ "$arg" = e ]; then
     exit 0
-    ;;
-esac
-for real in /usr/bin/curl /bin/curl /usr/local/bin/curl /opt/homebrew/bin/curl; do
+  fi
+done
+for real in /bin/ps /usr/bin/ps; do
   [ -x "$real" ] && exec "$real" "$@"
 done
 exit 127
 SH
-  } > "$fakebin/curl"
-  chmod +x "$fakebin/curl"
+  chmod +x "$fakebin/ps"
 }
 
-# fm_test_fake_health_answer <health-dir> <port> <session-or-body> - record what
-# the fake bridge on <port> reports for itself. Drop the file to make that port
-# unanswerable again.
-fm_test_fake_health_answer() {
-  local health_dir=$1 port=$2 answer=$3
-  mkdir -p "$health_dir/ports"
-  printf '%s\n' "$answer" > "$health_dir/ports/$port"
+# fm_test_ps_reads_environments - true when this host identifies a process's
+# environment through ps rather than /proc, which is what fm_test_fake_blind_ps
+# can intercept.
+fm_test_ps_reads_environments() {
+  [ ! -r "/proc/$$/environ" ]
 }
 
 # --- fakebin / PATH shims ---------------------------------------------------
