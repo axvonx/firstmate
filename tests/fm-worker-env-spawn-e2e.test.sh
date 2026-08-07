@@ -257,9 +257,50 @@ FMX_PAIRING_TOKEN=fake-pairing-token-not-a-real-token
   pass "fm-spawn.sh: a home with no .env of its own reads its primary's, and says so"
 }
 
+# The other half of the same gate, and the one a presence test gets wrong: a
+# local .env that EXISTS but delivers nothing must not suppress the fallback.
+# X mode's documented shape is exactly that file - AGENTS.md's "place
+# FMX_PAIRING_TOKEN in its gitignored .env" - and that name is deliberately never
+# exported, so gating on the file being there would leave an X-mode secondmate's
+# every crewmate with no credentials at all, silently, once the ambient copies are
+# cleared. A comment-only file is the same shape by another route.
+test_present_but_empty_local_env_does_not_suppress_the_fallback() {
+  local out err
+  out=$(spawn_and_report xmodeonly \
+    "FMX_PAIRING_TOKEN=fake-pairing-token-not-a-real-token
+" \
+    "$CRED_A=$FAKE_A
+")
+  assert_contains "$out" "$CRED_A=exact" \
+    "an X-mode-only local .env suppressed the fallback, so an X-mode lane's workers had no credentials"
+  # The local file declares the token and the primary's does not: neither route
+  # may hand a crewmate the home's relay consent.
+  assert_contains "$out" "FMX_PAIRING_TOKEN=unset" \
+    "the local .env's relay consent token reached a crewmate"
+  err=$(cat "$TMP_ROOT/spawn-xmodeonly.err")
+  assert_contains "$err" "$TMP_ROOT/primary-xmodeonly/.env" \
+    "falling back past a present-but-empty local .env was not announced"
+  assert_not_contains "$err" "$FAKE_A" "the fallback announcement printed a credential value"
+
+  out=$(spawn_and_report commentonly \
+    "# this home declares nothing
+
+" \
+    "$CRED_A=$FAKE_A
+")
+  assert_contains "$out" "$CRED_A=exact" \
+    "a comment-only local .env suppressed the fallback"
+  err=$(cat "$TMP_ROOT/spawn-commentonly.err")
+  assert_contains "$err" "$TMP_ROOT/primary-commentonly/.env" \
+    "falling back past a comment-only local .env was not announced"
+  pass "fm-spawn.sh: a local .env that delivers nothing does not suppress the fallback"
+}
+
 # The isolation path stays available: a home that wants its own credentials writes
-# its own .env, and that file wins whole - the primary's is not consulted at all,
-# so a name only the primary declares does not quietly appear.
+# its own .env that really exports one, and that file wins whole - the primary's
+# is not consulted at all, so a name only the primary declares does not quietly
+# appear. Which file won is proven by giving both the SAME name with different
+# invented values: the probe reports only the match token, never either value.
 test_local_env_wins_over_the_primary_env() {
   local out err
   out=$(spawn_and_report localwins \
@@ -299,5 +340,6 @@ test_worker_has_credentials_with_machine_wide_values_cleared
 test_missing_key_is_missing_not_silently_satisfied
 test_home_without_env_still_spawns
 test_secondmate_home_reads_the_primary_env
+test_present_but_empty_local_env_does_not_suppress_the_fallback
 test_local_env_wins_over_the_primary_env
 test_ambient_copy_still_wins_before_cleanup

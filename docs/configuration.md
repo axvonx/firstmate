@@ -311,12 +311,15 @@ Skipped items, such as a destination checkout that does not yet gitignore the it
 A firstmate home's gitignored `.env` is where that home's worker credentials live, alongside the X-mode pairing token described in the next section.
 Keep it mode `600`, and never commit it or copy its contents into a project, a fixture, or an image.
 
-Every spawn runs the worker's launch command under `bin/fm-worker-env-exec.sh`, which loads `$FM_HOME/.env` and then execs the launch, so the agent and every child it starts inherit the home's credentials.
+Every spawn runs the worker's launch command under `bin/fm-worker-env-exec.sh`, which loads the home's `.env` and then execs the launch, so the agent and every child it starts inherit the home's credentials.
 Values never appear on a command line, in the pane text, in `ps` output, or in a task's metadata record, and nothing on this path prints a value under any condition.
-A home with no `.env` and no primary to fall back to loads nothing and is not an error; a worker that lacks a key it needs reports the missing credential through its brief's stop-and-report path.
+A home with no delivering `.env` and no primary to fall back to loads nothing and is not an error; a worker that lacks a key it needs reports the missing credential through its brief's stop-and-report path.
 
-A secondmate home has no `.env` of its own, because nothing seeds one - so a home with none reads its primary's instead, and `bin/fm-spawn.sh` announces that path on stderr at spawn.
-A per-home `.env` remains the supported alternative for anyone who wants a secondmate's workers isolated from the primary's credentials: write one in that home and it wins whole whenever it exists, with the primary's never consulted.
+A secondmate home has no `.env` of its own, because nothing seeds one - so a home whose own file delivers no worker credential reads its primary's instead, and `bin/fm-spawn.sh` announces that path on stderr at spawn.
+A per-home `.env` remains the supported alternative for anyone who wants a secondmate's workers isolated from the primary's credentials: write one in that home and it wins whole whenever it actually delivers at least one worker credential, with the primary's never consulted.
+That test is delivery rather than existence on purpose, and one function - `fm_worker_env_resolve` in [`bin/fm-worker-env-lib.sh`](../bin/fm-worker-env-lib.sh) - is the single owner of the answer, so the file a spawn loads is the file a crewmate brief describes.
+An X-mode home's `.env` can hold only `FMX_PAIRING_TOKEN`, which is never exported, and a comment-only or empty file reads the same way: treating any of those as "the home has its own credentials" would strand every crewmate on that lane silently.
+A primary whose own `.env` delivers nothing is not used either, because announcing a source that supplies no credential is the same misleading claim one level over.
 The `FM_*`/`FMX_*` exclusion below applies on the inherited path exactly as it does on the local one, and matters more there: `FMX_PAIRING_TOKEN` is the primary home's relay consent and must not reach a secondmate's crewmate.
 
 This exists so credentials do not have to be set machine-wide.

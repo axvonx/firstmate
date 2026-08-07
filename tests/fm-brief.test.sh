@@ -1166,9 +1166,15 @@ test_vault_scope_follows_declared_key_list() {
     "narrowed brief did not scope the unset-key trigger to the keys the vault holds"
   assert_no_grep "An authentication failure or an unset key is the signal" "$brief" \
     "narrowed brief kept the unscoped unset-key trigger, which routes an absent environment key into the vault"
+  # This home has no .env and no primary, so nothing delivers - and a brief that
+  # named a file anyway would be telling a worker to expect credentials from a
+  # file that does not exist, which is the defect this whole rule is about. The
+  # actionable half does not depend on provenance and must be there regardless.
   # shellcheck disable=SC2016  # literal brief text: backticks must stay literal
-  assert_grep 'An unset credential that is NOT one of those names is a missing credential and nothing more: it should have arrived from this home'"'"'s `.env`' "$brief" \
-    "narrowed brief did not say where an unset non-vaulted credential should have come from"
+  assert_grep 'An unset credential that is NOT one of those names is a missing credential and nothing more: append `blocked:' "$brief" \
+    "brief named a credential source for a home where nothing delivers one"
+  assert_no_grep "it should have arrived from" "$brief" \
+    "brief told the worker where a credential should have come from with no file delivering any"
   # shellcheck disable=SC2016  # literal brief text: backticks must stay literal
   assert_grep 'append `blocked: {which credential is missing}` to the status file and stop there - never call `av` for it, and never report it as a vault failure' "$brief" \
     "narrowed brief left an unset non-vaulted credential routed through av or reported as a vault failure"
@@ -1196,14 +1202,35 @@ test_vault_scope_follows_declared_key_list() {
   # A .env that declares only FM_*/FMX_* names is the documented X-mode-only
   # shape, and the loader puts none of it into a worker. Telling that worker its
   # variables are simply there would be a false statement in a generated brief,
-  # which is the same defect class as every other finding in this rule, so the
-  # paragraph is gated on the loader's eligibility count and not on the file.
+  # which is the same defect class as every other finding in this rule, so both
+  # claims are gated on what the resolution says will actually be delivered - the
+  # same call bin/fm-spawn.sh makes - and not on a file being there.
   printf 'FMX_PAIRING_TOKEN=fake-pairing-token-not-a-real-token\n' > "$home/.env"
   PATH="$fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-vault-scope-xmode no-registry-proj >/dev/null 2>&1
   brief="$home/data/brief-vault-scope-xmode/brief.md"
   assert_present "$brief" "brief was not scaffolded with an X-mode-only .env"
   assert_no_grep "mode-600 gitignored" "$brief" \
     "brief promised loaded variables for a .env that puts nothing into a worker's environment"
+  assert_no_grep "it should have arrived from" "$brief" \
+    "brief named a credential source that delivers nothing"
+
+  # The secondmate shape: the home's own .env delivers nothing, so the spawn will
+  # load the primary's - and both claims must name THAT file rather than a local
+  # one that does not exist, or the brief and the delivery disagree.
+  mkdir -p "$TMP_ROOT/vault-scope-primary"
+  printf 'PRIMARY_ONLY_NOT_A_REAL_KEY=placeholder\n' > "$TMP_ROOT/vault-scope-primary/.env"
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_PUBLIC_FOLLOWUP_PRIMARY_HOME="$TMP_ROOT/vault-scope-primary" \
+    "$ROOT/bin/fm-brief.sh" brief-vault-scope-inherited no-registry-proj >/dev/null 2>&1
+  brief="$home/data/brief-vault-scope-inherited/brief.md"
+  assert_present "$brief" "brief was not scaffolded for a home reading its primary's .env"
+  # shellcheck disable=SC2016  # literal brief text: backticks must stay literal
+  assert_grep 'The values live in one mode-600 gitignored `.env` in the primary firstmate home' "$brief" \
+    "brief did not name the primary's .env as the file its worker's credentials come from"
+  # shellcheck disable=SC2016  # literal brief text: backticks must stay literal
+  assert_grep "it should have arrived from the primary firstmate home's \`.env\`" "$brief" \
+    "brief blamed a local .env for a credential its worker gets from the primary's"
+  assert_no_grep "arrived from this home's" "$brief" \
+    "brief named a local .env that delivers nothing while the spawn loads the primary's"
 
   printf 'PLACEHOLDER_NOT_A_REAL_KEY=placeholder\n' > "$home/.env"
   PATH="$fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-vault-scope-env no-registry-proj >/dev/null 2>&1
@@ -1218,6 +1245,18 @@ test_vault_scope_follows_declared_key_list() {
     "brief left the .env commitable, which is the whole reason environment credentials are safe"
   assert_grep "Never open it to see what a value is" "$brief" \
     "brief left reading a value out of the .env as an option"
+  # shellcheck disable=SC2016  # literal brief text: backticks must stay literal
+  assert_grep 'it should have arrived from this home'"'"'s `.env`' "$brief" \
+    "brief did not name the home's own .env once that file actually delivers"
+
+  # A local file that delivers wins over the primary's, so the brief keeps saying
+  # so even where a primary exists - the isolation case, described accurately.
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_PUBLIC_FOLLOWUP_PRIMARY_HOME="$TMP_ROOT/vault-scope-primary" \
+    "$ROOT/bin/fm-brief.sh" brief-vault-scope-localwins no-registry-proj >/dev/null 2>&1
+  brief="$home/data/brief-vault-scope-localwins/brief.md"
+  assert_present "$brief" "brief was not scaffolded for a delivering local .env beside a primary"
+  assert_no_grep "primary firstmate home" "$brief" \
+    "brief credited the primary for credentials its own delivering .env supplies"
 
   # A list that covers nothing, or a name that is not a name, would silently drop
   # a credential out of vault discipline. Both refuse instead, and write no brief.

@@ -6,7 +6,7 @@ This record supports four active guarantees for the credentials a crewmate reach
 
 1. A worker gets its firstmate home's `.env` credentials even when nothing on the machine sets them, and gets them byte-exact.
 2. A credential the home does not declare is genuinely absent for the worker, rather than being satisfied from somewhere else.
-3. A home with no `.env` of its own reads its primary's, announced on stderr, and its own file wins whenever it exists.
+3. A home whose own `.env` delivers no worker credential reads its primary's, announced on stderr, and its own file wins whenever it actually delivers one.
 4. No credential value is printed on any path, including when the file cannot be parsed.
 
 [`docs/configuration.md`](../configuration.md#worker-credentials-env) owns the operator-facing contract, `bin/fm-worker-env-lib.sh` owns the parser and eligibility rules, and `bin/fm-worker-env-exec.sh` owns the delivery mechanism.
@@ -46,6 +46,7 @@ ok - fm-spawn.sh: a worker has its credentials with the machine-wide values clea
 ok - fm-spawn.sh: a credential absent from .env is absent for the worker, not silently substituted
 ok - fm-spawn.sh: a home with no .env still spawns, with no credentials and no error
 ok - fm-spawn.sh: a home with no .env of its own reads its primary's, and says so
+ok - fm-spawn.sh: a local .env that delivers nothing does not suppress the fallback
 ok - fm-spawn.sh: a home's own .env wins over its primary's, with no fallback announced
 ok - fm-spawn.sh: before cleanup an ambient copy still satisfies a key .env does not declare (why launchctl must be cleared)
 ```
@@ -53,9 +54,13 @@ ok - fm-spawn.sh: before cleanup an ambient copy still satisfies a key .env does
 The first case is the delivery guarantee: the scratch tmux server is started under `env -i`, so the pane can inherit no credential from anywhere, and the worker still reports its key present and byte-exact.
 The second is the ablation: with the same cleared environment and the key removed from `.env`, the worker reports it absent.
 
-The fourth and fifth cover the secondmate path, where the home has no `.env` and nothing seeds one while its crewmate briefs still carry the inherited narrowing.
+The fourth, fifth, and sixth cover the secondmate path, where the home has no `.env` of its own and nothing seeds one while its crewmate briefs still carry the inherited narrowing.
 The fourth spawns with `FM_PUBLIC_FOLLOWUP_PRIMARY_HOME` set - the environment a secondmate's own crewmate spawn runs in - and checks three things at once: the primary's credentials arrive byte-exact, the spawn names the primary's `.env` path on stderr without printing any value, and `FMX_PAIRING_TOKEN` still does not cross, because that token is the primary home's relay consent.
-The fifth writes a local `.env` in the same shape and checks that it wins whole: a name only the primary declares does not appear, and nothing is announced.
+
+The fifth and sixth are the delivery gate, ablated in both directions, because the gate is what decides which file the spawn loads.
+The fifth gives the home a `.env` that exists and delivers nothing - X mode's documented shape, holding only `FMX_PAIRING_TOKEN`, and then a comment-only file - and requires that neither suppresses the fallback: the worker still ends up with the primary's credentials, the fallback is still announced, and the local file's relay token still does not cross.
+The sixth writes a local `.env` that really exports a name and requires the opposite: it wins whole, a name only the primary declares does not appear, and nothing is announced.
+Which file won is proven by giving the local and primary files the same name with different invented fake values; the pane probe reports only a match token, so no value is printed by either side of the comparison.
 
 The last case records the boundary of the ablation rather than an aspiration.
 While a machine-wide copy of a name is still set, that copy does satisfy a key `.env` no longer declares, so the ablation guarantee holds only once those copies are actually cleared.
@@ -76,6 +81,7 @@ ok - fm-worker-env-lib.sh: a .env cannot rewrite the shell it loads into
 ok - fm-worker-env-lib.sh: a .env cannot redirect the interpreters the worker starts
 ok - fm-worker-env-lib.sh: only a heap-size NODE_OPTIONS value crosses, and a refusal names no value
 ok - fm-worker-env-lib.sh: the exportable count is exactly what a worker would get
+ok - fm-worker-env-lib.sh: the delivering .env is resolved once, for every caller
 ok - fm-worker-env-lib.sh: no credential value is printed, on any path
 ok - fm-worker-env-lib.sh: the declared .env value wins over a stale ambient copy
 ok - fm-worker-env-lib.sh: an absent .env loads nothing and reports no error
@@ -86,6 +92,9 @@ The interpreter case is the same rule as the shell one, one level down: `GIT_SSH
 
 The count case exists because `bin/fm-brief.sh` has to know whether a home's `.env` would give a worker anything before it tells that worker its variables are simply there.
 It asks this library rather than re-deriving the rules, so an X-mode-only `.env` holding just `FMX_PAIRING_TOKEN` counts zero and the brief says nothing about a file the worker never received.
+
+The resolution case is the same question one level up, and it has one owner because three places used to answer it separately: the file a spawn loads, the paragraph a brief renders about where credentials live, and the sentence a brief writes about where a missing one should have come from.
+`fm_worker_env_resolve` returns the local `.env` when that file delivers at least one worker credential, the primary home's when it does not and the primary's does, and the local path with origin `none` when neither delivers - never a primary that would supply nothing, because announcing such a fallback is the same misleading claim in a different place.
 
 Every case runs under both bash and zsh.
 That is not redundancy: an earlier revision held the refused-name list in a string and looped over it unquoted, which bash word-splits and zsh does not, so under zsh the loop matched nothing and exported `PATH` straight out of the file while bash correctly refused it.
@@ -112,3 +121,5 @@ The last two rows are cases in `tests/fm-brief.test.sh`, because the claim they 
 | Allow `NODE_OPTIONS` by name instead of by value | `a NODE_OPTIONS value carrying --require reached the worker` |
 | Gate the brief's location paragraph on the file existing | `brief promised loaded variables for a .env that puts nothing into a worker's environment` |
 | Leave the unset-key sentence unnarrowed | `narrowed brief did not scope the unset-key trigger to the keys the vault holds` |
+| Resolve on the local `.env` existing instead of delivering | `an X-mode-only local .env suppressed the fallback, so an X-mode lane's workers had no credentials` |
+| Name a local `.env` when the primary's is the file being loaded | `brief blamed a local .env for a credential its worker gets from the primary's` |

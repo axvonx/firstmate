@@ -9,10 +9,13 @@
 # Usage:
 #   . <root>/bin/fm-worker-env-lib.sh && fm_worker_env_load <home>/.env
 #   . <root>/bin/fm-worker-env-lib.sh && fm_worker_env_exportable_count <home>/.env
+#   . <root>/bin/fm-worker-env-lib.sh && fm_worker_env_resolve <home> [<primary>]
 #
 # The second form answers "would a worker get anything from this file?" without
-# loading it, and is how bin/fm-brief.sh keeps a generated brief's claim about
-# where credentials live tied to this file's own eligibility rules.
+# loading it. The third builds on it to answer "which file will actually deliver
+# this home's worker credentials?", and is the single owner of that answer:
+# bin/fm-spawn.sh loads what it names and bin/fm-brief.sh describes what it
+# names, so a brief cannot promise one source while a spawn reads another.
 #
 # Deliberately NOT sourced into a crewmate's pane shell, though that was the
 # first design: pane shells are whatever login shell the operator runs, this
@@ -241,4 +244,49 @@ fm_worker_env_exportable_count() {
   FM_WORKER_ENV_COUNT=0
   fm_worker_env_each "${1:-}" fm_worker_env_count_pair 2>/dev/null
   printf '%s\n' "$FM_WORKER_ENV_COUNT"
+}
+
+FM_WORKER_ENV_FILE=""
+FM_WORKER_ENV_ORIGIN=none
+
+# fm_worker_env_resolve <home> [primary-home] - decide which `.env` will actually
+# deliver worker credentials for <home>, and set FM_WORKER_ENV_FILE (the path a
+# spawn hands the wrapper) and FM_WORKER_ENV_ORIGIN (local, primary, or none).
+#
+# One question, one owner, one answer. Every caller that used to ask its own
+# version of it - the launch wrapper's path, the primary-home fallback, and the
+# two claims a generated brief makes about where credentials come from - now
+# reads this, so a brief cannot describe one file while a spawn loads another.
+#
+# The predicate is DELIVERY, not existence, and that distinction is the whole
+# reason this function exists. A `.env` can be present and give a worker nothing:
+# X mode's documented shape is a file holding only FMX_PAIRING_TOKEN, which is
+# deliberately never exported, and a comment-only or empty file reads the same
+# way. Gating on the file being there would then suppress the fallback and strand
+# every crewmate on that lane silently - the exact fleet-wide failure the
+# fallback was added to prevent. Asking the loader's own count instead means any
+# file that really exports something keeps winning, which is how a home that
+# wants its workers isolated from the primary's credentials gets that.
+#
+# A primary that delivers nothing is not chosen either: falling back to it would
+# announce a source that supplies no credential, which is the same misleading
+# claim one level over. That case resolves to the local path unchanged, with
+# origin `none`, so a worker is told nothing about where its credentials live
+# rather than something untrue.
+# shellcheck disable=SC2034 # Both outputs are read by the sourcing callers.
+fm_worker_env_resolve() {
+  local home=${1:-} primary=${2:-}
+  FM_WORKER_ENV_FILE="$home/.env"
+  FM_WORKER_ENV_ORIGIN=none
+  [ -n "$home" ] || { FM_WORKER_ENV_FILE=""; return 0; }
+  if [ "$(fm_worker_env_exportable_count "$FM_WORKER_ENV_FILE")" -gt 0 ]; then
+    FM_WORKER_ENV_ORIGIN=local
+    return 0
+  fi
+  [ -n "$primary" ] && [ "$primary" != "$home" ] || return 0
+  if [ "$(fm_worker_env_exportable_count "$primary/.env")" -gt 0 ]; then
+    FM_WORKER_ENV_FILE="$primary/.env"
+    FM_WORKER_ENV_ORIGIN=primary
+  fi
+  return 0
 }

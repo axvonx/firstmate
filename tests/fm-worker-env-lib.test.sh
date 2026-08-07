@@ -65,6 +65,22 @@ probe_count() {
   rm -f "$runner"
 }
 
+# Ask which file will actually deliver a home's worker credentials. Echoes
+# "<origin> <path>", the two answers every caller of this library reads.
+#   probe_resolve <shell> <home> [primary-home]
+probe_resolve() {
+  local shell=$1 home=$2 primary=${3:-} runner
+  runner="$TMP_ROOT/probe-resolve.$$.sh"
+  {
+    printf '. %s\n' "$(printf '%q' "$LIB")"
+    printf 'fm_worker_env_resolve %s %s\n' "$(printf '%q' "$home")" "$(printf '%q' "$primary")"
+    # shellcheck disable=SC2016  # a script for the CHILD shell: it must expand there
+    printf 'printf "%%s %%s\\n" "$FM_WORKER_ENV_ORIGIN" "$FM_WORKER_ENV_FILE"\n'
+  } > "$runner"
+  env -i HOME="$HOME" PATH="$PATH" "$shell" "$runner" 2>&1
+  rm -f "$runner"
+}
+
 # Report whether a name arrived, never what it holds.
 # shellcheck disable=SC2016  # a script for the CHILD shell: it must expand there, not here
 SET_REPORT='for k in OPENAI_API_KEY ANTHROPIC_API_KEY HF_TOKEN FMX_PAIRING_TOKEN FM_CHECK_INTERVAL PATH_MARKER; do
@@ -317,6 +333,81 @@ EOF
   pass "fm-worker-env-lib.sh: the exportable count is exactly what a worker would get"
 }
 
+# One question with one owner: which file will actually deliver this home's
+# worker credentials. bin/fm-spawn.sh loads what this answers and bin/fm-brief.sh
+# describes what this answers, so a brief cannot promise one source while a spawn
+# reads another.
+#
+# The predicate is DELIVERY, not existence, and that is the whole point. A .env
+# can be present and give a worker nothing - X mode's documented shape is a file
+# holding only FMX_PAIRING_TOKEN, and a comment-only file reads the same way - so
+# a presence test would suppress the fallback and strand every crewmate on that
+# lane silently, which is the failure the fallback exists to prevent.
+test_resolution_follows_delivery_not_file_existence() {
+  local home primary out shell
+  home="$TMP_ROOT/resolve-home"
+  primary="$TMP_ROOT/resolve-primary"
+  mkdir -p "$home" "$primary"
+  write_env "$primary/.env" <<EOF
+OPENAI_API_KEY=$FAKE_B
+EOF
+  for shell in $LOADER_SHELLS; do
+    command -v "$shell" >/dev/null 2>&1 || continue
+
+    # A local file that really exports something wins - the isolation case.
+    write_env "$home/.env" <<EOF
+OPENAI_API_KEY=$FAKE_A
+EOF
+    out=$(probe_resolve "$shell" "$home" "$primary")
+    [ "$out" = "local $home/.env" ] \
+      || fail "$shell: a delivering local .env did not win: $out"
+
+    # Present but delivering nothing, in each shape that reaches a real home.
+    write_env "$home/.env" <<EOF
+FMX_PAIRING_TOKEN=fake-pairing-token-not-a-real-token
+EOF
+    out=$(probe_resolve "$shell" "$home" "$primary")
+    [ "$out" = "primary $primary/.env" ] \
+      || fail "$shell: an X-mode-only local .env suppressed the fallback and stranded the lane: $out"
+
+    write_env "$home/.env" <<EOF
+# nothing but a comment
+
+EOF
+    out=$(probe_resolve "$shell" "$home" "$primary")
+    [ "$out" = "primary $primary/.env" ] \
+      || fail "$shell: a comment-only local .env suppressed the fallback: $out"
+
+    rm -f "$home/.env"
+    out=$(probe_resolve "$shell" "$home" "$primary")
+    [ "$out" = "primary $primary/.env" ] \
+      || fail "$shell: a home with no .env at all did not read its primary's: $out"
+
+    # A primary that delivers nothing is not chosen: announcing a source that
+    # supplies no credential is the same misleading claim one level over.
+    write_env "$primary/.env" <<EOF
+FMX_PAIRING_TOKEN=fake-pairing-token-not-a-real-token
+EOF
+    out=$(probe_resolve "$shell" "$home" "$primary")
+    [ "$out" = "none $home/.env" ] \
+      || fail "$shell: resolution fell back to a primary that delivers nothing: $out"
+
+    # No primary at all is the ordinary single-home case, not an error.
+    out=$(probe_resolve "$shell" "$home")
+    [ "$out" = "none $home/.env" ] \
+      || fail "$shell: a home with no primary did not resolve to its own path: $out"
+
+    write_env "$primary/.env" <<EOF
+OPENAI_API_KEY=$FAKE_B
+EOF
+    # A home that IS its own primary must not be reported as inheriting.
+    out=$(probe_resolve "$shell" "$primary" "$primary")
+    [ "$out" = "local $primary/.env" ] \
+      || fail "$shell: a primary home resolved as if it were inheriting from itself: $out"
+  done
+  pass "fm-worker-env-lib.sh: the delivering .env is resolved once, for every caller"
+}
+
 # The single hardest requirement: this runs in the pane the agent reads, and
 # everything in that pane is sent to a model provider. A malformed line is
 # exactly the case where a naive loader prints a value - `set -a; . file` hands
@@ -399,6 +490,7 @@ test_shell_hijacking_names_are_refused
 test_interpreter_hijacking_names_are_refused
 test_node_options_value_is_allowlisted
 test_exportable_count_follows_the_same_eligibility_rules
+test_resolution_follows_delivery_not_file_existence
 test_no_value_is_ever_printed
 test_declared_value_wins_over_ambient
 test_absent_file_is_not_an_error

@@ -102,14 +102,17 @@
 # belongs in the conditional parts below, because a brief that says two different
 # things about that is worse than either version alone - a worker follows
 # whichever it read last.
-# The second part renders only when the home's .env would really put a name into
-# a worker's environment - the loader's own eligibility count
-# (bin/fm-worker-env-lib.sh), not merely the file existing, so an X-mode-only
-# .env holding just FMX_PAIRING_TOKEN renders nothing rather than promising
-# variables that were never loaded. It says where the values are, that the file
-# is mode 600 and gitignored, that it is never committed or copied into a
-# project, and that a worker tests a variable rather than opening the file to
-# look at a value.
+# The second part renders only when some .env will really put a name into a
+# worker's environment, and it names the file that will. Both come from
+# fm_worker_env_resolve (bin/fm-worker-env-lib.sh), the same call bin/fm-spawn.sh
+# makes to pick the file it loads, so the brief and the spawn cannot disagree.
+# The test is DELIVERY, not existence: an X-mode-only .env holding just
+# FMX_PAIRING_TOKEN loads nothing, so it renders nothing rather than promising
+# variables that were never loaded, and a home whose own file delivers nothing
+# reads its primary's, which this part then names as the primary's rather than as
+# its own. It says where the values are, that the file is mode 600 and gitignored,
+# that it is never committed or copied into a project, and that a worker tests a
+# variable rather than opening the file to look at a value.
 # The third is the vault call pattern, and it renders only when `av` (Automic
 # Vault) is on PATH at scaffold time, so a machine without the vault keeps the
 # first parts and is never told to reach for a tool it does not have.
@@ -135,8 +138,11 @@
 # not - and would send the worker to a vault that does not hold it, ending in a
 # stop-and-report that names a vault failure as the cause of a missing `.env`
 # value. Narrowed, that trigger covers only the declared names, and an unset
-# credential outside them is reported as the missing credential it is, with the
-# home's `.env` named as where it should have come from.
+# credential outside them is reported as the missing credential it is. Where that
+# credential should have come from is read off the same fm_worker_env_resolve
+# answer the location paragraph uses - this home's `.env`, the primary's, or no
+# file named at all when nothing delivers - so the brief never sends a worker
+# looking for a file that does not exist or is not the one being loaded.
 # That gate proves only that something named `av` is there, and other tools ship
 # a command by the same name, so the vault half opens with an identity probe the
 # worker actually runs before reaching for the tool:
@@ -439,17 +445,27 @@ CREDENTIALS_RULE=${CREDENTIALS_RULE%$'\n'}
 # looking for it. fm-spawn.sh loads it around the worker's launch
 # (bin/fm-worker-env-lib.sh); this half of the rule is what stops a worker from
 # committing it or reading it out to look at a value.
-# The gate is the loader's own eligibility count rather than `[ -f ]`, because a
-# file that declares only FM_*/FMX_* names - an X-mode-only .env holding just
-# FMX_PAIRING_TOKEN is the documented shape - loads nothing into a worker, and
-# telling that worker its variables are simply there would be a false statement
-# in a generated brief.
-if [ "$(fm_worker_env_exportable_count "$FM_HOME/.env")" -gt 0 ]; then
+# The gate is fm_worker_env_resolve, the same call bin/fm-spawn.sh makes to pick
+# the file it actually loads, so the brief describes the file a worker really
+# gets. It turns on DELIVERY rather than existence: a .env that declares only
+# FM_*/FMX_* names - an X-mode-only file holding just FMX_PAIRING_TOKEN is the
+# documented shape - loads nothing into a worker, and a home whose own file
+# delivers nothing reads its primary's instead, which is what this paragraph then
+# has to name. Telling a worker its variables are simply there, or naming the
+# wrong file, are the same false statement in a generated brief.
+fm_worker_env_resolve "$FM_HOME" "${FM_PUBLIC_FOLLOWUP_PRIMARY_HOME:-}"
+if [ "$FM_WORKER_ENV_ORIGIN" != none ]; then
+  if [ "$FM_WORKER_ENV_ORIGIN" = primary ]; then
+    ENV_LOCATION_SENTENCE="   The values live in one mode-600 gitignored \`.env\` in the primary firstmate home, which this home reads because its own declares no credential, and firstmate loads it into your environment when it launches you, so the variables are simply there for you to use."
+  else
+    ENV_LOCATION_SENTENCE="   The values live in one mode-600 gitignored \`.env\` in the firstmate home, and firstmate loads it into your environment when it launches you, so the variables are simply there for you to use."
+  fi
   IFS= read -r -d '' CREDENTIALS_LOCATION <<'EOF' || true
-   The values live in one mode-600 gitignored `.env` in the firstmate home, and firstmate loads it into your environment when it launches you, so the variables are simply there for you to use.
+__ENV_LOCATION_SENTENCE__
    Never commit that file, never copy it or its contents into a project, a fixture, or an image, and never add it to a repository's tracked files - the reason it is safe to keep credentials in your environment at all is that this one file stays out of every repo.
    Never open it to see what a value is: test the variable instead, the same way you would test any other credential.
 EOF
+  CREDENTIALS_LOCATION=${CREDENTIALS_LOCATION//__ENV_LOCATION_SENTENCE__/$ENV_LOCATION_SENTENCE}
   CREDENTIALS_RULE="$CREDENTIALS_RULE"$'\n'"${CREDENTIALS_LOCATION%$'\n'}"
 fi
 # Which credentials the vault discipline actually covers. This repo is a shared
@@ -528,10 +544,21 @@ EOF
   # should have come from the environment and did not - and routes it into a
   # vault that does not hold it, so the worker stops on a blocker it can never
   # clear, naming a vault failure as the cause of a missing `.env` value.
+  # Where an unset non-vaulted credential SHOULD have come from is the same
+  # question the location paragraph answers, so it is read off the same
+  # resolution rather than assuming a local file. A home reading its primary's
+  # says so, and a home nothing delivers to names no file at all instead of one
+  # that does not exist. The actionable half - report it, never call `av`, never
+  # report a vault failure - does not vary.
+  case "$FM_WORKER_ENV_ORIGIN" in
+    local) ENV_PROVENANCE_CLAUSE=" it should have arrived from this home's \`.env\`, which firstmate loads into your environment when it launches you, so" ;;
+    primary) ENV_PROVENANCE_CLAUSE=" it should have arrived from the primary firstmate home's \`.env\`, which this home reads and firstmate loads into your environment when it launches you, so" ;;
+    *) ENV_PROVENANCE_CLAUSE="" ;;
+  esac
   if [ -n "$VAULT_ONLY_KEYS" ]; then
     VAULT_REACH_SENTENCE="   A vaulted credential is deliberately absent from your environment, so a command that needs one names it at the call site: \`av inject +SERVICE_API_KEY +OTHER_TOKEN -- pnpm run benchmark\`."
     VAULT_NAMING_SENTENCE="   Name only the vaulted keys YOUR task actually needs instead of copying that example, and reach every other credential straight from the environment; \`av help\` covers the rest."
-    VAULT_UNSET_SENTENCE="   An authentication failure, or an unset value for one of those vaulted names, is the signal that a command needs \`av inject\`; it is never a reason to hunt for the value, read it out of a config file, or ask for it to be pasted to you."$'\n'"   An unset credential that is NOT one of those names is a missing credential and nothing more: it should have arrived from this home's \`.env\`, which firstmate loads into your environment when it launches you, so append \`blocked: {which credential is missing}\` to the status file and stop there - never call \`av\` for it, and never report it as a vault failure, which would name a cause it has nothing to do with."
+    VAULT_UNSET_SENTENCE="   An authentication failure, or an unset value for one of those vaulted names, is the signal that a command needs \`av inject\`; it is never a reason to hunt for the value, read it out of a config file, or ask for it to be pasted to you."$'\n'"   An unset credential that is NOT one of those names is a missing credential and nothing more:${ENV_PROVENANCE_CLAUSE} append \`blocked: {which credential is missing}\` to the status file and stop there - never call \`av\` for it, and never report it as a vault failure, which would name a cause it has nothing to do with."
   else
     VAULT_REACH_SENTENCE="   Credentials belong in Automic Vault rather than the ambient environment, so any command that authenticates or spends money names the keys it needs at the call site: \`av inject +SERVICE_API_KEY +OTHER_TOKEN -- pnpm run benchmark\`."
     VAULT_NAMING_SENTENCE="   Name the keys YOUR task actually needs instead of copying that example - \`av list\` shows the names this machine holds, and \`av help\` covers the rest."
