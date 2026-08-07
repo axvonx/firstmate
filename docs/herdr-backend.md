@@ -2,6 +2,7 @@
 
 Herdr is an experimental agent-native terminal backend with native per-pane agent state and push events.
 Firstmate requires Herdr protocol 14 or newer; versions 0.7.1, 0.7.3, 0.7.4, and 0.7.5 are verified, with protocol-16 features enabled only when available.
+Composer classification is additionally verified read-only against 0.8.0, while lifecycle, projection, and event evidence stops at 0.7.5.
 Herdr provides the terminal session while Treehouse continues to provide task worktrees.
 [`configuration.md`](configuration.md#runtime-backend-configbackend--fm_backend) owns shared backend selection and metadata semantics.
 
@@ -215,7 +216,8 @@ A Claude or Codex pane with an incomplete pair classifies normally from its own 
 
 The Pi family is one predicate, `fm_backend_herdr_agent_is_pi`, covering `pi`, `pi-signed`, `pi-launcher`, and `Pi`, matching the set the tmux adapter recognizes.
 Both readings of the separator geometry consult it, so the admit side and the demote side cannot drift apart again.
-Herdr 0.8.0 reports only `pi` for a Pi pane, so the wider set changes nothing measured today; if a future Herdr manifest reports `pi-signed`, that pane gains the Pi accept arm and reads as a separated composer when its pair is complete and it is idle, done, or blocked, where it previously read unknown.
+Herdr 0.8.0's agent-kind vocabulary and on-disk detection manifests carry `pi` and no `pi-signed`, so the wider set changes nothing measured today, though no live Pi pane was available to read the reported name directly ([`verification/runtime-backends.md`](verification/runtime-backends.md#reported-agent-name-for-a-signed-pi-target)).
+If a future Herdr manifest reports `pi-signed`, that pane gains the Pi accept arm and reads as a separated composer when its pair is complete and it is idle, done, or blocked, where it previously read unknown.
 
 A separator row found below the recognized bordered or bare row is Pi-shaped evidence and is scoped to Pi-family targets.
 Claude draws its own composer between two full-width rules and decorates the opening rule with a mode badge, so the pair never completes and the closing rule sits below the `❯` row it belongs to.
