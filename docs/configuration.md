@@ -391,7 +391,8 @@ The pairing token both identifies the relay tenant and records opt-in consent fo
 Destructive, irreversible, or security-sensitive asks are flagged for trusted-channel confirmation instead of being executed from a public mention.
 The relay uses owner-only routing: a mention delivered to a home is from that home's owner/captain, while parent-thread context may still include other public accounts.
 `FMX_RELAY_URL` is optional and defaults to `https://myfirstmate.io`, mainly for developers pointing at a local relay.
-For direct client invocations, environment values override `.env`; bootstrap activation still keys off `.env` presence so watcher artifacts are explicit local opt-in state.
+For direct client invocations, environment values override `.env`; bootstrap activation still keys off the token written in `.env` and ignores an ambient one, so watcher artifacts are explicit local opt-in state.
+Since that file also holds the home's worker credentials, its presence never activates anything: a `.env` with credentials and no `FMX_PAIRING_TOKEN` leaves X mode off and writes no artifacts.
 `FMX_ENV_FILE` can point direct poll/reply client invocations at another `.env`-style file, but it does not change bootstrap activation.
 
 The locked session-start bootstrap step turns the token into local generated state.

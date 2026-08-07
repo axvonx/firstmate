@@ -91,6 +91,9 @@ total_ns=69694000 per_call_us=69
 
 Roughly 0.07 ms per session start, from a single `[ -f "$FM_HOME/.env" ]` test that returns false before anything else runs.
 
+That figure is the file-absent path. A home's worker credentials now live in that same `.env` ([configuration.md](../configuration.md#worker-credentials-env)), so a relay-disabled home normally has the file and the predicate reads it for `FMX_PAIRING_TOKEN` instead of short-circuiting on absence.
+Activation is still the non-empty token and never the file's presence, so the zero-overhead result above is unchanged; only the measured cost of the predicate is.
+
 ## Compatibility axes reviewed
 
 Primary harnesses (`claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, `kimi`): not applicable after inspection.

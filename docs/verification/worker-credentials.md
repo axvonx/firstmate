@@ -2,12 +2,13 @@
 
 Audience: maintainer verification.
 
-This record supports four active guarantees for the credentials a crewmate reaches:
+This record supports five active guarantees for the credentials a crewmate reaches:
 
 1. A worker gets its firstmate home's `.env` credentials even when nothing on the machine sets them, and gets them byte-exact.
 2. A credential the home does not declare is genuinely absent for the worker, rather than being satisfied from somewhere else.
 3. A home whose own `.env` delivers no worker credential reads its primary's, announced on stderr, and its own file wins whenever it actually delivers one.
 4. No credential value is printed on any path, including when the file cannot be parsed.
+5. The brief a worker reads states one position on where its credentials live, in every combination of the inputs that assemble the rule.
 
 [`docs/configuration.md`](../configuration.md#worker-credentials-env) owns the operator-facing contract, `bin/fm-worker-env-lib.sh` owns the parser and eligibility rules, and `bin/fm-worker-env-exec.sh` owns the delivery mechanism.
 Task chronology stays outside this record.
@@ -107,6 +108,24 @@ One interpreter could not see the defect.
 The no-print guarantee is why the file is parsed here rather than sourced.
 `set -a; . file` hands the file to the shell, and a shell reports a syntax error by echoing the offending line - which is a credential value, printed into the pane an agent reads and therefore into a model provider's transcript.
 This parser reports an unusable line by line number only.
+
+## One position on where credentials live
+
+The rule a crewmate actually reads is assembled from three independent inputs - whether the resolved `.env` delivers, whether `av` is installed, and whether `config/vault-only-keys` declares a split - and both contradictions it has produced arrived in a combination nobody had rendered.
+The whole matrix is therefore enumerated rather than spot-checked:
+
+```sh
+bash tests/fm-brief.test.sh 2>/dev/null | grep -E '^ok .*(credential|vault)'
+```
+
+```
+ok - fm-brief.sh: ship and scout briefs teach vault-backed credential access and never print a value
+ok - fm-brief.sh: the vault rule covers exactly the keys a home declares vault-only
+ok - fm-brief.sh: every credential-rule combination states one position on where credentials live
+```
+
+The last case renders all 16 combinations of those inputs and pins which way each resolves, not merely that none contradicts itself: the location paragraph appears wherever a delivering `.env` meets a vault rule that is absent or narrowed, and is withheld everywhere else - including the unnarrowed vault rule, which already claims every credential for the vault and forbids falling back to the environment.
+It also asserts that all 16 actually rendered, because a combination that silently fails to scaffold proves nothing.
 
 ## Mutation checks
 
