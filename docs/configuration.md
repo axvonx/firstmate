@@ -322,6 +322,11 @@ An X-mode home's `.env` can hold only `FMX_PAIRING_TOKEN`, which is never export
 A primary whose own `.env` delivers nothing is not used either, because announcing a source that supplies no credential is the same misleading claim one level over.
 The `FM_*`/`FMX_*` exclusion below applies on the inherited path exactly as it does on the local one, and matters more there: `FMX_PAIRING_TOKEN` is the primary home's relay consent and must not reach a secondmate's crewmate.
 
+A secondmate learns which home is its primary from `FM_PUBLIC_FOLLOWUP_PRIMARY_HOME`, which arrives on its launch command, so a secondmate agent launched before this fallback existed carries no pointer and its own crewmate spawns resolve to no credential source at all - no inherited file, no announcement, and no location paragraph in their briefs.
+That is repaired by respawning, not in place, so respawning secondmates is an ordered step before any machine-wide credential copies are cleared: list the registered secondmates with `grep -l '^kind=secondmate$' state/*.meta` - the same record shape the fleet's own live discovery uses - respawn every home that list names, and clear the ambient copies only afterwards.
+An empty list is the answer that no lane is affected.
+For a respawned secondmate that relies on the primary's file, the stderr line naming that `.env` path at its next crewmate spawn is the confirmation the pointer arrived; a secondmate whose own `.env` delivers credentials needs no pointer and prints none.
+
 This exists so credentials do not have to be set machine-wide.
 A `launchctl setenv` value is inherited by every process on the machine, which is both a broad exposure and a silent one - a worker gets the key whether or not firstmate intended it to.
 The pane's own long-lived provider daemon does not inherit firstmate's environment, so a per-home file has to be delivered explicitly, and this is that delivery.
