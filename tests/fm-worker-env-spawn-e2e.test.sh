@@ -120,13 +120,16 @@ EOF
 chmod +x "$PROBE"
 
 # Run one spawn in a scratch home and return the worker's report.
-#   spawn_and_report <case> <env-file-content|->
+#   spawn_and_report <case> <env-file-content|-> [primary-env-content]
 # The pane's environment comes from the `env -i` server started above, so no
 # credential can arrive by inheritance from the suite's own shell; a case that
 # wants an ambient credential back puts it on the server with `tmux setenv`.
+# A third argument builds a sibling PRIMARY home holding that .env and points the
+# spawn at it through FM_PUBLIC_FOLLOWUP_PRIMARY_HOME, which is exactly the
+# environment a secondmate's own crewmate spawn runs in.
 spawn_and_report() {
-  local case_name=$1 env_content=$2; shift 2
-  local home id report waited
+  local case_name=$1 env_content=$2 primary_content=${3:-}; shift 2
+  local home id report waited primary_home=""
   home="$TMP_ROOT/home-$case_name"
   id="wenv$case_name"
   report="$TMP_ROOT/report-$case_name"
@@ -136,12 +139,25 @@ spawn_and_report() {
     printf '%s' "$env_content" > "$home/.env"
     chmod 600 "$home/.env"
   fi
+  if [ -n "$primary_content" ]; then
+    primary_home="$TMP_ROOT/primary-$case_name"
+    mkdir -p "$primary_home"
+    printf '%s' "$primary_content" > "$primary_home/.env"
+    chmod 600 "$primary_home/.env"
+  fi
 
+  # `env -i` is here to strip CREDENTIALS, so the one test-harness fact the spawn
+  # needs is carried across it explicitly: without the gate-lifecycle bypass
+  # (tests/lib.sh, bin/fm-gate-refuse-lib.sh) this suite refuses to spawn at all
+  # when firstmate validates itself from a gate worktree, which is precisely where
+  # it has to keep proving that credentials still reach a worker.
   env -i HOME="$HOME" PATH="$PATH" TERM=xterm TMUX_TMPDIR="$TMUX_TMPDIR" \
     XDG_CONFIG_HOME="$SCRATCH_XDG" \
+    FM_GATE_REFUSE_BYPASS="${FM_GATE_REFUSE_BYPASS:-}" \
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_CONFIG_OVERRIDE="$home/config" FM_PROJECTS_OVERRIDE="$home/projects" \
+    FM_PUBLIC_FOLLOWUP_PRIMARY_HOME="$primary_home" \
     FM_SPAWN_NO_GUARD=1 \
     "$ROOT/bin/fm-spawn.sh" "$id" "$PROJ" "sh $PROBE $report" \
     > "$TMP_ROOT/spawn-$case_name.out" 2> "$TMP_ROOT/spawn-$case_name.err" \
@@ -204,6 +220,64 @@ test_home_without_env_still_spawns() {
   pass "fm-spawn.sh: a home with no .env still spawns, with no credentials and no error"
 }
 
+# A secondmate home has no .env of its own, and nothing seeds one - but it DOES
+# inherit config/vault-only-keys, so its crewmate briefs carry the narrowed rule
+# that tells a worker its non-vaulted credentials are already in its environment.
+# Without this fallback that promise is empty on every secondmate lane at once,
+# which is the fleet-wide failure the narrowing exists to prevent. The
+# announcement is part of the contract: an inherited credential source is a fact
+# about who can reach what, and a silent one would be discoverable only by
+# ablation.
+test_secondmate_home_reads_the_primary_env() {
+  local out err
+  out=$(spawn_and_report inherited - \
+    "$CRED_A=$FAKE_A
+$CRED_B='$FAKE_B'
+FMX_PAIRING_TOKEN=fake-pairing-token-not-a-real-token
+")
+  assert_contains "$out" "$CRED_A=set" \
+    "a home with no .env of its own got no credential from its primary - every secondmate lane would be stranded"
+  assert_contains "$out" "$CRED_A=exact" \
+    "the primary's credential reached the worker mangled"
+  assert_contains "$out" "$CRED_B=set" \
+    "only one of the primary's credentials crossed"
+  # The exclusion matters MORE across this boundary: the token is the PRIMARY
+  # home's relay consent, so a secondmate's crewmate holding it could post in
+  # public as the captain (AGENTS.md section 14).
+  assert_contains "$out" "FMX_PAIRING_TOKEN=unset" \
+    "the primary home's relay consent token crossed into a secondmate's crewmate"
+
+  err=$(cat "$TMP_ROOT/spawn-inherited.err")
+  assert_contains "$err" "$TMP_ROOT/primary-inherited/.env" \
+    "reading the primary home's .env was not announced, so an inherited credential source is invisible"
+  assert_not_contains "$err" "$FAKE_A" \
+    "the fallback announcement printed a credential value"
+  assert_not_contains "$err" "$FAKE_B" \
+    "the fallback announcement printed a credential value"
+  pass "fm-spawn.sh: a home with no .env of its own reads its primary's, and says so"
+}
+
+# The isolation path stays available: a home that wants its own credentials writes
+# its own .env, and that file wins whole - the primary's is not consulted at all,
+# so a name only the primary declares does not quietly appear.
+test_local_env_wins_over_the_primary_env() {
+  local out err
+  out=$(spawn_and_report localwins \
+    "$CRED_A=$FAKE_A
+" \
+    "$CRED_A=stale-primary-value-not-a-real-key
+$CRED_B=$FAKE_B
+")
+  assert_contains "$out" "$CRED_A=exact" \
+    "the primary's value shadowed the home's own declared credential"
+  assert_contains "$out" "$CRED_B=unset" \
+    "a name only the primary declares reached a worker whose home has its own .env"
+  err=$(cat "$TMP_ROOT/spawn-localwins.err")
+  assert_not_contains "$err" "primary-localwins/.env" \
+    "a home with its own .env still announced reading the primary's"
+  pass "fm-spawn.sh: a home's own .env wins over its primary's, with no fallback announced"
+}
+
 # The honest limitation, asserted rather than assumed: while the machine-wide
 # values are still set, an ambient copy DOES satisfy a key that .env no longer
 # declares. That is the pre-cleanup state, and it is exactly why the ablation
@@ -224,4 +298,6 @@ test_ambient_copy_still_wins_before_cleanup() {
 test_worker_has_credentials_with_machine_wide_values_cleared
 test_missing_key_is_missing_not_silently_satisfied
 test_home_without_env_still_spawns
+test_secondmate_home_reads_the_primary_env
+test_local_env_wins_over_the_primary_env
 test_ambient_copy_still_wins_before_cleanup

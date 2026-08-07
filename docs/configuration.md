@@ -313,7 +313,11 @@ Keep it mode `600`, and never commit it or copy its contents into a project, a f
 
 Every spawn runs the worker's launch command under `bin/fm-worker-env-exec.sh`, which loads `$FM_HOME/.env` and then execs the launch, so the agent and every child it starts inherit the home's credentials.
 Values never appear on a command line, in the pane text, in `ps` output, or in a task's metadata record, and nothing on this path prints a value under any condition.
-A home with no `.env` loads nothing and is not an error; a worker that lacks a key it needs reports the missing credential through its brief's stop-and-report path.
+A home with no `.env` and no primary to fall back to loads nothing and is not an error; a worker that lacks a key it needs reports the missing credential through its brief's stop-and-report path.
+
+A secondmate home has no `.env` of its own, because nothing seeds one - so a home with none reads its primary's instead, and `bin/fm-spawn.sh` announces that path on stderr at spawn.
+A per-home `.env` remains the supported alternative for anyone who wants a secondmate's workers isolated from the primary's credentials: write one in that home and it wins whole whenever it exists, with the primary's never consulted.
+The `FM_*`/`FMX_*` exclusion below applies on the inherited path exactly as it does on the local one, and matters more there: `FMX_PAIRING_TOKEN` is the primary home's relay consent and must not reach a secondmate's crewmate.
 
 This exists so credentials do not have to be set machine-wide.
 A `launchctl setenv` value is inherited by every process on the machine, which is both a broad exposure and a silent one - a worker gets the key whether or not firstmate intended it to.
@@ -322,7 +326,9 @@ The pane's own long-lived provider daemon does not inherit firstmate's environme
 [`bin/fm-worker-env-lib.sh`](../bin/fm-worker-env-lib.sh) owns the parser and the eligibility rules.
 Two exclusions are contractual rather than incidental.
 `FM_*` and `FMX_*` names are never exported into a worker: `.env` also carries firstmate's own configuration, and `FMX_PAIRING_TOKEN` in particular is X mode's relay consent, which AGENTS.md section 14 reserves to the home that holds it rather than to its workers.
-Names that would rewrite the shell the values load into - `PATH`, `BASH_ENV`, `LD_PRELOAD`, `DYLD_*`, and similar - are refused outright.
+Names that would rewrite the shell the values load into - `PATH`, `BASH_ENV`, `LD_PRELOAD`, `DYLD_*`, and similar - are refused outright, along with the interpreter-level equivalents `GIT_SSH_COMMAND`, `PERL5LIB`, `PYTHONSTARTUP`, `RUBYOPT`, and `ZDOTDIR`.
+`NODE_OPTIONS` is allowed only when every whitespace-separated token is `--max-old-space-size=<digits>`, and the whole value is refused otherwise, so the deliberate heap-size setting keeps working while `--require`, `--import`, and `--experimental-loader` cannot load a file into every node process a worker starts.
+A refused value is reported on stderr by the name it was declared for and never by its content.
 A declared value wins over an already-set ambient one, so a stale machine-wide copy cannot silently shadow the file.
 
 The wrapper covers the launch, so an agent relaunched by hand in its own pane does not pass through it and starts without credentials once machine-wide values are gone.
@@ -337,7 +343,8 @@ It is LOCAL and gitignored, and it is inherited by secondmate homes under the co
 
 The file is what scopes the vault discipline in the credential rule that [`bin/fm-brief.sh`](../bin/fm-brief.sh) generates into every crewmate brief.
 Absent, the rule applies to every credential, which is the original unnarrowed contract and remains the default for any home that has not declared a split.
-Present, the rule names exactly those keys, applies the full vault discipline to them, and tells the worker to read every other credential straight from its environment with no vault call and no stop-and-report.
+Present, the rule names exactly those keys, applies the full vault discipline to them, and tells the worker to read every other credential straight from its environment with no vault call.
+That includes the trigger conditions: an authentication failure or an unset value means `av inject` only for the declared names, while an unset credential outside them is reported as the missing credential it is, with this home's `.env` named as where it should have come from.
 That last part is why the scoping matters: a worker told to reach through the vault for a key the vault does not hold stops on a blocker it can never clear, and because every lane reads the same generated rule they would all stop the same way at once.
 
 A present-but-empty file and an unusable name are both refused, and no brief is written.

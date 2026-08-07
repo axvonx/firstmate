@@ -140,10 +140,12 @@
 # stays the pane's own child. bin/fm-worker-env-lib.sh owns the parser and the
 # eligibility rules, including the FM_*/FMX_* exclusion that keeps X mode's
 # FMX_PAIRING_TOKEN with the home instead of handing it to its workers.
-# A home with no .env loads nothing, which is not an error: a worker that lacks a
-# key it needs reports the missing credential per its brief. An in-pane relaunch
-# of a wedged agent bypasses the wrapper and starts without credentials; respawn
-# through this script instead.
+# A home with no .env of its own falls back to its primary's, when it has one
+# (FM_PUBLIC_FOLLOWUP_PRIMARY_HOME, set for every secondmate), and announces that
+# path on stderr; a local .env always wins. A home with neither loads nothing,
+# which is not an error: a worker that lacks a key it needs reports the missing
+# credential per its brief. An in-pane relaunch of a wedged agent bypasses the
+# wrapper and starts without credentials; respawn through this script instead.
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> mode=<mode> yolo=<on|off> window=<backend-target> worktree=<path>
 # mode/yolo are resolved per-project from data/projects.md for ship/scout tasks;
 # secondmate spawns record mode=secondmate, yolo=off, home=, and projects=.
@@ -1795,7 +1797,27 @@ sleep 0.3
 # without credentials once the machine-wide values are gone. Recovering by
 # respawning through fm-spawn does not have that gap. Closing it properly needs a
 # shell-agnostic way to load a file into a live pane, which does not exist.
-LAUNCH="$(shell_quote "$FM_ROOT/bin/fm-worker-env-exec.sh") $(shell_quote "$FM_HOME/.env") -- $LAUNCH"
+#
+# A secondmate home has no .env of its own - nothing seeds one, and the inherited
+# config it does receive includes config/vault-only-keys, so its crewmate briefs
+# carry the narrowed rule that tells a worker its other credentials are already in
+# its environment. Without a fallback that promise is empty on every secondmate
+# lane at once, which is the same fleet-wide failure the narrowing exists to
+# prevent. So a home with no .env of its own reads its primary's, and says so on
+# stderr: an inherited credential source is a fact about who can reach what, and a
+# silent one would be found by ablation rather than by reading. A local .env
+# always wins when it exists, which is how a home that wants isolation gets it
+# (docs/configuration.md). The path is announced; no value is, here or anywhere
+# else on this path, and the FM_*/FMX_* exclusion in bin/fm-worker-env-lib.sh
+# matters more across this boundary than within a home: FMX_PAIRING_TOKEN is the
+# PRIMARY home's relay consent and must not reach a secondmate's crewmate.
+WORKER_ENV_FILE="$FM_HOME/.env"
+if [ ! -f "$WORKER_ENV_FILE" ] && [ -n "${FM_PUBLIC_FOLLOWUP_PRIMARY_HOME:-}" ] \
+  && [ -f "$FM_PUBLIC_FOLLOWUP_PRIMARY_HOME/.env" ]; then
+  WORKER_ENV_FILE="$FM_PUBLIC_FOLLOWUP_PRIMARY_HOME/.env"
+  echo "fm-spawn: no .env in $FM_HOME; loading worker credentials from the primary home's $WORKER_ENV_FILE" >&2
+fi
+LAUNCH="$(shell_quote "$FM_ROOT/bin/fm-worker-env-exec.sh") $(shell_quote "$WORKER_ENV_FILE") -- $LAUNCH"
 spawn_send_literal "$T" "$LAUNCH"
 sleep 0.3
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then

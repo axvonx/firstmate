@@ -43,6 +43,7 @@ Escalate in order:
 3. If the crewmate is confused or looping, interrupt with the adapter's interrupt key, then redirect with one corrective line.
    For example, for a single-Escape adapter: `FM_HOME=<this-firstmate-home> bin/fm-send.sh <window> --key Escape`.
 4. If the crewmate is genuinely wedged after redirection, exit the agent with the adapter's exit command and relaunch with the same brief plus a `progress so far` note appended to it.
+   An in-pane relaunch starts without the home's `.env` credentials because it never passes through `bin/fm-worker-env-exec.sh`, so for a task that uses credentials prefer a respawn through `bin/fm-spawn.sh` into the recorded worktree.
    Genuine wedging means looping, unresponsive, repeating the same obstacle, or truly dead.
    A low context reading is not wedging; modern harnesses auto-compact and keep going.
    A silent pane whose validation run is still advancing is not wedging either, however long it has been quiet: a pipeline step routinely holds a static pane for its whole length, and exiting that agent throws away the run.

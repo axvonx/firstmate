@@ -96,11 +96,20 @@
 # environment, and moving credentials out of a machine-wide `launchctl setenv`
 # and into a per-home .env that fm-spawn loads makes MORE keys reliably present
 # in a worker's environment, not fewer. The direct `echo $KEY` was never the
-# realistic failure; a command that prints a value nobody typed is.
-# The second part renders only when the home actually has a .env: it says where
-# the values are, that the file is mode 600 and gitignored, that it is never
-# committed or copied into a project, and that a worker tests a variable rather
-# than opening the file to look at a value.
+# realistic failure; a command that prints a value nobody typed is. Every
+# sentence of that part is worded to be true in both worlds, including the one
+# that frames the indirect risk: a claim about where THIS home's credentials live
+# belongs in the conditional parts below, because a brief that says two different
+# things about that is worse than either version alone - a worker follows
+# whichever it read last.
+# The second part renders only when the home's .env would really put a name into
+# a worker's environment - the loader's own eligibility count
+# (bin/fm-worker-env-lib.sh), not merely the file existing, so an X-mode-only
+# .env holding just FMX_PAIRING_TOKEN renders nothing rather than promising
+# variables that were never loaded. It says where the values are, that the file
+# is mode 600 and gitignored, that it is never committed or copied into a
+# project, and that a worker tests a variable rather than opening the file to
+# look at a value.
 # The third is the vault call pattern, and it renders only when `av` (Automic
 # Vault) is on PATH at scaffold time, so a machine without the vault keeps the
 # first parts and is never told to reach for a tool it does not have.
@@ -117,9 +126,17 @@
 # key has failed for no reason, and every lane would fail that way at once.
 # Present-but-empty and an unusable name are both hard errors rather than being
 # skipped, because either one would silently drop a key out of vault discipline.
-# The two sentences whose meaning differs between the narrowed and unnarrowed
+# The three sentences whose meaning differs between the narrowed and unnarrowed
 # forms are substituted into one shared body rather than the body being kept in
-# two copies that would drift.
+# two copies that would drift. The third is the one with a trigger condition, and
+# it is the reason the narrowing is not just a preamble: "an authentication
+# failure or an unset key means use `av inject`" fires on precisely the case the
+# narrowing exists for - a key that should have come from the environment and did
+# not - and would send the worker to a vault that does not hold it, ending in a
+# stop-and-report that names a vault failure as the cause of a missing `.env`
+# value. Narrowed, that trigger covers only the declared names, and an unset
+# credential outside them is reported as the missing credential it is, with the
+# home's `.env` named as where it should have come from.
 # That gate proves only that something named `av` is there, and other tools ship
 # a command by the same name, so the vault half opens with an identity probe the
 # worker actually runs before reaching for the tool:
@@ -191,6 +208,12 @@ esac
 . "$SCRIPT_DIR/fm-marker-lib.sh"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
+# For fm_worker_env_exportable_count only: whether this home's .env would put any
+# name into a worker's environment decides whether the brief may say so, and that
+# question has exactly one correct answer - the loader's. Nothing here loads the
+# file or sees a value.
+# shellcheck source=bin/fm-worker-env-lib.sh
+. "$SCRIPT_DIR/fm-worker-env-lib.sh"
 PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
 
 resolve_directory_input() {
@@ -401,7 +424,7 @@ IFS= read -r -d '' CREDENTIALS_RULE <<'EOF' || true
 8. Never print, echo, log, or paste the VALUE of an API key, token, or other credential - not into your pane, not into a file you write, and not into a commit, a status line, or a pull request body.
    Everything you print is sent to a model provider, so a printed credential is a leaked credential that has to be rotated.
    Refer to a credential by its variable name, and when you need to know whether one is set, test it (`[ -n "${SOME_API_KEY:-}" ]`) rather than printing it.
-   Most of the credentials you can reach are sitting in your environment, so the leak you are most likely to cause is INDIRECT: a command that prints a value you never typed.
+   Any credential that is in your environment makes the leak you are most likely to cause an INDIRECT one: a command that prints a value you never typed.
    Never dump the environment - no bare `env`, `printenv`, `export -p`, or `set` - and never write one into a file, a log, a paste, or a bug report; when you want to know about one variable, test that one variable by name.
    Never turn on shell tracing around a command that carries a credential: `set -x` and `bash -x` echo the expanded command line, so the command prints its own secret before it runs.
    Never run an authenticated request under `curl -v`, `--trace`, or `--trace-ascii`, because those print the request headers and the Authorization header is one of them; use `-s` and read the response body.
@@ -411,11 +434,17 @@ IFS= read -r -d '' CREDENTIALS_RULE <<'EOF' || true
    If a value does land in your pane, a file, or a commit despite all of this, stop immediately, append `blocked: {which credential leaked and where}` to the status file, and do not try to scrub it quietly - that key has to be rotated, and an unreported leak costs far more than a reported one.
 EOF
 CREDENTIALS_RULE=${CREDENTIALS_RULE%$'\n'}
-# Where the values actually are, stated only for a home that actually has the
-# file, so a home without one is never sent looking for it. fm-spawn.sh loads it
-# into the worker's pane shell (bin/fm-worker-env-lib.sh); this half of the rule
-# is what stops a worker from committing it or reading it out to look at a value.
-if [ -f "$FM_HOME/.env" ]; then
+# Where the values actually are, stated only for a home whose .env would really
+# put a name into a worker's environment, so a home without one is never sent
+# looking for it. fm-spawn.sh loads it around the worker's launch
+# (bin/fm-worker-env-lib.sh); this half of the rule is what stops a worker from
+# committing it or reading it out to look at a value.
+# The gate is the loader's own eligibility count rather than `[ -f ]`, because a
+# file that declares only FM_*/FMX_* names - an X-mode-only .env holding just
+# FMX_PAIRING_TOKEN is the documented shape - loads nothing into a worker, and
+# telling that worker its variables are simply there would be a false statement
+# in a generated brief.
+if [ "$(fm_worker_env_exportable_count "$FM_HOME/.env")" -gt 0 ]; then
   IFS= read -r -d '' CREDENTIALS_LOCATION <<'EOF' || true
    The values live in one mode-600 gitignored `.env` in the firstmate home, and firstmate loads it into your environment when it launches you, so the variables are simply there for you to use.
    Never commit that file, never copy it or its contents into a project, a fixture, or an image, and never add it to a repository's tracked files - the reason it is safe to keep credentials in your environment at all is that this one file stays out of every repo.
@@ -468,7 +497,7 @@ if command -v av >/dev/null 2>&1; then
   # would fail that way on every lane at once.
   if [ -n "$VAULT_ONLY_KEYS" ]; then
     IFS= read -r -d '' CREDENTIALS_VAULT_SCOPE <<EOF || true
-   Exactly these credentials are kept out of that file and out of your environment, and are reached through Automic Vault instead: $VAULT_ONLY_KEYS.
+   Exactly these credentials are deliberately kept out of your environment, and are reached through Automic Vault instead: $VAULT_ONLY_KEYS.
    They stay in the vault because leaking one of them is money and a compliance incident rather than an API bill, so everything from here to the end of this rule applies to those names and to nothing else.
    Every other credential is already in your environment: read it normally, wrap the command in nothing, and do not go looking for a vault - if a key you need is missing, that is a missing credential to report, never a reason to reach for \`av\`.
 EOF
@@ -483,25 +512,34 @@ __VAULT_REACH_SENTENCE__
    One `+KEY` per credential, then `--`, then the command; the command itself needs no change, because it still reads the same variables it always did and only the way you launch it changes.
 __VAULT_NAMING_SENTENCE__
    `av list` is not a liveness check for the vault: it fails while the vault's approval service is not running, so a failed listing is not proof that a key is absent, and the identity probe above is the one check that does not depend on that service.
-   An authentication failure or an unset key is the signal that a command needs `av inject`; it is never a reason to hunt for the value, read it out of a config file, or ask for it to be pasted to you.
+__VAULT_UNSET_SENTENCE__
    When the vault path itself fails - the identity probe fails, `av inject` fails, the key you named is not in the vault, or the credential otherwise never arrives - append `blocked: {the vault failure}` to the status file and stop.
    Never rerun the command bare, meaning never drop the `av inject ... --` wrapper and launch the command directly, because a bare rerun can quietly succeed on a copy of the key that should not exist - a leftover ambient value, a config file, a note someone pasted - and that silent success is the exact exposure this rule exists to remove.
    A fallback that works is worse than an error here: the error is visible and the silent success is not, so a failed vault call ends the attempt instead of being worked around.
    That is a rule about the wrapper and not about the wrapped command's own exit code: when the command itself runs and fails on its own merits - a failing test, a compile error, a bug in the script - debug it normally, and keep every rerun under the same `av inject` wrapper.
    Do not use `av bless`: it approves a script by path, so blessing a file inside the project would mix a local approval into the change you are shipping, and the explicit `+KEY` form needs no blessing at all.
 EOF
-  # Two sentences carry the whole all-credentials-vs-listed-keys difference, so
+  # Three sentences carry the whole all-credentials-vs-listed-keys difference, so
   # they are substituted rather than the body being kept in two near-identical
   # copies that would drift the first time only one was edited.
+  # The third is the one with a trigger condition, which is why leaving it
+  # unconditional was worse than leaving it out: "an unset key means use `av
+  # inject`" fires on exactly the case the narrowing exists for - a key that
+  # should have come from the environment and did not - and routes it into a
+  # vault that does not hold it, so the worker stops on a blocker it can never
+  # clear, naming a vault failure as the cause of a missing `.env` value.
   if [ -n "$VAULT_ONLY_KEYS" ]; then
     VAULT_REACH_SENTENCE="   A vaulted credential is deliberately absent from your environment, so a command that needs one names it at the call site: \`av inject +SERVICE_API_KEY +OTHER_TOKEN -- pnpm run benchmark\`."
     VAULT_NAMING_SENTENCE="   Name only the vaulted keys YOUR task actually needs instead of copying that example, and reach every other credential straight from the environment; \`av help\` covers the rest."
+    VAULT_UNSET_SENTENCE="   An authentication failure, or an unset value for one of those vaulted names, is the signal that a command needs \`av inject\`; it is never a reason to hunt for the value, read it out of a config file, or ask for it to be pasted to you."$'\n'"   An unset credential that is NOT one of those names is a missing credential and nothing more: it should have arrived from this home's \`.env\`, which firstmate loads into your environment when it launches you, so append \`blocked: {which credential is missing}\` to the status file and stop there - never call \`av\` for it, and never report it as a vault failure, which would name a cause it has nothing to do with."
   else
     VAULT_REACH_SENTENCE="   Credentials belong in Automic Vault rather than the ambient environment, so any command that authenticates or spends money names the keys it needs at the call site: \`av inject +SERVICE_API_KEY +OTHER_TOKEN -- pnpm run benchmark\`."
     VAULT_NAMING_SENTENCE="   Name the keys YOUR task actually needs instead of copying that example - \`av list\` shows the names this machine holds, and \`av help\` covers the rest."
+    VAULT_UNSET_SENTENCE="   An authentication failure or an unset key is the signal that a command needs \`av inject\`; it is never a reason to hunt for the value, read it out of a config file, or ask for it to be pasted to you."
   fi
   CREDENTIALS_VAULT=${CREDENTIALS_VAULT//__VAULT_REACH_SENTENCE__/$VAULT_REACH_SENTENCE}
   CREDENTIALS_VAULT=${CREDENTIALS_VAULT//__VAULT_NAMING_SENTENCE__/$VAULT_NAMING_SENTENCE}
+  CREDENTIALS_VAULT=${CREDENTIALS_VAULT//__VAULT_UNSET_SENTENCE__/$VAULT_UNSET_SENTENCE}
   CREDENTIALS_RULE="$CREDENTIALS_RULE"$'\n'"${CREDENTIALS_VAULT%$'\n'}"
 fi
 

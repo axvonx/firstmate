@@ -322,6 +322,24 @@ fm_write_secondmate_meta() {
     "projects=$projects"
 }
 
+# --- spawn launch command ---------------------------------------------------
+
+# wrapped_launch <full-launch-command> - assert the launch runs under the
+# credential wrapper and echo the command it wraps.
+#
+# fm-spawn runs every launch under bin/fm-worker-env-exec.sh, which loads the
+# home's .env credentials and re-applies the assignment prefixes with `env`, so
+# the agent's own invocation is unchanged. Cases that assert on that invocation
+# assert the wrapper is present and then compare what it wraps. It lives here
+# because it encodes the wrapper's argument shape, which must have one home.
+wrapped_launch() {
+  case "$1" in
+    *"/bin/fm-worker-env-exec.sh'"*" -- "*) : ;;
+    *) fail "launch command did not run under the credential wrapper: $1" ;;
+  esac
+  printf '%s' "${1#*" -- "}"
+}
+
 # --- common assertions ------------------------------------------------------
 
 # assert_contains <haystack> <needle> <msg>

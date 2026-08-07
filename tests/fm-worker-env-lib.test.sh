@@ -50,6 +50,21 @@ probe() {
   rm -f "$runner"
 }
 
+# Ask how many names a file would give a worker, without loading it. Same clean
+# child shell as probe, and the same folded stderr, so a case can assert that
+# asking the question prints nothing else.
+#   probe_count <shell> <env-file>
+probe_count() {
+  local shell=$1 env_file=$2 runner
+  runner="$TMP_ROOT/probe-count.$$.sh"
+  {
+    printf '. %s\n' "$(printf '%q' "$LIB")"
+    printf 'fm_worker_env_exportable_count %s\n' "$(printf '%q' "$env_file")"
+  } > "$runner"
+  env -i HOME="$HOME" PATH="$PATH" "$shell" "$runner" 2>&1
+  rm -f "$runner"
+}
+
 # Report whether a name arrived, never what it holds.
 # shellcheck disable=SC2016  # a script for the CHILD shell: it must expand there, not here
 SET_REPORT='for k in OPENAI_API_KEY ANTHROPIC_API_KEY HF_TOKEN FMX_PAIRING_TOKEN FM_CHECK_INTERVAL PATH_MARKER; do
@@ -157,6 +172,151 @@ done
   pass "fm-worker-env-lib.sh: a .env cannot rewrite the shell it loads into"
 }
 
+# The interpreter-level half of the same rule. A worker's shell is not the only
+# thing a .env can redirect: GIT_SSH_COMMAND replaces the transport git
+# authenticates over, and PERL5LIB, PYTHONSTARTUP, RUBYOPT, and ZDOTDIR each hand
+# an interpreter or a login shell a file to load, in every project the worker
+# touches. A .env is now read by every future worker, so one appended line would
+# persist across lanes.
+test_interpreter_hijacking_names_are_refused() {
+  local envfile out shell
+  envfile="$TMP_ROOT/interpreter.env"
+  write_env "$envfile" <<EOF
+GIT_SSH_COMMAND=/definitely/not/a/real/ssh
+PERL5LIB=/definitely/not/a/real/perl5
+PYTHONSTARTUP=/definitely/not/a/real/startup.py
+RUBYOPT=-r/definitely/not/a/real/hook
+ZDOTDIR=/definitely/not/a/real/zdotdir
+OPENAI_API_KEY=$FAKE_A
+EOF
+  for shell in $LOADER_SHELLS; do
+    command -v "$shell" >/dev/null 2>&1 || continue
+    # shellcheck disable=SC2016  # a script for the CHILD shell: it must expand there, not here
+    out=$(probe "$shell" "$envfile" 'for k in GIT_SSH_COMMAND PERL5LIB PYTHONSTARTUP RUBYOPT ZDOTDIR; do
+  eval "v=\${$k:-}"
+  if [ -n "$v" ]; then echo "$k=set"; else echo "$k=unset"; fi
+done
+[ -n "${OPENAI_API_KEY:-}" ] && echo "OPENAI_API_KEY=set"')
+    assert_contains "$out" "GIT_SSH_COMMAND=unset" "$shell: a .env could replace the transport git authenticates over"
+    assert_contains "$out" "PERL5LIB=unset" "$shell: a .env could inject a perl library path"
+    assert_contains "$out" "PYTHONSTARTUP=unset" "$shell: a .env could run a file at every python startup"
+    assert_contains "$out" "RUBYOPT=unset" "$shell: a .env could require a file into every ruby process"
+    assert_contains "$out" "ZDOTDIR=unset" "$shell: a .env could point a login shell at its own rc directory"
+    assert_contains "$out" "OPENAI_API_KEY=set" \
+      "$shell: refusing interpreter-hijacking names also dropped the credential beside them"
+  done
+  pass "fm-worker-env-lib.sh: a .env cannot redirect the interpreters the worker starts"
+}
+
+# NODE_OPTIONS is the one name where refusing it and allowing it are both wrong:
+# this machine's documented long-run practice sets --max-old-space-size
+# deliberately, while `--require=<file>` in the same variable loads a file into
+# every node process the worker starts. The VALUE is allowlisted instead, which
+# is a mechanical check rather than a policy call - and a refusal is reported by
+# NAME only, because printing the value is the leak this whole change is about.
+test_node_options_value_is_allowlisted() {
+  local envfile out shell bad_value
+  envfile="$TMP_ROOT/node-allowed.env"
+  write_env "$envfile" <<EOF
+NODE_OPTIONS=--max-old-space-size=8192
+OPENAI_API_KEY=$FAKE_A
+EOF
+  for shell in $LOADER_SHELLS; do
+    command -v "$shell" >/dev/null 2>&1 || continue
+    # shellcheck disable=SC2016  # a script for the CHILD shell: it must expand there, not here
+    out=$(probe "$shell" "$envfile" 'echo "node=${NODE_OPTIONS:-unset}"')
+    assert_contains "$out" "node=--max-old-space-size=8192" \
+      "$shell: the heap-size shape this machine actually uses was refused"
+    assert_not_contains "$out" "refused" "$shell: an allowlisted NODE_OPTIONS value produced a diagnostic"
+  done
+
+  # Every token must qualify, so a permitted token cannot smuggle a loader in
+  # beside it, and a non-numeric size is not a size.
+  envfile="$TMP_ROOT/node-refused.env"
+  write_env "$envfile" <<EOF
+NODE_OPTIONS=--max-old-space-size=8192 --require=/definitely/not/a/real/hook.js
+OPENAI_API_KEY=$FAKE_A
+EOF
+  for shell in $LOADER_SHELLS; do
+    command -v "$shell" >/dev/null 2>&1 || continue
+    # shellcheck disable=SC2016  # a script for the CHILD shell: it must expand there, not here
+    out=$(probe "$shell" "$envfile" 'echo "node=${NODE_OPTIONS:-unset}"
+[ -n "${OPENAI_API_KEY:-}" ] && echo "OPENAI_API_KEY=set"')
+    assert_contains "$out" "node=unset" \
+      "$shell: a NODE_OPTIONS value carrying --require reached the worker"
+    assert_contains "$out" "OPENAI_API_KEY=set" \
+      "$shell: refusing a NODE_OPTIONS value also dropped the credential beside it"
+    # Diagnosable by name, never by value: the refused value is the thing a
+    # worker's pane must not carry.
+    assert_contains "$out" "NODE_OPTIONS" "$shell: a refused NODE_OPTIONS value was rejected silently"
+    assert_not_contains "$out" "/definitely/not/a/real/hook.js" \
+      "$shell: the refusal diagnostic printed the value it refused"
+  done
+
+  for bad_value in --import=/definitely/not/a/real/loader.mjs \
+    --experimental-loader=/definitely/not/a/real/loader.mjs \
+    --max-old-space-size=not-a-number; do
+    write_env "$envfile" <<EOF
+NODE_OPTIONS=$bad_value
+EOF
+    for shell in $LOADER_SHELLS; do
+      command -v "$shell" >/dev/null 2>&1 || continue
+      # shellcheck disable=SC2016  # a script for the CHILD shell: it must expand there, not here
+      out=$(probe "$shell" "$envfile" 'echo "node=${NODE_OPTIONS:-unset}"')
+      assert_contains "$out" "node=unset" \
+        "$shell: NODE_OPTIONS=$bad_value was allowed through the value allowlist"
+    done
+  done
+  pass "fm-worker-env-lib.sh: only a heap-size NODE_OPTIONS value crosses, and a refusal names no value"
+}
+
+# bin/fm-brief.sh has to know whether a home's .env would put ANY name into a
+# worker's environment before it tells that worker its variables are simply
+# there. Asking here rather than re-deriving the rules is what keeps the brief's
+# claim and the loader's behavior from drifting apart, so the count must follow
+# every exclusion the loader applies - and must print a number and nothing else.
+test_exportable_count_follows_the_same_eligibility_rules() {
+  local envfile out shell
+  for shell in $LOADER_SHELLS; do
+    command -v "$shell" >/dev/null 2>&1 || continue
+
+    envfile="$TMP_ROOT/count-two.env"
+    write_env "$envfile" <<EOF
+# comment
+OPENAI_API_KEY=$FAKE_A
+export ANTHROPIC_API_KEY="$FAKE_B"
+EOF
+    out=$(probe_count "$shell" "$envfile")
+    [ "$out" = 2 ] || fail "$shell: two eligible credentials counted as '$out'"
+    assert_not_contains "$out" "$FAKE_A" "$shell: counting a .env printed a value"
+
+    # The X-mode-only shape: a real file, and nothing in it reaches a worker.
+    envfile="$TMP_ROOT/count-xmode.env"
+    write_env "$envfile" <<EOF
+FMX_PAIRING_TOKEN=$FAKE_B
+FM_CHECK_INTERVAL=30
+EOF
+    out=$(probe_count "$shell" "$envfile")
+    [ "$out" = 0 ] || fail "$shell: an X-mode-only .env counted '$out' names a worker would get"
+
+    # A refused name and a refused value are just as absent for a worker.
+    envfile="$TMP_ROOT/count-refused.env"
+    write_env "$envfile" <<EOF
+PATH=/definitely/not/a/real/bin
+NODE_OPTIONS=--require=/definitely/not/a/real/hook.js
+this line cannot be parsed at all
+EOF
+    out=$(probe_count "$shell" "$envfile")
+    [ "$out" = 0 ] || fail "$shell: a .env of refused names counted '$out' names a worker would get"
+    assert_not_contains "$out" "skipped" \
+      "$shell: counting printed a parse diagnostic into a document-generating caller"
+
+    out=$(probe_count "$shell" "$TMP_ROOT/definitely-absent.env")
+    [ "$out" = 0 ] || fail "$shell: an absent .env counted '$out' instead of 0"
+  done
+  pass "fm-worker-env-lib.sh: the exportable count is exactly what a worker would get"
+}
+
 # The single hardest requirement: this runs in the pane the agent reads, and
 # everything in that pane is sent to a model provider. A malformed line is
 # exactly the case where a naive loader prints a value - `set -a; . file` hands
@@ -236,6 +396,9 @@ test_absent_file_is_not_an_error() {
 test_credentials_reach_the_worker
 test_firstmate_namespace_stays_with_the_home
 test_shell_hijacking_names_are_refused
+test_interpreter_hijacking_names_are_refused
+test_node_options_value_is_allowlisted
+test_exportable_count_follows_the_same_eligibility_rules
 test_no_value_is_ever_printed
 test_declared_value_wins_over_ambient
 test_absent_file_is_not_an_error
