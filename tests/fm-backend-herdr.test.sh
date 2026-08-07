@@ -2944,6 +2944,139 @@ test_composer_state_codex_non_faint_same_text_is_pending() {
   pass "fm_backend_herdr_composer_state: non-faint codex prompt text still reads pending"
 }
 
+# --- composer_state: Claude's badged composer rules --------------------------
+# THE FALSE-NEGATIVE regression (task fm-send-false-negative-on-herdr-claude,
+# 2026-08-07). Real claude 2.x on Herdr 0.8.0 draws its composer as a
+# full-viewport-width rule, the bare "❯" row, and a second full-width rule.
+# The OPENING rule carries a mode badge ("───… ↯ ─" for fast mode), so it is
+# not a pure "─" run, while the CLOSING rule is. The Pi separator scan
+# therefore found no complete pair and reported an unmatched separator BELOW
+# the bare match, and the staleness branch demoted claude's own live composer
+# to unknown on every read. Captured read-only from eight live claude panes on
+# 2026-08-07: all eight read unknown before this fix, and the agent-less shell
+# pane in the same session read unknown before and after.
+#
+# The older bare-composer fixtures above miss this because their rules are six
+# characters wide, below the eight-character floor that makes a row a Pi
+# separator candidate at all. These fixtures use realistic full-width rules.
+herdr_claude_badged_composer() {  # <composer-row> -> claude's rule/row/rule shape
+  local rule badged
+  rule=$(printf '\xe2\x94\x80%.0s' $(seq 1 100))
+  badged="${rule} \xe2\x86\xaf \xe2\x94\x80"
+  printf '\xe2\x9c\xbb Brewed for 1m 16s\n'
+  printf 'Update available! Run: brew upgrade claude-code@latest\n'
+  printf '%b\n' "$badged"
+  printf '%s\n' "$1"
+  printf '%s\n' "$rule"
+  printf '  ~/firstmate  main\n  Opus 5 high fast ctx:34%%\n'
+}
+
+test_composer_state_claude_badged_rule_composer_is_empty() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-claude-badged-empty"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  herdr_claude_badged_composer "$(printf '\xe2\x9d\xaf')" > "$resp/1.out"
+  printf '{"result":{"agent":{"agent":"claude","agent_status":"working"}}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = empty ] || fail "a live claude composer whose opening rule carries a mode badge must read empty, got '$out' (regression: the unmatched closing rule demoted every healthy claude pane to unknown, so fm-send called a landed steer undelivered)"
+  pass "fm_backend_herdr_composer_state: claude's own closing rule below its '❯' row no longer demotes the live composer"
+}
+
+test_composer_state_claude_badged_rule_real_text_is_pending() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-claude-badged-pending"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  herdr_claude_badged_composer "$(printf '\xe2\x9d\xaf short unsubmitted steer')" > "$resp/1.out"
+  printf '{"result":{"agent":{"agent":"claude","agent_status":"working"}}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = pending ] || fail "real unsubmitted text in the badged-rule claude composer must still read pending, got '$out'"
+  pass "fm_backend_herdr_composer_state: real text in the badged-rule claude composer still reads pending"
+}
+
+# The reported trigger shape. A long steer is delivered as a paste, and claude
+# collapses it to a "[Pasted text #N]" placeholder while its status area reads
+# "paste again to expand". Captured live on 2026-08-07: the placeholder is
+# rendered at NORMAL intensity after the styled "❯", so the shared ghost
+# stripper keeps it and an unsubmitted long steer is still reported undelivered.
+test_composer_state_claude_collapsed_paste_is_pending() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-claude-collapsed-paste"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  herdr_claude_badged_composer "$(printf '\x1b[0m\x1b[38;2;153;153;153m\xe2\x9d\xaf \x1b[0m[Pasted text #1]')" > "$resp/1.out"
+  printf '{"result":{"agent":{"agent":"claude","agent_status":"working"}}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = pending ] || fail "an unsubmitted collapsed paste must read pending, got '$out' (reporting it empty would call an undelivered long steer delivered)"
+  pass "fm_backend_herdr_composer_state: claude's collapsed-paste placeholder reads pending, not delivered"
+}
+
+# Ablation of the identity gate that admits the shape above: the SAME
+# structure, differing only in who the pane says it is. A Pi target may
+# genuinely be drawing a separator composer below the generic row, and an
+# unreadable or unregistered identity is ambiguity - both keep the refusal, so
+# the fix cannot hand a dead shell or a mid-draw Pi pane an "empty" verdict.
+test_composer_state_unmatched_lower_separator_refuses_unsafe_identity() {
+  local dir log resp fb out case_id
+  for case_id in pi-idle pi-working unregistered unreadable; do
+    dir="$TMP_ROOT/composer-unmatched-sep-$case_id"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+    herdr_claude_badged_composer "$(printf '\xe2\x9d\xaf')" > "$resp/1.out"
+    case "$case_id" in
+      pi-idle) printf '{"result":{"agent":{"agent":"pi","agent_status":"idle"}}}\n' > "$resp/2.out" ;;
+      pi-working) printf '{"result":{"agent":{"agent":"pi","agent_status":"working"}}}\n' > "$resp/2.out" ;;
+      unregistered) printf '{"error":{"code":"agent_not_found","message":"agent target w1:p2 not found"}}\n' > "$resp/2.out" ;;
+      unreadable) printf '1\n' > "$resp/2.exit" ;;
+    esac
+    fb=$(make_herdr_fakebin "$dir")
+    out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+    [ "$out" = unknown ] || fail "an unmatched lower separator must still refuse for identity case '$case_id', got '$out'"
+  done
+  pass "fm_backend_herdr_composer_state: an unmatched lower separator still refuses on Pi, unregistered, and unreadable identities"
+}
+
+# End to end at the caller boundary: a steer to a crewmate that is already
+# WORKING never takes the native idle-baseline path, so the composer reader
+# decides the verdict. Before the fix this returned unknown and fm-send
+# reported "text not submitted (delivery unconfirmed; verdict=unknown)" for a
+# steer that had landed.
+test_send_text_submit_confirms_against_working_claude_baseline() {
+  local dir log resp fb out enter_count
+  dir="$TMP_ROOT/submit-working-claude-baseline"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # 1: send-text  2: agent get (baseline, working)  3: send-keys enter
+  # 4: pane read (composer cleared by the submit)   5: agent get (identity)
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/2.out"
+  herdr_claude_badged_composer "$(printf '\xe2\x9d\xaf')" > "$resp/4.out"
+  printf '{"result":{"agent":{"agent":"claude","agent_status":"working"}}}\n' > "$resp/5.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "a long landed steer" 3 0.01 0.01' "$ROOT" )
+  [ "$out" = empty ] || fail "a landed steer to a working claude crewmate must confirm as submitted, got '$out'"
+  enter_count=$(grep -c $'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 1 ] || fail "a confirmed submit needs exactly one Enter, sent $enter_count"
+  pass "fm_backend_herdr_send_text_submit: a steer to an already-working claude crewmate confirms instead of reporting delivery unconfirmed"
+}
+
+# The mirror: text still sitting in that same composer is genuinely
+# undelivered, and must still exhaust the Enter retries and report pending.
+test_send_text_submit_still_reports_pending_when_text_stays_in_composer() {
+  local dir log resp fb out idx
+  dir="$TMP_ROOT/submit-working-claude-pending"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/2.out"
+  for idx in 4 7 10; do
+    herdr_claude_badged_composer "$(printf '\xe2\x9d\xaf a long steer that never went in')" > "$resp/$idx.out"
+  done
+  for idx in 5 8 11; do
+    printf '{"result":{"agent":{"agent":"claude","agent_status":"working"}}}\n' > "$resp/$idx.out"
+  done
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "a long steer that never went in" 3 0.01 0.01' "$ROOT" )
+  [ "$out" = pending ] || fail "text still sitting in the composer must remain undelivered, got '$out'"
+  pass "fm_backend_herdr_send_text_submit: an unsubmitted steer to a working claude crewmate still reports undelivered"
+}
+
 # --- wait_for_working: the native agent-state poll-and-classify primitive ---
 # Direct unit coverage for fm_backend_herdr_wait_for_working, the helper
 # fm_backend_herdr_send_text_submit now uses instead of composer scraping
@@ -3977,6 +4110,12 @@ test_composer_state_grok_bright_truecolor_real_text_is_pending
 test_composer_state_codex_bare_prompt_glyph_is_empty
 test_composer_state_codex_faint_suggestion_is_empty
 test_composer_state_codex_non_faint_same_text_is_pending
+test_composer_state_claude_badged_rule_composer_is_empty
+test_composer_state_claude_badged_rule_real_text_is_pending
+test_composer_state_claude_collapsed_paste_is_pending
+test_composer_state_unmatched_lower_separator_refuses_unsafe_identity
+test_send_text_submit_confirms_against_working_claude_baseline
+test_send_text_submit_still_reports_pending_when_text_stays_in_composer
 test_wait_for_working_returns_busy_on_first_poll
 test_wait_for_working_catches_a_slow_transition_mid_window
 test_wait_for_working_samples_budget_endpoint_without_final_sleep

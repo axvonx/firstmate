@@ -2413,7 +2413,11 @@ fm_backend_herdr_strip_ansi() {  # <text>
 #              working Pi, an over-tall candidate, or an incomplete separator
 #              pair remains unknown. This identity + structure conjunction is
 #              what makes a blank Pi row safe without weakening dead-shell or
-#              ambiguous-pane refusal.
+#              ambiguous-pane refusal. The same identity gate also bounds the
+#              separator heuristic in the other direction: a separator row
+#              found BELOW a bordered or bare match only demotes that match
+#              on a Pi or unidentifiable target, because Claude's own closing
+#              rule sits below its own `❯` row (see the branch comment below).
 #
 #   empty   - blank, a bare prompt glyph, known ghost/placeholder text
 #             ("Type a message...", verified grok 0.2.82's empty-composer
@@ -2588,9 +2592,31 @@ EOF
     esac
   elif [ "$FM_BACKEND_HERDR_PI_PAIR_FOUND" -eq 0 ] \
        && [ "$FM_BACKEND_HERDR_PI_LAST_SEPARATOR_LINE" -gt "$generic_line" ]; then
-    # A lower unmatched separator proves the generic row is stale, but does
-    # not provide the complete Pi composer structure required for injection.
-    found=0
+    # A lower unmatched separator is Pi-shaped evidence: it can only mean the
+    # generic row is stale when the target is a harness that draws a
+    # glyphless separator composer at all. Claude closes its OWN composer
+    # with a full-width rule and decorates the opening rule with a mode badge
+    # (verified claude 2.x on Herdr 0.8.0: "───… ↯ ─" over "❯ …" over
+    # "─────"), so the pair never completes and the closing rule sits BELOW
+    # the very prompt row it belongs to. Treating that as staleness read
+    # every healthy Claude pane as unknown, which turned a landed steer into
+    # fm-send's "delivery unconfirmed" refusal whenever the pre-Enter
+    # baseline was not idle. Identity is therefore consulted here on the same
+    # terms as the complete-pair branch above: only a Pi target or an
+    # unreadable identity keeps the refusal.
+    identity=$(fm_backend_herdr_agent_identity_raw "$session" "$pane" 2>/dev/null || true)
+    IFS=$'\t' read -r agent agent_status <<EOF
+$identity
+EOF
+    case "$agent:$agent_status" in
+      pi:*|:*)
+        # A Pi composer may genuinely be mid-draw below the generic row, and
+        # an unreadable or unregistered identity is ambiguity, not proof of a
+        # live agent composer. Both keep the dead-shell refusal.
+        found=0
+        ;;
+      *) : ;; # A known non-Pi agent keeps its established generic verdict.
+    esac
   fi
   [ "$found" -eq 1 ] || { printf 'unknown'; return 0; }
   # Content: extract the real typed text from the raw row with the shared,

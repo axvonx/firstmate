@@ -122,6 +122,7 @@ Claude, Codex, OpenCode, Pi, pi-signed, Grok, and Kimi share that backend cleanu
 The compatibility floor is protocol 14.
 The latest active verification uses Herdr 0.7.5 protocol 17 on macOS aarch64, with earlier 0.7.5 protocol-16, 0.7.4, protocol-14, and 0.7.3 evidence retained where they define current behavior or fallbacks.
 Protocol 17 keeps every protocol-16 feature gate satisfied; the event and workspace-move floors remain 16.
+The read-only composer sweep below is the one section recorded against Herdr 0.8.0.
 
 Core read-only probes:
 
@@ -153,6 +154,43 @@ The CLI matrix was checked directly:
 
 All destructive verification used `bin/fm-herdr-lab.sh` with a non-default `fm-lab-` name and a byte-identical default-session tripwire.
 No ambient `herdr server stop` command is a supported test operation.
+
+### Composer classification against live Claude panes
+
+Read-only sweep on 2026-08-07, Herdr 0.8.0, Claude Code 2.x, macOS aarch64.
+It needs no lab session because it only reads.
+
+```sh
+for p in $(herdr --session default pane list | jq -r '.result.panes[].pane_id'); do
+  printf '%s\t%s\t%s\n' "$p" \
+    "$(herdr --session default agent get "$p" 2>/dev/null | jq -r '.result.agent.agent // "<none>"')" \
+    "$(HERDR_SESSION=default bash -c '. bin/fm-backend.sh; fm_backend_composer_state herdr "default:'"$p"'"')"
+done
+```
+
+```text
+w8:p1	claude	empty
+wJ:p1	claude	empty
+wJ:p42	<none>	unknown
+wJ:p4A	claude	empty
+wJ:p4B	claude	empty
+wJ:p4C	claude	empty
+wJ:p4D	claude	empty
+wJ:p4E	claude	empty
+wJ:p4F	claude	empty
+```
+
+Every one of those eight Claude panes read `unknown` before the identity scoping described in [`../herdr-backend.md`](../herdr-backend.md) "Composer and injection safety", and the agent-less pane `wJ:p42` reads `unknown` in both directions.
+The composer rows that produced it are a decorated opening rule, the prompt row, and a plain closing rule:
+
+```text
+─────────────────────────────────────── ↯ ─
+❯
+───────────────────────────────────────────
+```
+
+Composer states were also exercised directly against one live pane, which read `empty` while idle, `pending` for typed text, `pending` for a long steer collapsed to `❯ [Pasted text #1]` with `paste again to expand` in the status area, and `empty` again once cleared.
+The collapsed placeholder is rendered at normal intensity after the styled prompt glyph, so the shared ghost stripper keeps it.
 
 ### Prune and respawn
 

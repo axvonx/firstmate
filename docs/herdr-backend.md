@@ -212,6 +212,12 @@ Herdr has no direct cursor-row primitive.
 The adapter locates the bottom-most recognized bordered row, Claude `❯` row, Codex `›` row, or a Pi separator region admitted only when native identity is exactly Pi and state is idle, done, or blocked.
 A working Pi, pending middle row, missing identity, incomplete separator pair, or over-tall candidate remains pending or unknown.
 
+A separator row found below the recognized bordered or bare row is Pi-shaped evidence and is scoped to Pi targets.
+Claude draws its own composer between two full-width rules and decorates the opening rule with a mode badge, so the pair never completes and the closing rule sits below the `❯` row it belongs to.
+That closing rule now demotes the match only when native identity is Pi, unregistered, or unreadable, which keeps the mid-draw Pi and dead-shell refusals while letting a healthy Claude or Codex pane classify normally.
+Reading the badged shape as staleness made every Claude pane unknown, which surfaced as an undelivered-steer report whenever the pre-Enter baseline was not idle and the composer fallback decided the verdict, and which also denied away-mode injection the affirmative `empty` it requires.
+A long steer is delivered as a paste that Claude collapses to a `[Pasted text #N]` placeholder rendered at normal intensity, so an unsubmitted long steer still reads pending and is still reported undelivered.
+
 ANSI capture preserves de-emphasized placeholder style.
 `bin/fm-composer-lib.sh` is the fleet-wide owner that strips dim or faint runs and dark truecolor placeholders while retaining bright typed input.
 If a future Herdr version strips ANSI style, ghost suggestions become pending rather than empty, which safely defers injection and eventually raises the wedge alarm.
