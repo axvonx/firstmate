@@ -223,6 +223,11 @@ BUSY_TURN_MAX_SECS=${FM_BUSY_TURN_MAX_SECS:-3600}
 # 1h, escalation 1 at 2h, escalation 2 at 3h, escalation 3 plus
 # demand-deep-inspection at 4h.
 BUSY_TURN_RENOTICE_SECS=${FM_BUSY_TURN_RENOTICE_SECS:-$BUSY_TURN_MAX_SECS}
+# busy_turn_check divides the turn age by this to derive the rung, so an unusable
+# override is normalized here rather than left to kill the whole watcher on a
+# division by zero.
+case "$BUSY_TURN_RENOTICE_SECS" in ''|*[!0-9]*) BUSY_TURN_RENOTICE_SECS=$BUSY_TURN_MAX_SECS ;; esac
+[ "$BUSY_TURN_RENOTICE_SECS" -gt 0 ] 2>/dev/null || BUSY_TURN_RENOTICE_SECS=1
 # A crew that declared a pause is idling on a known external wait, so its stale
 # pane is absorbed rather than wedge-escalated.
 # A captain-held or paused crew whose agent has confidently exited uses the same
@@ -474,62 +479,68 @@ busy_turn_over_age() {  # <task>
 # window rather than merely to its place in the order.
 # So the hung foreground call the bound exists for is still caught and still
 # escalates without limit; it is named a wedge one window later than before
-# rather than four minutes in. The escalation count survives an advancing window
-# for the same reason wedge_timer_check's does: a lane that alternates between
-# looking busy and showing nothing must still reach the marker.
+# rather than four minutes in.
 #
-# Shares .stale-since-<key> and .wedge-escalations-<key> with the idle ladder
-# because a window only ever belongs to one of them at a time, and every
-# transition between them already rewrites or clears both.
-busy_turn_check() {  # <window> <task> <hash> <since-file> <escalation-count-file>
-  local win=$1 task=$2 h=$3 since_file=$4 escalation_file=$5
-  local key memo since age turn_age n reason
+# WHICH RUNG a poll is on comes from the turn age itself, never from a timer or a
+# counter: rung = 1 + (turn_age - BUSY_TURN_MAX_SECS) / BUSY_TURN_RENOTICE_SECS,
+# and .busy-turn-rung-<key> records only the highest rung already surfaced, so a
+# rung fires once and the next one waits for the turn age to earn it. That is the
+# whole point of the derivation, and it is not merely a bug fixed: while this
+# ladder was being built the shipped rung and the stated latency drifted apart
+# three separate times, and every time the cause was the same shape - the ladder's
+# position lived in a mutable marker that other code paths reset, so what the
+# ladder promised and what it did could disagree without anything noticing. Turn
+# age is monotonic, and the only thing that resets it is a completed turn, which
+# is exactly the event that SHOULD reset the ladder. So the documented latency now
+# holds by construction rather than by assertion: the rung cannot disagree with
+# the turn age, whatever else in the state dir is cleared. An absent or corrupt
+# rung marker reads as 0 and self-heals into the rung the turn age has actually
+# reached, never a replay of the earlier ones.
+#
+# The old "the escalation count survives an advancing window" property now holds
+# automatically, with no counter left to preserve: a lane that advances for three
+# windows and then freezes lands on the rung its turn age has reached.
+#
+# Reads and writes .busy-turn-rung-<key> and no other ladder state.
+# .stale-since-<key> and .wedge-escalations-<key> are the idle ladder's alone; the
+# busy ladder deliberately shares neither, because sharing a mutable counter with
+# a ladder whose reset paths it does not own is the defect class above. It does
+# still share .step-activity-<key>, crew_step_is_advancing's digest memo, which
+# those paths do clear - that biases one window toward absorbing and is recorded
+# as untested in docs/verification/step-progress-signals.md.
+busy_turn_check() {  # <window> <task> <hash>
+  local win=$1 task=$2 h=$3
+  local key memo rung_file turn_age rung surfaced n reason
   key=$(printf '%s' "$win" | tr ':/.' '___')
   memo="$STATE/.step-activity-$key"
+  rung_file="$STATE/.busy-turn-rung-$key"
   if status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")"; then
     handle_paused_stale "$win" "$task" "$h"
     return
   fi
-  since=$(cat "$since_file" 2>/dev/null || true)
-  case "$since" in
-    ''|*[!0-9]*)
-      # No window is running yet: either this is the first poll past the bound
-      # (every under-bound poll erases the timer) or the timer was lost or
-      # corrupted. Either way the crossing IS the end of a window - getting here
-      # already cost BUSY_TURN_MAX_SECS of an uncompleted turn - so fall through
-      # and say so now instead of buying a silent window first. A hung foreground
-      # call is the most common way a busy worker actually dies, and an hour of
-      # one has to be named at the bound rather than an hour past it. The
-      # fall-through re-anchors below, so a lost or corrupt timer still self-heals.
-      ;;
-    *)
-      age=$(( $(date +%s) - since ))
-      [ "$age" -ge "$BUSY_TURN_RENOTICE_SECS" ] || return
-      ;;
-  esac
   turn_age=$(busy_turn_age "$task")
+  rung=$(( 1 + (turn_age - BUSY_TURN_MAX_SECS) / BUSY_TURN_RENOTICE_SECS ))
+  surfaced=$(cat "$rung_file" 2>/dev/null || true)
+  case "$surfaced" in ''|*[!0-9]*) surfaced=0 ;; esac
+  [ "$rung" -gt "$surfaced" ] || return
   if crew_step_is_advancing "$task" "$memo"; then
     reason="stale: $win (busy ${turn_age}s, LONG-RUNNING not wedged: the run reported an advancing step while this turn stayed open with no completion - glance at whether it is worth continuing, do not treat it as stuck)"
+  elif [ "$rung" -eq 1 ]; then
+    reason="stale: $win (busy ${turn_age}s, LONG-RUNNING not wedged: the harness reports a turn still in flight and no completed turn for ${turn_age}s, with no advancing pipeline step to corroborate it - a long local build, test run, or install reads exactly like this, so glance once at whether it is progressing instead of treating it as stuck)"
   else
-    n=$(cat "$escalation_file" 2>/dev/null || echo 0)
-    case "$n" in ''|*[!0-9]*) n=0 ;; esac
-    echo $(( n + 1 )) > "$escalation_file"
-    if [ "$n" -eq 0 ]; then
-      reason="stale: $win (busy ${turn_age}s, LONG-RUNNING not wedged: the harness reports a turn still in flight and no completed turn for ${turn_age}s, with no advancing pipeline step to corroborate it - a long local build, test run, or install reads exactly like this, so glance once at whether it is progressing instead of treating it as stuck)"
-    else
-      reason="stale: $win (busy ${turn_age}s, possible wedge, escalation $n, no completed turn and no advancing pipeline step across $(( n + 1 )) consecutive ${BUSY_TURN_RENOTICE_SECS}s windows)"
-      if [ "$n" -ge "$FM_WEDGE_DEMAND_INSPECT_COUNT" ]; then
-        reason="$reason, demand-deep-inspection: $n windows of an unbroken turn with nothing observed advancing - inspect the worker and its foreground call rather than absorbing on the busy signal again"
-      fi
+    n=$(( rung - 1 ))
+    reason="stale: $win (busy ${turn_age}s, possible wedge, escalation $n, no completed turn and no advancing pipeline step across $rung consecutive ${BUSY_TURN_RENOTICE_SECS}s windows)"
+    if [ "$n" -ge "$FM_WEDGE_DEMAND_INSPECT_COUNT" ]; then
+      reason="$reason, demand-deep-inspection: $n windows of an unbroken turn with nothing observed advancing - inspect the worker and its foreground call rather than absorbing on the busy signal again"
     fi
   fi
   # Queue before the detector advances, like every sibling ladder here: a failed
-  # append must not consume the window and leave a genuinely wedged worker silent
-  # for the whole next one. The anchor still lands before wake(), which exits the
-  # cycle, so a write placed after it would never run and the cadence would
-  # collapse back to one wake per poll.
+  # append must not consume the rung and leave a genuinely wedged worker silent
+  # for the whole next window. The rung is still recorded before wake(), which
+  # exits the cycle, so a write placed after it would never run and the cadence
+  # would collapse back to one wake per poll.
   fm_wake_append stale "$win" "$reason" || exit 1
-  date +%s > "$since_file"
+  printf '%s\n' "$rung" > "$rung_file"
   wake "$reason"
 }
 
@@ -1196,6 +1207,7 @@ EOF
     ewf="$STATE/.wedge-escalations-$key"
     saf="$STATE/.step-activity-$key"   # wedge ladder: last step-activity digest seen
     spf="$STATE/.step-progress-$key"   # wedge ladder: confirmed-progress absorb count
+    btrf="$STATE/.busy-turn-rung-$key" # busy ladder: highest rung surfaced for the current turn
     pf="$STATE/.paused-$key"   # flag: this key's stale is using the bounded pause cadence
     prev=$(cat "$hf" 2>/dev/null || true)
     # Busy match: a backend's native semantic state when available (herdr), else
@@ -1316,19 +1328,27 @@ EOF
         # paused crew unable to declare its way out of a wedge alarm the moment
         # it ran a shell command.
         if [ "$busy_now" -eq 0 ] && busy_turn_over_age "$task"; then
-          busy_turn_check "$w" "$task" "$h" "$ssf" "$ewf"
+          busy_turn_check "$w" "$task" "$h"
         else
           rm -f "$ssf" "$ewf" "$saf" "$spf"
         fi
+        # Deliberately OUTSIDE that else: only a completed turn may reset the busy
+        # ladder, and a single non-busy poll is not a completed turn. Clearing the
+        # rung there instead is exactly the reachable-by-accident off switch that
+        # let the ladder re-base on wall clock and re-emit its first rung.
+        busy_turn_over_age "$task" || rm -f "$btrf"
       fi
     else
       printf '%s' "$h" > "$hf"
       echo 0 > "$cf"
       if [ "$busy_now" -eq 0 ] && busy_turn_over_age "$task"; then
-        busy_turn_check "$w" "$task" "$h" "$ssf" "$ewf"
+        busy_turn_check "$w" "$task" "$h"
       else
         rm -f "$ssf" "$ewf" "$saf" "$spf"
       fi
+      # Same reason as the stable-hash branch above: the busy ladder's rung is
+      # reset only by a completed turn, never by one non-busy poll.
+      busy_turn_over_age "$task" || rm -f "$btrf"
       # Same rule as the stable-hash branch: a busy pane never withdraws a
       # standing declaration, so only the idle case reconciles the pause here
       # and the top of the loop owns clearing a withdrawn one.

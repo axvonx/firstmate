@@ -140,6 +140,18 @@ That busy ladder's measured latency, at the production defaults where `FM_BUSY_T
 Those are measured from the completed-turn bound crossing, which counts as the first of those windows rather than being spent anchoring a timer in silence; that is what puts the notice at the bound and the first wedge naming one window after it.
 This number drifted from the shipped behaviour twice while the ladder was being built, because the suite asserted the ORDER of the rungs and never their TIMING, so prose was the only place the latency lived and nothing in the tests could contradict a wrong claim - check it against `test_busy_ladder_rungs_land_one_window_apart`, which pins every rung to a turn age measured in whole windows past the bound, rather than trusting this paragraph.
 
+Which rung a poll surfaces is now derived from the turn age itself, so the latency above holds by construction rather than by assertion, and the markers behind it divide as follows.
+
+- `state/.busy-turn-rung-<key>` holds only the highest rung the busy ladder has already surfaced for the current uncompleted turn, and the rung it is compared against comes from the turn age, so the ladder's position cannot disagree with that age.
+  It is reset only where a completed turn puts the pane back under the bound, deliberately outside the reset that fires on a merely non-busy poll, and an absent or corrupt marker reads as 0 and self-heals into the current rung.
+  Consistent by construction, and pinned by `test_busy_rung_ignores_an_erased_idle_ladder_timer`, which erases every idle-ladder marker and still expects the rung the turn age has earned.
+- `state/.stale-since-<key>` and `state/.wedge-escalations-<key>` are the idle ladder's alone; the busy ladder neither reads nor writes them.
+  Both are reset by either call-site branch that sees a pane which is not a busy pane past the bound, by `handle_paused_stale`, by `surface_nonterminal_stale`, by `wedge_timer_check`'s escalate path (the since file only, deliberately not the count), and by `bin/fm-supervise-daemon.sh`'s `clear_pause_tracking` around line 496.
+  That reset surface is unchanged by this split, and it is why the busy ladder stopped sharing them: a ladder cannot keep a promise about latency while its position lives in a counter whose reset paths it does not own.
+- `state/.step-activity-<key>`, the `crew_step_is_advancing` digest memo, is still shared with the idle ladder and is still cleared by those same paths.
+  A cleared memo makes the next observation read as changed, which biases one window toward absorbing rather than escalating.
+  Untested, and deliberately left alone as out of scope here, because it can only delay a wedge report by a single window and never suppresses one.
+
 ## Where change detection does not apply
 
 The changed-digest rule exists to catch a looping AGENT, so it is scoped to steps that have one.
