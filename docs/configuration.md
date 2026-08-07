@@ -322,10 +322,10 @@ An X-mode home's `.env` can hold only `FMX_PAIRING_TOKEN`, which is never export
 A primary whose own `.env` delivers nothing is not used either, because announcing a source that supplies no credential is the same misleading claim one level over.
 The `FM_*`/`FMX_*` exclusion below applies on the inherited path exactly as it does on the local one, and matters more there: `FMX_PAIRING_TOKEN` is the primary home's relay consent and must not reach a secondmate's crewmate.
 
-A secondmate learns which home is its primary from `FM_PUBLIC_FOLLOWUP_PRIMARY_HOME`, which arrives on its launch command, so a secondmate agent launched before this fallback existed carries no pointer and its own crewmate spawns resolve to no credential source at all - no inherited file, no announcement, and no location paragraph in their briefs.
-That is repaired by respawning, not in place, so respawning secondmates is an ordered step before any machine-wide credential copies are cleared: list the registered secondmates with `grep -l '^kind=secondmate$' state/*.meta` - the same record shape the fleet's own live discovery uses - respawn every home that list names, and clear the ambient copies only afterwards.
-An empty list is the answer that no lane is affected.
-For a respawned secondmate that relies on the primary's file, the stderr line naming that `.env` path at its next crewmate spawn is the confirmation the pointer arrived; a secondmate whose own `.env` delivers credentials needs no pointer and prints none.
+A secondmate runs `bin/fm-spawn.sh` from its own checkout, so this fallback reaches that lane's crewmates only once the secondmate home has fast-forwarded to a `bin/fm-spawn.sh` that carries it - which the guarded tracked-file fast-forward does at launch and in the locked bootstrap sweep, except for a home it reports as dirty, diverged, or in-flight, which is left unchanged.
+Confirming that is an ordered step before any machine-wide credential copies are cleared: list the registered secondmates with `grep -l '^kind=secondmate$' state/*.meta` - the same record shape the fleet's own live discovery uses - read each record's `home=`, and check that home with `grep -q fm_worker_env_resolve <home>/bin/fm-spawn.sh`.
+A home that fails that check has not advanced yet: clear whatever the sweep warned about so its fast-forward can land, and clear the ambient copies only once every listed home passes.
+For a secondmate that relies on the primary's file, the stderr line naming that `.env` path at its next crewmate spawn is the per-home confirmation that it picked the fallback up; a secondmate whose own `.env` delivers credentials needs none and prints none.
 
 This exists so credentials do not have to be set machine-wide.
 A `launchctl setenv` value is inherited by every process on the machine, which is both a broad exposure and a silent one - a worker gets the key whether or not firstmate intended it to.
