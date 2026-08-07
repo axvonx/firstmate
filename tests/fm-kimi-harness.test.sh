@@ -5,6 +5,19 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+# fm-spawn runs every launch under bin/fm-worker-env-exec.sh, which loads the
+# home's .env credentials and re-applies the assignment prefixes with `env`, so
+# the agent's own invocation is unchanged. Cases that assert on that invocation
+# assert the wrapper is present and then compare what it wraps.
+#   wrapped_launch <full-launch-command>
+wrapped_launch() {
+  case "$1" in
+    *"/bin/fm-worker-env-exec.sh'"*" -- "*) : ;;
+    *) fail "launch command did not run under the credential wrapper: $1" ;;
+  esac
+  printf '%s' "${1#*" -- "}"
+}
+
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 KIMI_HOOK="$ROOT/bin/fm-kimi-turnend-hook.sh"
@@ -177,7 +190,7 @@ EOF
 }
 
 test_kimi_launch_then_send_is_verified() {
-  local id rec out rc launch pointer brief_real meta task_tmp session
+  local id rec out rc launch wrapped pointer brief_real meta task_tmp session
   id="kimi-success-z1-$$"
   task_tmp="/tmp/fm-$id"
   KIMI_RUNTIME_TASK_TMP=$task_tmp
@@ -194,8 +207,9 @@ test_kimi_launch_then_send_is_verified() {
   launch=$(cat "$CASE_DIR/launch.log")
   session=$(grep '^browser_session=' "$HOME_DIR/state/$id.meta" | tail -1 | cut -d= -f2-)
   [ -n "$session" ] || fail "kimi spawn recorded no per-task browser session"
-  [ "$launch" = "CHROME_DEVTOOLS_AXI_SESSION=$session '$FAKEBIN_DIR/kimi' --model 'kimi-code/k3' --auto" ] \
-    || fail "kimi launch did not use the absolute binary, model, and --auto only: $launch"
+  wrapped=$(wrapped_launch "$launch")
+  [ "$wrapped" = "CHROME_DEVTOOLS_AXI_SESSION=$session '$FAKEBIN_DIR/kimi' --model 'kimi-code/k3' --auto" ] \
+    || fail "kimi launch did not use the absolute binary, model, and --auto only: $wrapped"
   assert_not_contains "$launch" "--effort" "kimi launch emitted a nonexistent effort flag"
   assert_not_contains "$launch" "turn-ended" "kimi launch embedded a turn-end path"
   assert_not_contains "$launch" "__TURNEND__" "kimi launch retained a turn-end placeholder"
@@ -439,7 +453,7 @@ test_kimi_teardown_removes_pointer_and_registry_token() {
 }
 
 test_kimi_falls_back_to_expanded_home_binary() {
-  local id rec out rc launch fallback session
+  local id rec out rc launch wrapped fallback session
   id=kimi-fallback-z4
   rec=$(make_spawn_case fallback "$id")
   read_spawn_record "$rec"
@@ -453,8 +467,9 @@ test_kimi_falls_back_to_expanded_home_binary() {
   launch=$(cat "$CASE_DIR/launch.log")
   session=$(grep '^browser_session=' "$HOME_DIR/state/$id.meta" | tail -1 | cut -d= -f2-)
   [ -n "$session" ] || fail "Kimi fallback spawn recorded no per-task browser session"
-  [ "$launch" = "CHROME_DEVTOOLS_AXI_SESSION=$session '$fallback' --auto" ] \
-    || fail "Kimi fallback did not expand HOME into an absolute executable: $launch"
+  wrapped=$(wrapped_launch "$launch")
+  [ "$wrapped" = "CHROME_DEVTOOLS_AXI_SESSION=$session '$fallback' --auto" ] \
+    || fail "Kimi fallback did not expand HOME into an absolute executable: $wrapped"
   pass "fm-spawn: Kimi fallback expands the active HOME"
 }
 

@@ -10,6 +10,19 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+# fm-spawn runs every launch under bin/fm-worker-env-exec.sh, which loads the
+# home's .env credentials and re-applies the assignment prefixes with `env`, so
+# the agent's own invocation is unchanged. Cases that assert on that invocation
+# assert the wrapper is present and then compare what it wraps.
+#   wrapped_launch <full-launch-command>
+wrapped_launch() {
+  case "$1" in
+    *"/bin/fm-worker-env-exec.sh'"*" -- "*) : ;;
+    *) fail "launch command did not run under the credential wrapper: $1" ;;
+  esac
+  printf '%s' "${1#*" -- "}"
+}
+
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-dispatch-profile)
 
@@ -131,7 +144,7 @@ assert_meta_profile() {
 # in the task's durable record AND leads the launch command, so the agent and
 # every child it starts inherit it instead of the shared default session.
 test_every_spawn_records_and_launches_a_private_browser_session() {
-  local rec id out status launch session
+  local rec id out status launch wrapped session
   id=profile-browser-z30
   rec=$(make_spawn_case profile-browser claude "$id")
   read_case_record "$rec"
@@ -147,8 +160,11 @@ test_every_spawn_records_and_launches_a_private_browser_session() {
   esac
   [ "${#session}" -le 64 ] || fail "recorded browser session exceeds the 64-character limit: $session"
 
+  # The browser session must lead the WRAPPED command: that is the part `env`
+  # applies and the agent actually inherits.
   launch=$(cat "$LAUNCH_LOG")
-  case "$launch" in
+  wrapped=$(wrapped_launch "$launch")
+  case "$wrapped" in
     "CHROME_DEVTOOLS_AXI_SESSION=$session "*) : ;;
     *) fail "launch command does not lead with the recorded browser session"$'\n'"session: $session"$'\n'"launch:  $launch" ;;
   esac
@@ -208,7 +224,7 @@ test_two_tasks_in_one_home_never_share_a_browser_session() {
 }
 
 test_no_profile_keeps_claude_profile_defaults() {
-  local rec id out status expected launch session
+  local rec id out status expected launch wrapped session
   id=profile-off-z1
   rec=$(make_spawn_case profile-off claude "$id")
   read_case_record "$rec"
@@ -222,7 +238,8 @@ test_no_profile_keeps_claude_profile_defaults() {
   launch=$(cat "$LAUNCH_LOG")
   session=$(recorded_browser_session "$HOME_DIR/state/$id.meta")
   expected="CHROME_DEVTOOLS_AXI_SESSION=$session CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
-  [ "$launch" = "$expected" ] || fail "no-profile claude launch did not use the canonical launch kind"$'\n'"expected: $expected"$'\n'"actual:   $launch"
+  wrapped=$(wrapped_launch "$launch")
+  [ "$wrapped" = "$expected" ] || fail "no-profile claude launch did not use the canonical launch kind"$'\n'"expected: $expected"$'\n'"actual:   $wrapped"
   pass "no --model/--effort records defaults and types the claude launch instructions"
 }
 
@@ -441,7 +458,7 @@ test_active_dispatch_profile_allows_positional_harness() {
 }
 
 test_active_dispatch_profile_allows_raw_launch_command() {
-  local rec id out status launch session
+  local rec id out status launch wrapped session
   id=profile-raw-z15
   rec=$(make_spawn_case profile-raw claude "$id")
   read_case_record "$rec"
@@ -455,8 +472,9 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" custom-agent default default
   launch=$(cat "$LAUNCH_LOG")
   session=$(recorded_browser_session "$HOME_DIR/state/$id.meta")
-  [ "$launch" = "CHROME_DEVTOOLS_AXI_SESSION=$session custom-agent --flag" ] \
-    || fail "raw launch command changed"$'\n'"actual: $launch"
+  wrapped=$(wrapped_launch "$launch")
+  [ "$wrapped" = "CHROME_DEVTOOLS_AXI_SESSION=$session custom-agent --flag" ] \
+    || fail "raw launch command changed"$'\n'"actual: $wrapped"
   pass "active crew-dispatch profile allows the raw launch-command escape hatch"
 }
 

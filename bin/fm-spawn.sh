@@ -132,6 +132,18 @@
 # the shared default session; a name that cannot be derived is recorded nowhere and
 # never blocks the spawn. bin/fm-browser-lib.sh owns session naming, home-scoped
 # ownership, and reclaim (fm-teardown.sh, fm-watch.sh).
+# Every spawn runs the launch command under bin/fm-worker-env-exec.sh, which
+# loads the active home's $FM_HOME/.env, so a worker's credentials come from that
+# one mode-600 gitignored file rather than from machine-wide `launchctl setenv`
+# values every process on the machine inherits. Values never reach a command
+# line, the pane text, or a metadata record, and the wrapper execs so the agent
+# stays the pane's own child. bin/fm-worker-env-lib.sh owns the parser and the
+# eligibility rules, including the FM_*/FMX_* exclusion that keeps X mode's
+# FMX_PAIRING_TOKEN with the home instead of handing it to its workers.
+# A home with no .env loads nothing, which is not an error: a worker that lacks a
+# key it needs reports the missing credential per its brief. An in-pane relaunch
+# of a wedged agent bypasses the wrapper and starts without credentials; respawn
+# through this script instead.
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> mode=<mode> yolo=<on|off> window=<backend-target> worktree=<path>
 # mode/yolo are resolved per-project from data/projects.md for ship/scout tasks;
 # secondmate spawns record mode=secondmate, yolo=off, home=, and projects=.
@@ -1764,6 +1776,26 @@ fi
 # the env is set when the agent starts; the brief sleep lets the export land.
 spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
 sleep 0.3
+# Run the launch under this home's .env credentials. Applied last so the wrapper
+# is the command word, with every assignment prefix built above passed through to
+# it - fm-worker-env-exec.sh re-applies them via `env`, so the agent's own
+# environment is unchanged apart from the credentials it gains.
+#
+# This is a wrapper program rather than a pane-shell export for two reasons, both
+# load-bearing. A pane shell is whatever login shell the operator runs - fish on
+# this machine, under herdr and tmux alike - so nothing typed into it can assume
+# POSIX shell syntax; an earlier revision sourced a shell library here and failed
+# outright in a real fish pane. And an assignment prefix, which would work in any
+# shell, would put credential VALUES into the pane text the agent reads and into
+# `ps`, which is exactly the leak the brief's credential rule exists to prevent.
+#
+# Known limitation, deliberately not papered over: this covers the launch, so a
+# wedged agent RELAUNCHED by hand in its own pane (stuck-crewmate-recovery's
+# `claude --continue` and friends) does not go through the wrapper and starts
+# without credentials once the machine-wide values are gone. Recovering by
+# respawning through fm-spawn does not have that gap. Closing it properly needs a
+# shell-agnostic way to load a file into a live pane, which does not exist.
+LAUNCH="$(shell_quote "$FM_ROOT/bin/fm-worker-env-exec.sh") $(shell_quote "$FM_HOME/.env") -- $LAUNCH"
 spawn_send_literal "$T" "$LAUNCH"
 sleep 0.3
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then

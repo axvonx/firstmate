@@ -84,12 +84,42 @@
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
 # over copied detail) and has the crewmate add the fm-ensure-agents-md.sh
 # self-governance section when a touched project AGENTS.md lacks it.
-# Ship and scout briefs both carry a credential rule. Its first half is
-# unconditional: never print a credential value, because everything a crewmate
-# prints reaches a model provider, so a printed key is a leaked key. Its second
-# half is the vault call pattern, and it renders only when `av` (Automic Vault)
-# is on PATH at scaffold time, so a machine without the vault keeps the first
-# half and is never told to reach for a tool it does not have.
+# Ship and scout briefs both carry a credential rule, in three parts.
+# The first is unconditional: never print a credential value, because everything
+# a crewmate prints reaches a model provider, so a printed key is a leaked key.
+# That half deliberately spends most of its length on INDIRECT leaks - an `env`
+# or `printenv` dump, `set -x` tracing echoing an expanded command line, `curl
+# -v` printing an Authorization header, a debug print of a whole config or client
+# object, a raw crash trace on a credentialed path, and a fixture or
+# `.env.example` built from live values. Naming them is the point: the one leak
+# this repo has actually suffered was a worker echoing a key that was in its
+# environment, and moving credentials out of a machine-wide `launchctl setenv`
+# and into a per-home .env that fm-spawn loads makes MORE keys reliably present
+# in a worker's environment, not fewer. The direct `echo $KEY` was never the
+# realistic failure; a command that prints a value nobody typed is.
+# The second part renders only when the home actually has a .env: it says where
+# the values are, that the file is mode 600 and gitignored, that it is never
+# committed or copied into a project, and that a worker tests a variable rather
+# than opening the file to look at a value.
+# The third is the vault call pattern, and it renders only when `av` (Automic
+# Vault) is on PATH at scaffold time, so a machine without the vault keeps the
+# first parts and is never told to reach for a tool it does not have.
+# WHICH credentials that vault pattern covers is a per-home policy, not a
+# property of this shared repo, so it is read from config/vault-only-keys, which
+# holds one environment variable name per line, `#` comments and blanks ignored.
+# Absent means the original unnarrowed contract, every credential through the
+# vault, which is what every home had before the file existed and is the safe
+# default for a home whose split nobody has declared. Present means the vault
+# pattern applies to exactly those names and to nothing else, and the brief says
+# so up front and tells the worker to read every other credential straight from
+# its environment with no vault call and no stop-and-report. That last clause is
+# load-bearing: a worker that blocks waiting for a vault which does not hold its
+# key has failed for no reason, and every lane would fail that way at once.
+# Present-but-empty and an unusable name are both hard errors rather than being
+# skipped, because either one would silently drop a key out of vault discipline.
+# The two sentences whose meaning differs between the narrowed and unnarrowed
+# forms are substituted into one shared body rather than the body being kept in
+# two copies that would drift.
 # That gate proves only that something named `av` is there, and other tools ship
 # a command by the same name, so the vault half opens with an identity probe the
 # worker actually runs before reaching for the tool:
@@ -105,9 +135,12 @@
 # any of that (it fails while the vault's approval service is down, which is why
 # the probe is built on `av help` instead).
 # The prohibition is positive rather than implied: after a vault failure the
-# worker never reruns the command bare, because the ambient copy of a key is
-# still present at this step, so a bare rerun can succeed silently on that
-# exposed copy, and a fallback that works hides what a visible error would show.
+# worker never reruns the command bare, because a bare rerun can succeed silently
+# on a copy of the key that should not exist - a leftover ambient value, a config
+# file, a pasted note - and a fallback that works hides what a visible error
+# would show. That reasoning is stated without depending on an ambient copy being
+# present, so it holds both for a home that vaults every credential and for one
+# that vaults only the names in config/vault-only-keys.
 # That routing is separate from the wrapped command's own exit code: a failing
 # test or a bug in the script is debugged normally, under the same wrapper, so
 # the rule contains the credential path without blocking ordinary work.
@@ -116,8 +149,9 @@
 # at the call site keeps a money-spending command's credentials visible, and
 # `av bless` approves a script by path, which for a project script would mix a
 # local approval into the change being shipped. The scaffold teaches the pattern
-# and tells the worker to name its own task's keys; it hard-codes no key list,
-# which would rot. Secondmate charters carry no such rule: a secondmate operates
+# and tells the worker to name its own task's keys; it hard-codes no key list of
+# its own, which would rot and would be wrong for every other home besides.
+# Secondmate charters carry no such rule: a secondmate operates
 # from its home's AGENTS.md, which keeps a one-line reinforcement of the
 # invariant and points here for the contract, so this script is the single owner
 # of the credential rule for every audience.
@@ -183,6 +217,7 @@ if [ -n "${FM_STATE_OVERRIDE:-}" ]; then
 else
   STATE="$FM_HOME/state"
 fi
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 KIND=ship
 HERDR_LAB=0
 VISUAL_EVIDENCE=0
@@ -366,25 +401,107 @@ IFS= read -r -d '' CREDENTIALS_RULE <<'EOF' || true
 8. Never print, echo, log, or paste the VALUE of an API key, token, or other credential - not into your pane, not into a file you write, and not into a commit, a status line, or a pull request body.
    Everything you print is sent to a model provider, so a printed credential is a leaked credential that has to be rotated.
    Refer to a credential by its variable name, and when you need to know whether one is set, test it (`[ -n "${SOME_API_KEY:-}" ]`) rather than printing it.
+   Most of the credentials you can reach are sitting in your environment, so the leak you are most likely to cause is INDIRECT: a command that prints a value you never typed.
+   Never dump the environment - no bare `env`, `printenv`, `export -p`, or `set` - and never write one into a file, a log, a paste, or a bug report; when you want to know about one variable, test that one variable by name.
+   Never turn on shell tracing around a command that carries a credential: `set -x` and `bash -x` echo the expanded command line, so the command prints its own secret before it runs.
+   Never run an authenticated request under `curl -v`, `--trace`, or `--trace-ascii`, because those print the request headers and the Authorization header is one of them; use `-s` and read the response body.
+   Never print a config, client, or settings object whole - a debug print, `console.log`, `repr`, `dump`, or pretty-printer usually carries the loaded key inside it - and print the one non-secret field you actually wanted.
+   Never let a raw crash reach your pane on a credentialed path: a stack trace, an assertion message, or an error that interpolates the failed request can carry the value in a frame, so catch around the risky call and report without the payload.
+   Never build a test fixture, snapshot, cassette, recorded HTTP interaction, or `.env.example` out of live environment values; invent an obvious fake like `sk-test-not-a-real-key` and use that.
+   If a value does land in your pane, a file, or a commit despite all of this, stop immediately, append `blocked: {which credential leaked and where}` to the status file, and do not try to scrub it quietly - that key has to be rotated, and an unreported leak costs far more than a reported one.
 EOF
 CREDENTIALS_RULE=${CREDENTIALS_RULE%$'\n'}
+# Where the values actually are, stated only for a home that actually has the
+# file, so a home without one is never sent looking for it. fm-spawn.sh loads it
+# into the worker's pane shell (bin/fm-worker-env-lib.sh); this half of the rule
+# is what stops a worker from committing it or reading it out to look at a value.
+if [ -f "$FM_HOME/.env" ]; then
+  IFS= read -r -d '' CREDENTIALS_LOCATION <<'EOF' || true
+   The values live in one mode-600 gitignored `.env` in the firstmate home, and firstmate loads it into your environment when it launches you, so the variables are simply there for you to use.
+   Never commit that file, never copy it or its contents into a project, a fixture, or an image, and never add it to a repository's tracked files - the reason it is safe to keep credentials in your environment at all is that this one file stays out of every repo.
+   Never open it to see what a value is: test the variable instead, the same way you would test any other credential.
+EOF
+  CREDENTIALS_RULE="$CREDENTIALS_RULE"$'\n'"${CREDENTIALS_LOCATION%$'\n'}"
+fi
+# Which credentials the vault discipline actually covers. This repo is a shared
+# template and each home's split between vault and environment is a local policy
+# decision, so the names cannot be hard-coded here: config/vault-only-keys is
+# that home's declaration, one KEY name per line, `#` comments and blanks
+# ignored. Absent means the unnarrowed original contract - every credential goes
+# through the vault - which is both the safe default and what every existing home
+# already had, so this file's absence changes nothing for anyone.
+# Present-but-empty is an error rather than a third "no vault at all" mode: a
+# list that silently covers no key would turn the protection off without anyone
+# reading a diff, and deleting the file is the explicit way back to covering all.
+# An unusable name is an error for the same reason - dropping it would quietly
+# route a vaulted credential to the environment instead.
+VAULT_ONLY_KEYS=""
+VAULT_ONLY_FILE="$CONFIG/vault-only-keys"
+if [ -f "$VAULT_ONLY_FILE" ]; then
+  while IFS= read -r vault_line || [ -n "$vault_line" ]; do
+    vault_line=${vault_line%$'\r'}
+    vault_line=${vault_line#"${vault_line%%[![:space:]]*}"}
+    vault_line=${vault_line%"${vault_line##*[![:space:]]}"}
+    case "$vault_line" in
+      ''|'#'*) continue ;;
+      *[!A-Za-z0-9_]*|[!A-Za-z_]*)
+        echo "error: $VAULT_ONLY_FILE: not a usable environment variable name: $vault_line" >&2
+        exit 1
+        ;;
+    esac
+    if [ -n "$VAULT_ONLY_KEYS" ]; then
+      VAULT_ONLY_KEYS="$VAULT_ONLY_KEYS, $vault_line"
+    else
+      VAULT_ONLY_KEYS="$vault_line"
+    fi
+  done < "$VAULT_ONLY_FILE"
+  if [ -z "$VAULT_ONLY_KEYS" ]; then
+    echo "error: $VAULT_ONLY_FILE lists no key names; delete the file to apply vault discipline to every credential" >&2
+    exit 1
+  fi
+fi
 if command -v av >/dev/null 2>&1; then
+  # Scoped mode names the covered keys up front, so a worker can tell which world
+  # it is in without running anything. Everything else is read from the
+  # environment with no vault call and no stop: a worker that blocks waiting for
+  # a vault which does not hold its key has failed for no reason at all, and it
+  # would fail that way on every lane at once.
+  if [ -n "$VAULT_ONLY_KEYS" ]; then
+    IFS= read -r -d '' CREDENTIALS_VAULT_SCOPE <<EOF || true
+   Exactly these credentials are kept out of that file and out of your environment, and are reached through Automic Vault instead: $VAULT_ONLY_KEYS.
+   They stay in the vault because leaking one of them is money and a compliance incident rather than an API bill, so everything from here to the end of this rule applies to those names and to nothing else.
+   Every other credential is already in your environment: read it normally, wrap the command in nothing, and do not go looking for a vault - if a key you need is missing, that is a missing credential to report, never a reason to reach for \`av\`.
+EOF
+    CREDENTIALS_RULE="$CREDENTIALS_RULE"$'\n'"${CREDENTIALS_VAULT_SCOPE%$'\n'}"
+  fi
   IFS= read -r -d '' CREDENTIALS_VAULT <<'EOF' || true
    Before you use `av` for anything, confirm the `av` on this machine IS Automic Vault by running `av help 2>&1 | grep -q 'automicvault\.com'`, which must succeed.
    `av` is only a command name and other tools ship one by that same name, so an `av` that fails that probe is a different program, and naming a credential to it would hand that credential to whatever it actually is.
    If the probe does not confirm the vault - other output, an error, or no `av` on this machine at all - append `blocked: av on this machine is not Automic Vault` to the status file and stop.
-   Never guess at another vault command and never fall back to reading the credential out of the ambient environment: that ambient copy is the exposure this rule exists to remove, so stopping and reporting is correct here and improvising is not.
-   Credentials belong in Automic Vault rather than the ambient environment, so any command that authenticates or spends money names the keys it needs at the call site: `av inject +SERVICE_API_KEY +OTHER_TOKEN -- pnpm run benchmark`.
+   Never guess at another vault command and never fall back to reading the credential out of the ambient environment: reaching a vaulted key that way is exactly the exposure this rule exists to remove, so stopping and reporting is correct here and improvising is not.
+__VAULT_REACH_SENTENCE__
    One `+KEY` per credential, then `--`, then the command; the command itself needs no change, because it still reads the same variables it always did and only the way you launch it changes.
-   Name the keys YOUR task actually needs instead of copying that example - `av list` shows the names this machine holds, and `av help` covers the rest.
+__VAULT_NAMING_SENTENCE__
    `av list` is not a liveness check for the vault: it fails while the vault's approval service is not running, so a failed listing is not proof that a key is absent, and the identity probe above is the one check that does not depend on that service.
    An authentication failure or an unset key is the signal that a command needs `av inject`; it is never a reason to hunt for the value, read it out of a config file, or ask for it to be pasted to you.
    When the vault path itself fails - the identity probe fails, `av inject` fails, the key you named is not in the vault, or the credential otherwise never arrives - append `blocked: {the vault failure}` to the status file and stop.
-   Never rerun the command bare, meaning never drop the `av inject ... --` wrapper and launch the command directly, because a copy of some keys is still sitting in the ambient environment and a bare rerun can quietly succeed on that exposed copy - the exact exposure this rule exists to remove.
+   Never rerun the command bare, meaning never drop the `av inject ... --` wrapper and launch the command directly, because a bare rerun can quietly succeed on a copy of the key that should not exist - a leftover ambient value, a config file, a note someone pasted - and that silent success is the exact exposure this rule exists to remove.
    A fallback that works is worse than an error here: the error is visible and the silent success is not, so a failed vault call ends the attempt instead of being worked around.
    That is a rule about the wrapper and not about the wrapped command's own exit code: when the command itself runs and fails on its own merits - a failing test, a compile error, a bug in the script - debug it normally, and keep every rerun under the same `av inject` wrapper.
    Do not use `av bless`: it approves a script by path, so blessing a file inside the project would mix a local approval into the change you are shipping, and the explicit `+KEY` form needs no blessing at all.
 EOF
+  # Two sentences carry the whole all-credentials-vs-listed-keys difference, so
+  # they are substituted rather than the body being kept in two near-identical
+  # copies that would drift the first time only one was edited.
+  if [ -n "$VAULT_ONLY_KEYS" ]; then
+    VAULT_REACH_SENTENCE="   A vaulted credential is deliberately absent from your environment, so a command that needs one names it at the call site: \`av inject +SERVICE_API_KEY +OTHER_TOKEN -- pnpm run benchmark\`."
+    VAULT_NAMING_SENTENCE="   Name only the vaulted keys YOUR task actually needs instead of copying that example, and reach every other credential straight from the environment; \`av help\` covers the rest."
+  else
+    VAULT_REACH_SENTENCE="   Credentials belong in Automic Vault rather than the ambient environment, so any command that authenticates or spends money names the keys it needs at the call site: \`av inject +SERVICE_API_KEY +OTHER_TOKEN -- pnpm run benchmark\`."
+    VAULT_NAMING_SENTENCE="   Name the keys YOUR task actually needs instead of copying that example - \`av list\` shows the names this machine holds, and \`av help\` covers the rest."
+  fi
+  CREDENTIALS_VAULT=${CREDENTIALS_VAULT//__VAULT_REACH_SENTENCE__/$VAULT_REACH_SENTENCE}
+  CREDENTIALS_VAULT=${CREDENTIALS_VAULT//__VAULT_NAMING_SENTENCE__/$VAULT_NAMING_SENTENCE}
   CREDENTIALS_RULE="$CREDENTIALS_RULE"$'\n'"${CREDENTIALS_VAULT%$'\n'}"
 fi
 
