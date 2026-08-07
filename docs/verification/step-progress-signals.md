@@ -133,6 +133,26 @@ The no-progress escalation count is not cleared by an intervening absorb, so `de
 And `FM_STEP_PROGRESS_SURFACE_COUNT` bounds the absorbs themselves: because an absorb can happen at most once per `FM_STALE_ESCALATE_SECS` per pane, its default of 15 puts a first human glance at roughly one hour at the 240s bound, then roughly hourly.
 That notice is worded as long-running rather than wedged, because the lane is healthy; it exists because progressing and finishing are different things, and only a human can judge that a run has been advancing for longer than the work is worth.
 
+Both bounds above describe the idle-pane ladder, which is the only ladder `crew_step_is_advancing`'s thresholds were measured for.
+A pane the harness reports as authoritatively busy is on `busy_turn_check`'s separate hour-scale ladder in `bin/fm-watch.sh`, which consults this same predicate once per `FM_BUSY_TURN_RENOTICE_SECS` and reaches its first human glance on the same roughly-hourly cadence by that route instead.
+
+That busy ladder's measured latency, at the production defaults where `FM_BUSY_TURN_MAX_SECS` is 3600s and `FM_BUSY_TURN_RENOTICE_SECS` defaults to it, is a long-running notice at a completed-turn age of 1h, `possible wedge, escalation 1` at 2h, escalation 2 at 3h, and escalation 3 plus `demand-deep-inspection` at 4h.
+Those are measured from the completed-turn bound crossing, which counts as the first of those windows rather than being spent anchoring a timer in silence; that is what puts the notice at the bound and the first wedge naming one window after it.
+This number drifted from the shipped behaviour twice while the ladder was being built, because the suite asserted the ORDER of the rungs and never their TIMING, so prose was the only place the latency lived and nothing in the tests could contradict a wrong claim - check it against `test_busy_ladder_rungs_land_one_window_apart`, which pins every rung to a turn age measured in whole windows past the bound, rather than trusting this paragraph.
+
+Which rung a poll surfaces is now derived from the turn age itself, so the latency above holds by construction rather than by assertion, and the markers behind it divide as follows.
+
+- `state/.busy-turn-rung-<key>` holds the highest rung the busy ladder has already surfaced together with the mtime of the turn anchor it was surfaced against, and the rung it is compared against comes from the turn age, so the ladder's position cannot disagree with that age.
+  It has no reset path at all, deliberately: a completed turn moves that anchor, so a record written against the previous one is simply not a record for this turn and its high-water mark reads 0, which leaves no reset for a branch of the poll loop to place or to miss.
+  An absent, malformed, or foreign record reads 0 as well, and because the rung is derived from the age that can only emit the rung the current turn has actually reached rather than replay an earlier one.
+  Consistent by construction, and pinned from both directions: `test_busy_rung_ignores_an_erased_idle_ladder_timer` erases every idle-ladder marker and still expects the rung the turn age has earned, and `test_busy_rung_restarts_after_a_turn_completes_while_idle_stale` completes a turn in the one loop branch that the earlier explicit reset never ran in and expects the next turn to start at its first rung.
+- `state/.stale-since-<key>` and `state/.wedge-escalations-<key>` are the idle ladder's alone; the busy ladder neither reads nor writes them.
+  Both are reset by either call-site branch that sees a pane which is not a busy pane past the bound, by `handle_paused_stale`, and by `clear_pause_tracking` in `bin/fm-watch.sh` and in `bin/fm-supervise-daemon.sh`, while `surface_nonterminal_stale` and `wedge_timer_check`'s escalate path clear the since file only, deliberately not the count.
+  That reset surface is unchanged by this split, and it is why the busy ladder stopped sharing them: a ladder cannot keep a promise about latency while its position lives in a counter whose reset paths it does not own.
+- `state/.step-activity-<key>`, the `crew_step_is_advancing` digest memo, is still shared with the idle ladder and is still cleared by those same paths.
+  A cleared memo makes the next observation read as changed, which biases one window toward absorbing rather than escalating.
+  Untested, and deliberately left alone as out of scope here, because it can only delay a wedge report by a single window and never suppresses one.
+
 ## Where change detection does not apply
 
 The changed-digest rule exists to catch a looping AGENT, so it is scoped to steps that have one.
@@ -153,4 +173,5 @@ The recency-only path stays bounded, because such a step has no live-agent tier 
 - `tests/fm-crew-state.test.sh` pins pipeline-owned attribution, its stale-submitted-head and wrong-run rejections, the duration parsing including prefixed renderings, agent-pid liveness publication from both quoted and unquoted renderings, `step-agent: none` for a genuinely empty pid column, no step-agent field at all for an unreadable one, and the activity digest (stable for identical text, different for changed text).
 - `tests/fm-watch-triage.test.sh` pins both escalation directions through the watcher: an advancing step, a quiet-but-live agent, and a step reporting no agent while logging recently are absorbed, while a stopped activity age, an unchanged activity message with a dead agent, an unchanged message whose pid column was unreadable, and a live agent past the stall ceiling all escalate.
 - `tests/fm-watch-triage.test.sh` also pins the two bounds: an absorb no longer clears the no-progress count, and a lane that keeps changing its log text without progressing surfaces one long-running notice per `FM_STEP_PROGRESS_SURFACE_COUNT` absorbs.
+- `tests/fm-watch-triage.test.sh` also pins the busy ladder's timing rather than only its order: `test_busy_ladder_rungs_land_one_window_apart` drives an explicit bound and window and asserts that the notice lands at the bound and each escalation exactly one window later, so shifting any rung by a window fails.
 - `tests/fm-daemon.test.sh` pins the same recheck and the same absorb ladder in away mode.

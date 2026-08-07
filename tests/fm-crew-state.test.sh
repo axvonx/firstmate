@@ -1096,6 +1096,30 @@ test_no_run_idle_pane_paused() {
   pass "no run + idle pane on a paused: status reports state: paused with its reason"
 }
 
+# A verified captain-held transfer is the other declaration that intentionally
+# leaves a crew idle, and the watcher has always treated it as pause-shaped
+# through status_is_paused_or_captain_held. The reader did not: the verb mapped
+# to nothing, so a captain-held crew fell through to "unknown - none - no
+# current-state source available" and every consumer lost both the hold and the
+# reason for it. Same vocabulary, same state, and the hold summary as the detail.
+test_no_run_idle_pane_captain_held() {
+  reset_fakes
+  local d; d=$(new_case captain-held)
+  make_repo_on_branch "$d/wt" fm/feat-held
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-held.meta" "window=fm:fm-feat-held" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'needs-decision [key=api]: one or two endpoints?\ncaptain-held [key=api]: handed to the captain as fm-api-shape\n' \
+    > "$d/state/feat-held.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-held
+  local out; out=$(run_crew_state "$d" feat-held)
+  assert_contains "$out" "state: paused" "captain-held log -> paused"
+  assert_contains "$out" "source: status-log" "captain-held -> status-log source"
+  assert_contains "$out" "handed to the captain as fm-api-shape" "the hold summary is carried in the detail"
+  pass "no run + idle pane on a captain-held: transfer reports state: paused with the hold summary"
+}
+
 test_no_run_idle_pane_custom_paused_verb() {
   reset_fakes
   local d; d=$(new_case custom-paused)
@@ -1750,6 +1774,7 @@ test_no_run_herdr_idle_agent_status_and_idle_record_stays_idle
 test_no_run_idle_pane_uses_log
 test_no_run_idle_pane_uses_keyed_log
 test_no_run_idle_pane_paused
+test_no_run_idle_pane_captain_held
 test_no_run_idle_pane_custom_paused_verb
 test_no_run_idle_secondmate_resolved_event_not_state
 test_dead_window_ignores_stale_status_log

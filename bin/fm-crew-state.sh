@@ -79,7 +79,9 @@
 #      agree, and are reported as parked.
 #   4. No run for this crew (pre-validation, or kind=scout): fall back to the
 #      recorded backend's pane busy state, then the status log's last line only
-#      when its verb maps to a recognized run-state. Decision-only events such as
+#      when its verb maps to a recognized run-state. A declared external-wait
+#      pause and a verified captain-held transfer both map to `paused`, with the
+#      declaration's own note as the detail. Decision-only events such as
 #      `resolved` never become current state or detail.
 #   5. Missing meta or torn-down worktree: report unknown · none. If no run is
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
@@ -156,8 +158,15 @@ log_last_line() {
 # a crew with no active run and an idle pane that declared a known external wait
 # reports `paused` distinctly, so a supervisor reading this sees a declared pause
 # and its reason rather than a wedge-suspect idle.
+# A verified captain-held transfer maps to the same state through the shared
+# status_is_paused_or_captain_held vocabulary. Both declare a wait that is
+# expected to leave the pane idle, and both are meant to be absorbed on the
+# bounded pause cadence rather than surfaced as a wedge suspect. Without it the
+# verb mapped to `unknown`, so a captain-held crew fell all the way through to
+# `unknown - none - no current-state source available` and every consumer lost
+# both the hold and its reason; the emitted detail carries the hold summary.
 map_log_state() {  # <line>
-  if status_is_paused "$1"; then
+  if status_is_paused_or_captain_held "$1"; then
     echo paused
     return
   fi
