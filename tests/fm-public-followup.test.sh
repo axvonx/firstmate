@@ -91,6 +91,21 @@ EOF
   printf '%s\n' "$home"
 }
 
+# A real secondmate home is a git clone and a child task's worktree is a real
+# worktree; these cases stand the home in for that worktree. Cleanup proves the
+# worktree is still the task's before anything else (bin/fm-worktree-owner-lib.sh),
+# so give the fixture that shape - otherwise these cases refuse for want of an
+# ownership proof and never reach the public-reply contract they are about.
+seed_child_worktree_ownership() {  # <home> <task-id>
+  local home=$1 id=$2
+  if ! git -C "$home" rev-parse --absolute-git-dir >/dev/null 2>&1; then
+    git -C "$home" init -q
+    git -C "$home" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+      commit -q --allow-empty -m 'secondmate home baseline'
+  fi
+  fm_write_worktree_owner "$home" "$id" "$home" "$home/state/$id.meta" >/dev/null
+}
+
 run_pf() {  # <home> <args...>
   local home=$1
   shift
@@ -594,6 +609,7 @@ test_secondmate_teardown_requires_parent_binding() {
   fm_write_meta "$child/state/work-child.meta" \
     "window=firstmate:fm-work-child" "endpoint_task_id=work-child" \
     "worktree=$child" "project=$child" "kind=ship" "mode=local-only"
+  seed_child_worktree_ownership "$child" work-child
 
   PATH="$child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$child" \
     FM_STATE_OVERRIDE="$child/state" FM_DATA_OVERRIDE="$child/data" \
@@ -618,6 +634,7 @@ test_secondmate_teardown_requires_parent_binding() {
   fm_write_meta "$child/state/work-child.meta" \
     "window=firstmate:fm-work-child" "endpoint_task_id=work-child" \
     "worktree=$child" "project=$child" "kind=ship" "mode=local-only"
+  seed_child_worktree_ownership "$child" work-child
 
   PATH="$child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$child" \
     FM_STATE_OVERRIDE="$child/state" FM_DATA_OVERRIDE="$child/data" \
@@ -654,6 +671,8 @@ SH
     "window=firstmate:fm-work-disabled" "endpoint_task_id=work-disabled" \
     "worktree=$home/projects/worktree" "project=$home/projects/worktree" \
     "kind=ship" "mode=local-only"
+  fm_write_worktree_owner "$home" work-disabled "$home/projects/worktree" \
+    "$home/state/work-disabled.meta" >/dev/null
 
   rc=0
   out=$(PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
@@ -690,6 +709,8 @@ SH
     "window=firstmate:fm-work-disabled" "endpoint_task_id=work-disabled" \
     "worktree=$child/projects/worktree" "project=$child/projects/worktree" \
     "kind=ship" "mode=local-only"
+  fm_write_worktree_owner "$child" work-disabled "$child/projects/worktree" \
+    "$child/state/work-disabled.meta" >/dev/null
 
   rc=0
   out=$(PATH="$child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$child" \
@@ -718,6 +739,7 @@ test_secondmate_parent_binding_matches_literal_id() {
   fm_write_meta "$child/state/work-literal.meta" \
     "window=firstmate:fm-work-literal" "endpoint_task_id=work-literal" \
     "worktree=$child" "project=$child" "kind=ship" "mode=local-only"
+  seed_child_worktree_ownership "$child" work-literal
 
   PATH="$child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$child" \
     FM_STATE_OVERRIDE="$child/state" FM_DATA_OVERRIDE="$child/data" \

@@ -10,6 +10,17 @@ set -u
 # shellcheck source=tests/secondmate-helpers.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/secondmate-helpers.sh"
 
+# A child's pool slot recycles exactly like a parent's, so forced secondmate
+# cleanup proves the child worktree is still that child's before touching it
+# (bin/fm-worktree-owner-lib.sh). A real child spawn writes that proof in the
+# CHILD home; these fixtures write the child meta by hand, so they write it too.
+# Tolerant by design: a few cases below point child meta at a path that is not a
+# git worktree at all, and those cases are asserting an earlier refusal.
+seed_child_worktree_ownership() {  # <child-home> <task-id> <worktree>
+  local home=$1 id=$2 worktree=$3
+  fm_write_worktree_owner "$home" "$id" "$worktree" "$home/state/$id.meta" >/dev/null 2>&1 || true
+}
+
 TMP_ROOT=$(fm_test_tmproot fm-secondmate-safety)
 export FM_BACKEND=tmux
 
@@ -1857,6 +1868,11 @@ kind=ship
 mode=no-mistakes
 yolo=off
 EOF
+  seed_child_worktree_ownership "$subhome" child "$childwt"
+  # The child's own spawn, in the child home, established this. Forced discard
+  # of a secondmate's work still never authorizes resetting a pool slot that has
+  # since been reissued, so the child worktree needs its ownership proof here too.
+  fm_write_worktree_owner "$subhome" child "$childwt" "$subhome/state/child.meta" >/dev/null
   fakebin=$(make_fake_tmux "$TMP_ROOT/force-teardown-fake")
   log="$TMP_ROOT/force-teardown-fake/tmux.log"
   if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/force-teardown-fake/pane.txt" \
@@ -1907,6 +1923,7 @@ kind=ship
 mode=no-mistakes
 yolo=off
 EOF
+  seed_child_worktree_ownership "$subhome" child "$childwt"
   printf 'child check\n' > "$subhome/state/child.check.sh"
   printf 'external quarantine artifact\n' > "$external/child.check.protected"
   chmod 0640 "$external/child.check.protected"
@@ -1965,6 +1982,7 @@ kind=ship
 mode=no-mistakes
 yolo=off
 EOF
+  seed_child_worktree_ownership "$subhome" child "$childwt"
   fakebin=$(make_fake_tmux "$TMP_ROOT/force-lock-child-fake")
   log="$TMP_ROOT/force-lock-child-fake/tmux.log"
   cat > "$fakebin/treehouse" <<'SH'
@@ -2268,6 +2286,7 @@ kind=ship
 mode=no-mistakes
 yolo=off
 EOF
+  seed_child_worktree_ownership "$subhome" child "$childwt"
   fakebin=$(make_fake_tmux "$TMP_ROOT/prevalidate-teardown-fake")
   log="$TMP_ROOT/prevalidate-teardown-fake/tmux.log"
   if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/prevalidate-teardown-fake/pane.txt" \
@@ -2313,6 +2332,7 @@ kind=ship
 mode=no-mistakes
 yolo=off
 EOF
+  seed_child_worktree_ownership "$subhome" child "$childwt"
   fakebin=$(make_fake_tmux "$TMP_ROOT/child-active-descendant-fake")
   log="$TMP_ROOT/child-active-descendant-fake/tmux.log"
   if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/child-active-descendant-fake/pane.txt" \
@@ -2364,6 +2384,7 @@ kind=ship
 mode=no-mistakes
 yolo=off
 EOF
+  seed_child_worktree_ownership "$subhome" child "$childwt"
   fakebin=$(make_fake_tmux "$TMP_ROOT/child-repo-descendant-fake")
   log="$TMP_ROOT/child-repo-descendant-fake/tmux.log"
   if PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$fakeroot" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/child-repo-descendant-fake/pane.txt" \
@@ -2409,6 +2430,7 @@ kind=ship
 mode=no-mistakes
 yolo=off
 EOF
+  seed_child_worktree_ownership "$subhome" child "$childwt"
   fakebin=$(make_fake_tmux "$TMP_ROOT/unregistered-child-fake")
   log="$TMP_ROOT/unregistered-child-fake/tmux.log"
   if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/unregistered-child-fake/pane.txt" \

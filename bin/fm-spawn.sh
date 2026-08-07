@@ -1031,7 +1031,11 @@ case "$BACKEND" in
     HERDR_LAUNCHER_RELATIONSHIP=launcher-home
     if [ "$KIND" = secondmate ]; then
       HERDR_LABEL_HOME=$PROJ_ABS
-      HERDR_LAUNCHER_RELATIONSHIP=other-home
+      # Quoted so the literal cannot be read as arithmetic: sourcing
+      # fm-worktree-owner-lib.sh puts locals named 'other' and 'home' in
+      # ShellCheck's scope for this file, and an unquoted other-home then
+      # trips SC2100.
+      HERDR_LAUNCHER_RELATIONSHIP='other-home'
     fi
     HERDR_PRESENTATION_JOURNAL=$(fm_backend_herdr_projection_journal_path "$STATE" "$ID")
     HERDR_PROJECTED=0
