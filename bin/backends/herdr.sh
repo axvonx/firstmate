@@ -2408,16 +2408,17 @@ fm_backend_herdr_strip_ansi() {  # <text>
 #   separated - Pi's composer is one or more content rows between two solid
 #              horizontal `─` separator rows, with no prompt glyph or side
 #              borders. This shape is accepted ONLY when Herdr's native
-#              `agent get` identifies the target as Pi and reports it idle,
-#              done, or blocked. A missing/stale/non-Pi agent identity, a
-#              working Pi, an over-tall candidate, or an incomplete separator
-#              pair remains unknown. This identity + structure conjunction is
-#              what makes a blank Pi row safe without weakening dead-shell or
-#              ambiguous-pane refusal. The same identity gate also bounds the
-#              separator heuristic in the other direction: a separator row
-#              found BELOW a bordered or bare match only demotes that match
-#              on a Pi or unidentifiable target, because Claude's own closing
-#              rule sits below its own `❯` row (see the branch comment below).
+#              `agent get` identifies the target as one of the Pi family
+#              (fm_backend_herdr_agent_is_pi) and reports it idle, done, or
+#              blocked. A missing/stale/non-Pi agent identity, a working Pi, an
+#              over-tall candidate, or an incomplete separator pair remains
+#              unknown. This identity + structure conjunction is what makes a
+#              blank Pi row safe without weakening dead-shell or ambiguous-pane
+#              refusal. That one identity gate also bounds the separator
+#              heuristic in the other direction: a separator row found BELOW a
+#              bordered or bare match only demotes that match on a Pi-family or
+#              unidentifiable target, because Claude's own closing rule sits
+#              below its own `❯` row (see the branch comment below).
 #
 #   empty   - blank, a bare prompt glyph, known ghost/placeholder text
 #             ("Type a message...", verified grok 0.2.82's empty-composer
@@ -2526,9 +2527,22 @@ fm_backend_herdr_agent_identity_raw() {  # <session> <pane> -> <agent>\t<status>
   printf '%s' "$out" | jq -r '[.result.agent.agent // "", .result.agent.agent_status // ""] | @tsv' 2>/dev/null
 }
 
+# The single owner of "does this native identity name a Pi target". Covers the
+# same Pi family the tmux adapter enumerates in fm_backend_tmux_agent_state and
+# firstmate launches from bin/fm-spawn.sh. Herdr 0.8.0's detection vocabulary
+# reports only `pi` (recorded in docs/verification/runtime-backends.md), but the
+# manifests are remote and versioned, so the separator heuristic below must not
+# hinge on one spelling of the family it is a heuristic for.
+fm_backend_herdr_agent_is_pi() {  # <agent> -> 0 when the identity names a Pi target
+  case "$1" in
+    pi|pi-signed|pi-launcher|Pi) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
   local target=$1 session pane cap line trimmed found=0 shape="" raw_match="" bordered=0 stripped
-  local identity agent agent_status row=0 generic_line=0
+  local identity agent agent_status row=0 generic_line=0 separator=none
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   session=$FM_BACKEND_HERDR_SESSION
   pane=$FM_BACKEND_HERDR_PANE
@@ -2561,62 +2575,63 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
         ;;
     esac
   done < <(printf '%s\n' "$cap")
-  # Pi has no prompt glyph or side border. Compare its bottom-most complete
-  # separator pair with the last generic match so an earlier bordered transcript
-  # row can never suppress the live Pi composer. Identity is consulted only when
-  # a lower separator pair could change the verdict.
+  # Pi has no prompt glyph or side border. Compare its bottom-most separator
+  # geometry with the last generic match so an earlier bordered transcript row
+  # can never suppress the live Pi composer, and so a separator BELOW the
+  # generic match can flag that match as stale. Both readings are Pi-shaped
+  # inferences, so both are gated on one native identity read, taken only when
+  # the geometry could actually change the verdict: a complete pair can promote
+  # a Pi composer even with no generic match at all, while an unmatched
+  # separator can only ever demote an existing match.
   fm_backend_herdr_pi_composer_find "$cap"
   if [ "$FM_BACKEND_HERDR_PI_PAIR_FOUND" -eq 1 ] \
      && [ "$FM_BACKEND_HERDR_PI_PAIR_LINE" -gt "$generic_line" ] \
      && [ "$generic_line" -lt "$FM_BACKEND_HERDR_PI_PAIR_OPEN_LINE" ]; then
-    identity=$(fm_backend_herdr_agent_identity_raw "$session" "$pane" 2>/dev/null || true)
-    IFS=$'\t' read -r agent agent_status <<EOF
-$identity
-EOF
-    case "$agent:$agent_status" in
-      pi:idle|pi:done|pi:blocked)
-        if [ "$FM_BACKEND_HERDR_PI_PAIR_VALID" -eq 1 ]; then
-          shape=separated
-          raw_match=$FM_BACKEND_HERDR_PI_CONTENT
-          found=1
-        else
-          found=0
-        fi
-        ;;
-      pi:*|:*)
-        # A working Pi or unreadable identity cannot authorize injection, and
-        # the lower separator pair proves any generic row above is not current.
-        found=0
-        ;;
-      *) : ;; # A known non-Pi agent keeps its established generic verdict.
-    esac
+    separator=pair
   elif [ "$FM_BACKEND_HERDR_PI_PAIR_FOUND" -eq 0 ] \
+       && [ "$generic_line" -gt 0 ] \
        && [ "$FM_BACKEND_HERDR_PI_LAST_SEPARATOR_LINE" -gt "$generic_line" ]; then
-    # A lower unmatched separator is Pi-shaped evidence: it can only mean the
-    # generic row is stale when the target is a harness that draws a
-    # glyphless separator composer at all. Claude closes its OWN composer
-    # with a full-width rule and decorates the opening rule with a mode badge
-    # (verified claude 2.x on Herdr 0.8.0: "───… ↯ ─" over "❯ …" over
-    # "─────"), so the pair never completes and the closing rule sits BELOW
-    # the very prompt row it belongs to. Treating that as staleness read
-    # every healthy Claude pane as unknown, which turned a landed steer into
-    # fm-send's "delivery unconfirmed" refusal whenever the pre-Enter
-    # baseline was not idle. Identity is therefore consulted here on the same
-    # terms as the complete-pair branch above: only a Pi target or an
-    # unreadable identity keeps the refusal.
+    # An unmatched lower separator is only evidence of staleness on a harness
+    # that draws a glyphless separator composer at all. Claude closes its OWN
+    # composer with a full-width rule and decorates the opening rule with a
+    # mode badge (verified claude 2.x on Herdr 0.8.0: "───… ↯ ─" over "❯ …"
+    # over "─────"), so the pair never completes and the closing rule sits
+    # BELOW the very prompt row it belongs to. Reading that as staleness made
+    # every healthy Claude pane unknown, which turned a landed steer into
+    # fm-send's "delivery unconfirmed" refusal whenever the pre-Enter baseline
+    # was not idle.
+    separator=unmatched
+  fi
+  if [ "$separator" != none ]; then
     identity=$(fm_backend_herdr_agent_identity_raw "$session" "$pane" 2>/dev/null || true)
     IFS=$'\t' read -r agent agent_status <<EOF
 $identity
 EOF
-    case "$agent:$agent_status" in
-      pi:*|:*)
-        # A Pi composer may genuinely be mid-draw below the generic row, and
-        # an unreadable or unregistered identity is ambiguity, not proof of a
-        # live agent composer. Both keep the dead-shell refusal.
-        found=0
-        ;;
-      *) : ;; # A known non-Pi agent keeps its established generic verdict.
-    esac
+    if [ -z "$agent" ]; then
+      # An unreadable or unregistered identity is ambiguity, not proof of a
+      # live agent composer, and the lower separator means any generic row
+      # above it may not be current. Keeps the dead-shell refusal.
+      found=0
+    elif fm_backend_herdr_agent_is_pi "$agent"; then
+      case "$separator:$agent_status" in
+        pair:idle|pair:done|pair:blocked)
+          if [ "$FM_BACKEND_HERDR_PI_PAIR_VALID" -eq 1 ]; then
+            shape=separated
+            raw_match=$FM_BACKEND_HERDR_PI_CONTENT
+            found=1
+          else
+            found=0
+          fi
+          ;;
+        *)
+          # A working Pi, an over-tall candidate, or a pair still mid-draw
+          # below the generic row cannot authorize injection, and the lower
+          # separator proves any generic row above is not current.
+          found=0
+          ;;
+      esac
+    fi
+    # A known non-Pi agent keeps its established bordered or bare verdict.
   fi
   [ "$found" -eq 1 ] || { printf 'unknown'; return 0; }
   # Content: extract the real typed text from the raw row with the shared,

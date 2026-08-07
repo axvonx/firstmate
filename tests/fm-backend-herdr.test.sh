@@ -3017,14 +3017,19 @@ test_composer_state_claude_collapsed_paste_is_pending() {
 # genuinely be drawing a separator composer below the generic row, and an
 # unreadable or unregistered identity is ambiguity - both keep the refusal, so
 # the fix cannot hand a dead shell or a mid-draw Pi pane an "empty" verdict.
+# The `pi-signed` cases pin the FAMILY rather than the bare `pi` spelling: the
+# demote side and the admit side share one predicate, so a signed Pi pane can
+# never be refused under one branch and admitted under the other.
 test_composer_state_unmatched_lower_separator_refuses_unsafe_identity() {
   local dir log resp fb out case_id
-  for case_id in pi-idle pi-working unregistered unreadable; do
+  for case_id in pi-idle pi-working pi-signed-idle pi-signed-working unregistered unreadable; do
     dir="$TMP_ROOT/composer-unmatched-sep-$case_id"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
     herdr_claude_badged_composer "$(printf '\xe2\x9d\xaf')" > "$resp/1.out"
     case "$case_id" in
       pi-idle) printf '{"result":{"agent":{"agent":"pi","agent_status":"idle"}}}\n' > "$resp/2.out" ;;
       pi-working) printf '{"result":{"agent":{"agent":"pi","agent_status":"working"}}}\n' > "$resp/2.out" ;;
+      pi-signed-idle) printf '{"result":{"agent":{"agent":"pi-signed","agent_status":"idle"}}}\n' > "$resp/2.out" ;;
+      pi-signed-working) printf '{"result":{"agent":{"agent":"pi-signed","agent_status":"working"}}}\n' > "$resp/2.out" ;;
       unregistered) printf '{"error":{"code":"agent_not_found","message":"agent target w1:p2 not found"}}\n' > "$resp/2.out" ;;
       unreadable) printf '1\n' > "$resp/2.exit" ;;
     esac
@@ -3033,7 +3038,28 @@ test_composer_state_unmatched_lower_separator_refuses_unsafe_identity() {
       bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
     [ "$out" = unknown ] || fail "an unmatched lower separator must still refuse for identity case '$case_id', got '$out'"
   done
-  pass "fm_backend_herdr_composer_state: an unmatched lower separator still refuses on Pi, unregistered, and unreadable identities"
+  pass "fm_backend_herdr_composer_state: an unmatched lower separator still refuses on Pi-family, unregistered, and unreadable identities"
+}
+
+# The other direction of the same predicate. A complete, valid, idle separator
+# pair is admitted for every spelling of the Pi family, so widening the demote
+# side above cannot leave a signed Pi pane permanently unclassifiable.
+test_composer_state_pi_family_separator_idle_is_empty() {
+  local dir log resp fb out name idx=0
+  # Numbered case directories, not name-derived ones: this repository's macOS
+  # filesystem is case-insensitive, so 'pi' and 'Pi' would otherwise share one
+  # canned-response directory and its call counter.
+  for name in pi pi-signed pi-launcher Pi; do
+    idx=$((idx + 1))
+    dir="$TMP_ROOT/composer-pi-family-$idx"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+    printf '\x1b[0m\x1b[38;2;129;162;190m─────────────────────────────────────────────────────\x1b[0m\n\x1b[0m\x1b[7m \x1b[0m                                                    \n\x1b[0m\x1b[38;2;129;162;190m─────────────────────────────────────────────────────\x1b[0m\n' > "$resp/1.out"
+    printf '{"result":{"agent":{"agent":"%s","agent_status":"idle"}}}\n' "$name" > "$resp/2.out"
+    fb=$(make_herdr_fakebin "$dir")
+    out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state lab:w1:p2' "$ROOT" )
+    [ "$out" = empty ] || fail "an idle separator pair on Pi-family identity '$name' must read empty exactly as 'pi' does, got '$out'"
+  done
+  pass "fm_backend_herdr_composer_state: an idle separator pair is admitted for every Pi-family identity spelling"
 }
 
 # End to end at the caller boundary: a steer to a crewmate that is already
@@ -4114,6 +4140,7 @@ test_composer_state_claude_badged_rule_composer_is_empty
 test_composer_state_claude_badged_rule_real_text_is_pending
 test_composer_state_claude_collapsed_paste_is_pending
 test_composer_state_unmatched_lower_separator_refuses_unsafe_identity
+test_composer_state_pi_family_separator_idle_is_empty
 test_send_text_submit_confirms_against_working_claude_baseline
 test_send_text_submit_still_reports_pending_when_text_stays_in_composer
 test_wait_for_working_returns_busy_on_first_poll

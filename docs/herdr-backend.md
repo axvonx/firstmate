@@ -209,14 +209,25 @@ A human-blocked permission dialog has no busy banner and still surfaces.
 ## Composer and injection safety
 
 Herdr has no direct cursor-row primitive.
-The adapter locates the bottom-most recognized bordered row, Claude `❯` row, Codex `›` row, or a Pi separator region admitted only when native identity is exactly Pi and state is idle, done, or blocked.
-A working Pi, pending middle row, missing identity, incomplete separator pair, or over-tall candidate remains pending or unknown.
+The adapter locates the bottom-most recognized bordered row, Claude `❯` row, Codex `›` row, or a Pi separator region admitted only when native identity names the Pi family and state is idle, done, or blocked.
+A working Pi, pending middle row, missing identity, or over-tall candidate remains pending or unknown, and so does an incomplete separator pair on a Pi-family target.
+A Claude or Codex pane with an incomplete pair classifies normally from its own prompt row.
 
-A separator row found below the recognized bordered or bare row is Pi-shaped evidence and is scoped to Pi targets.
+The Pi family is one predicate, `fm_backend_herdr_agent_is_pi`, covering `pi`, `pi-signed`, `pi-launcher`, and `Pi`, matching the set the tmux adapter recognizes.
+Both readings of the separator geometry consult it, so the admit side and the demote side cannot drift apart again.
+Herdr 0.8.0 reports only `pi` for a Pi pane, so the wider set changes nothing measured today; if a future Herdr manifest reports `pi-signed`, that pane gains the Pi accept arm and reads as a separated composer when its pair is complete and it is idle, done, or blocked, where it previously read unknown.
+
+A separator row found below the recognized bordered or bare row is Pi-shaped evidence and is scoped to Pi-family targets.
 Claude draws its own composer between two full-width rules and decorates the opening rule with a mode badge, so the pair never completes and the closing rule sits below the `❯` row it belongs to.
-That closing rule now demotes the match only when native identity is Pi, unregistered, or unreadable, which keeps the mid-draw Pi and dead-shell refusals while letting a healthy Claude or Codex pane classify normally.
+That closing rule now demotes the match only when native identity is Pi-family, unregistered, or unreadable, which keeps the mid-draw Pi and dead-shell refusals while letting a healthy Claude or Codex pane classify normally.
 Reading the badged shape as staleness made every Claude pane unknown, which surfaced as an undelivered-steer report whenever the pre-Enter baseline was not idle and the composer fallback decided the verdict, and which also denied away-mode injection the affirmative `empty` it requires.
 A long steer is delivered as a paste that Claude collapses to a `[Pasted text #N]` placeholder rendered at normal intensity, so an unsubmitted long steer still reads pending and is still reported undelivered.
+
+What that scoping can no longer refuse, stated plainly because a narrowed veto nobody wrote down is how this reader keeps surprising its maintainers.
+An unmatched separator below a bordered or bare match no longer demotes a target Herdr identifies as a known non-Pi agent.
+The narrow shape that loses its refusal is an agent that exits mid-session while its Herdr registration survives, leaving a stale prompt row on screen with one plain rule below it and a live shell prompt below that; that shape previously read unknown and now keeps the stale `empty` verdict.
+The refusal is still verified for an unregistered pane, where `agent get` returns `agent_not_found` and the identity reads empty, which is the dead-shell case the away-mode guard was written for.
+The primary dead-shell guard remains the narrow bare-prompt glyph set, which never admits a shell prompt as a composer row at all.
 
 ANSI capture preserves de-emphasized placeholder style.
 `bin/fm-composer-lib.sh` is the fleet-wide owner that strips dim or faint runs and dark truecolor placeholders while retaining bright typed input.
