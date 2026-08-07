@@ -113,6 +113,13 @@
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
+# Every spawn into a POOLED worktree also records WORKTREE OWNERSHIP: a
+# per-spawn token written both into state/<id>.meta as worktree_token= and into
+# the worktree itself, so cleanup can later prove the worktree it is about to
+# reset is still this task's and not a pool slot that was returned and reissued
+# to a live lane. bin/fm-worktree-owner-lib.sh owns the record; a spawn that
+# cannot write it fails. Secondmate homes and Orca worktrees are exempt, exactly
+# as they are in the cleanup that reads it (bin/fm-teardown.sh's header).
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
@@ -186,6 +193,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-browser-lib.sh
 . "$SCRIPT_DIR/fm-browser-lib.sh"
+# shellcheck source=bin/fm-worktree-owner-lib.sh
+. "$SCRIPT_DIR/fm-worktree-owner-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -330,6 +339,7 @@ spawn_abort_cleanup() {
           {
             echo "window=$W"
             echo "worktree=${WT:-}"
+            [ -z "${WORKTREE_TOKEN:-}" ] || echo "worktree_token=${WORKTREE_TOKEN}"
             echo "project=$PROJ_ABS"
             echo "harness=$HARNESS"
             echo "kind=$KIND"
@@ -1023,7 +1033,11 @@ case "$BACKEND" in
     HERDR_LAUNCHER_RELATIONSHIP=launcher-home
     if [ "$KIND" = secondmate ]; then
       HERDR_LABEL_HOME=$PROJ_ABS
-      HERDR_LAUNCHER_RELATIONSHIP=other-home
+      # Quoted so the literal cannot be read as arithmetic: sourcing
+      # fm-worktree-owner-lib.sh puts locals named 'other' and 'home' in
+      # ShellCheck's scope for this file, and an unquoted other-home then
+      # trips SC2100.
+      HERDR_LAUNCHER_RELATIONSHIP='other-home'
     fi
     HERDR_PRESENTATION_JOURNAL=$(fm_backend_herdr_projection_journal_path "$STATE" "$ID")
     HERDR_PROJECTED=0
@@ -1357,6 +1371,30 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   validate_spawn_worktree "treehouse get" "$T"
 fi
 
+# Worktree ownership record: proof, from here on, that THIS task occupies this
+# worktree. A pool slot is reusable, so a task's worktree= can outlive its
+# tenancy; without this, cleanup cannot tell its own slot from the one that was
+# returned and reissued to a live lane. bin/fm-worktree-owner-lib.sh owns the
+# record's location, format, and verification; bin/fm-teardown.sh refuses when
+# it disagrees. Failing here is deliberate: a task whose ownership cannot be
+# recorded is a task cleanup would later have to refuse, so it must not launch.
+# Written for exactly the worktrees teardown proves, and no others: an Orca
+# worktree is exempt for the same reason teardown exempts it - it is per-task,
+# never pooled, and already carries an id-to-path occupancy proof - so recording
+# a token teardown never reads would only turn an unreadable path into a spawn
+# failure that buys nothing.
+WORKTREE_TOKEN=
+if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ -n "${WT:-}" ]; then
+  WORKTREE_TOKEN=$(fm_worktree_owner_mint) || {
+    echo "error: could not mint a worktree ownership token for $ID" >&2
+    exit 1
+  }
+  fm_worktree_owner_write "$FM_HOME" "$ID" "$WT" "$WORKTREE_TOKEN" || {
+    echo "error: could not record worktree ownership for $ID at $WT; refusing to launch a task whose cleanup could not later prove which worktree is its own" >&2
+    exit 1
+  }
+fi
+
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
 # create GOTMPDIR, so mkdir before it is used; fm-teardown removes the whole root.
 # Nested (not a bare /tmp/fm-<id>/gotmp) so other per-task temp can live alongside
@@ -1621,6 +1659,9 @@ META_WINDOW=$T
   echo "window=$META_WINDOW"
   echo "endpoint_task_id=$ID"
   echo "worktree=$WT"
+  # The other half of the worktree ownership record written above; cleanup
+  # matches the two before it may touch that worktree.
+  [ -z "${WORKTREE_TOKEN:-}" ] || echo "worktree_token=$WORKTREE_TOKEN"
   echo "project=$PROJ_ABS"
   echo "harness=$HARNESS"
   echo "kind=$KIND"

@@ -61,6 +61,10 @@ fm_git_identity fmtest fmtest@example.invalid
 
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 PR_CHECK="$ROOT/bin/fm-pr-check.sh"
+# Pinned rather than inherited: worktree ownership records name the home that
+# spawned the task, so the home teardown resolves and the home the fixtures
+# record must be the same one no matter what the surrounding session exports.
+TEST_FM_HOME="$ROOT"
 TMP_ROOT=$(fm_test_tmproot fm-teardown-tests)
 REAL_GIT_FOR_TEST=$(command -v git)
 export REAL_GIT_FOR_TEST
@@ -170,9 +174,12 @@ SH
   chmod +x "$case_dir/fakebin/tasks-axi"
 }
 
-# Write a meta file for the task. Args: case_dir mode kind
+# Write a meta file for the task, and - as a real spawn does - establish the
+# worktree ownership record that proves the worktree is still this task's.
+# Pass "unowned" as the 4th argument to model a record written before ownership
+# proof existed. Args: case_dir mode kind [unowned]
 write_meta() {
-  local case_dir=$1 mode=$2 kind=$3
+  local case_dir=$1 mode=$2 kind=$3 owner=${4:-owned}
   fm_write_meta "$case_dir/state/task-x1.meta" \
     "window=firstmate:fm-task-x1" \
     "endpoint_task_id=task-x1" \
@@ -180,6 +187,8 @@ write_meta() {
     "project=$case_dir/project" \
     "kind=$kind" \
     "mode=$mode"
+  [ "$owner" = unowned ] || fm_write_worktree_owner "$TEST_FM_HOME" task-x1 \
+    "$case_dir/wt" "$case_dir/state/task-x1.meta" >/dev/null
 }
 
 # Commit something on the worktree's task branch. Args: case_dir [message]
@@ -511,11 +520,302 @@ SH
 run_teardown() {
   local case_dir=$1; shift
   FM_ROOT_OVERRIDE="$ROOT" \
+  FM_HOME="$TEST_FM_HOME" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_CONFIG_OVERRIDE="$case_dir/config" \
   FM_BROWSER_STATE_ROOT="$case_dir/cda-root" \
   PATH="$case_dir/fakebin:$PATH" \
     "$TEARDOWN" task-x1 "$@"
+}
+
+# Records every treehouse and tmux invocation, so a refusal can be proven to
+# have reset no checkout and terminated no session - not merely to have printed
+# the word REFUSED.
+add_destructive_call_log() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+printf 'treehouse %s\n' "\$*" >> "$case_dir/destructive.log"
+exit 0
+SH
+  cat > "$case_dir/fakebin/tmux" <<SH
+#!/usr/bin/env bash
+printf 'tmux %s\n' "\$*" >> "$case_dir/destructive.log"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse" "$case_dir/fakebin/tmux"
+  : > "$case_dir/destructive.log"
+}
+
+# The shared setup for the recycled-slot pair below: a task whose work HAS
+# landed, so the landed-work check passes exactly as it did on 2026-08-04. The
+# only thing the two cases vary is who owns the worktree.
+make_landed_case() {
+  local name=$1 kind=${2:-ship} case_dir
+  case_dir=$(make_case "$name")
+  write_meta "$case_dir" no-mistakes "$kind"
+  wt_commit "$case_dir" "landed work"
+  add_fork_with_pushed_branch "$case_dir"
+  add_destructive_call_log "$case_dir"
+  printf '%s\n' "$case_dir"
+}
+
+assert_nothing_was_destroyed() {
+  local case_dir=$1 label=$2
+  [ ! -s "$case_dir/destructive.log" ] \
+    || fail "$label: refused teardown still ran $(tr '\n' ';' < "$case_dir/destructive.log")"
+  assert_present "$case_dir/state/task-x1.meta" "$label: refused teardown removed the task record"
+  assert_present "$case_dir/wt" "$label: refused teardown removed the worktree"
+}
+
+test_recycled_worktree_slot_refuses_before_touching_the_live_lane() {
+  local case_dir rc
+  case_dir=$(make_landed_case recycled-slot)
+  # The slot was returned to the pool and reissued: the live lane's own spawn
+  # overwrote the ownership record with its own.
+  fm_write_worktree_owner "$TEST_FM_HOME" live-lane-b "$case_dir/wt" >/dev/null
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "recycled-slot: teardown must refuse a worktree reissued to another lane"
+  assert_grep "cannot prove worktree" "$case_dir/stderr" \
+    "recycled-slot: refusal did not say ownership could not be proven"
+  assert_grep "names task live-lane-b, not task-x1" "$case_dir/stderr" \
+    "recycled-slot: refusal did not name the identity that disagreed"
+  assert_grep "bin/fm-worktree-claim.sh task-x1" "$case_dir/stderr" \
+    "recycled-slot: refusal stated no way out"
+  assert_nothing_was_destroyed "$case_dir" recycled-slot
+  pass "a recycled worktree slot is refused, and the live lane is left running"
+}
+
+test_owned_worktree_with_the_same_landed_work_still_tears_down() {
+  local case_dir rc
+  # Ablation partner of the case above: byte-for-byte the same setup, except the
+  # worktree is still this task's. A guard that refuses this too is an off switch.
+  case_dir=$(make_landed_case owned-slot)
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "owned-slot: teardown of a genuinely owned worktree must still succeed"
+  assert_no_grep REFUSED "$case_dir/stderr" "owned-slot: teardown refused its own worktree"
+  assert_grep "treehouse return --force $case_dir/wt" "$case_dir/destructive.log" \
+    "owned-slot: teardown never returned the worktree"
+  pass "an owned worktree with identical landed work still tears down (the guard is not an off switch)"
+}
+
+test_successful_teardown_leaves_no_ownership_claim_on_the_returned_slot() {
+  local case_dir record
+  case_dir=$(make_landed_case owner-record-cleared)
+  record=$(git -C "$case_dir/wt" rev-parse --absolute-git-dir)/fm-task-owner
+  assert_present "$record" "owner-record-cleared: fixture did not establish an ownership record"
+
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "owner-record-cleared: teardown failed"
+
+  assert_absent "$record" \
+    "owner-record-cleared: the returned slot still carries this task's ownership claim"
+  pass "a returned pool slot carries no stale ownership claim"
+}
+
+test_failed_return_restores_the_ownership_record_so_a_rerun_can_prove_itself() {
+  local case_dir rc record
+  case_dir=$(make_landed_case owner-record-restored)
+  record=$(git -C "$case_dir/wt" rev-parse --absolute-git-dir)/fm-task-owner
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = return ] || exit 0
+echo "treehouse: simulated return failure" >&2
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "owner-record-restored: a failed return must abort teardown"
+  assert_present "$record" \
+    "owner-record-restored: a failed return left the task unable to prove ownership on a rerun"
+  pass "a failed worktree return restores the ownership record instead of trapping the rerun"
+}
+
+test_rerun_after_a_successful_return_finishes_and_never_touches_the_slot_again() {
+  local case_dir rc record
+  case_dir=$(make_landed_case returned-slot-rerun)
+  record=$(git -C "$case_dir/wt" rev-parse --absolute-git-dir)/fm-task-owner
+  # Fail the first run AFTER its worktree return, the way the exits near the end
+  # of teardown do: the busy-state retirement refuses a gen that no longer
+  # matches the armed sidecar, and every durable record is deliberately kept.
+  printf 'busy_gen=stalegen\n' >> "$case_dir/state/task-x1.meta"
+  printf 'freshgen\n' > "$case_dir/state/task-x1.busy-gen"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "returned-slot-rerun: the seeded post-return failure did not stop the first run"
+  assert_grep "treehouse return --force $case_dir/wt" "$case_dir/destructive.log" \
+    "returned-slot-rerun: the first run never got as far as returning the worktree"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "returned-slot-rerun: the aborted run removed the record a rerun needs"
+  assert_absent "$record" "returned-slot-rerun: the returned slot still carries this task's claim"
+
+  # The pool reissued the slot before the operator reran, so the rerun must
+  # finish this task's cleanup without reading or writing that path again.
+  fm_write_worktree_owner "$TEST_FM_HOME" live-lane-b "$case_dir/wt" >/dev/null
+  rm -f "$case_dir/state/task-x1.busy-gen"
+  : > "$case_dir/destructive.log"
+
+  run_teardown "$case_dir" > "$case_dir/stdout2" 2> "$case_dir/stderr2" \
+    || fail "returned-slot-rerun: the rerun refused instead of finishing: $(cat "$case_dir/stderr2")"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "returned-slot-rerun: the rerun did not finish clearing this task's state"
+  assert_no_grep treehouse "$case_dir/destructive.log" \
+    "returned-slot-rerun: the rerun handed the reissued slot to treehouse a second time"
+  assert_grep "task=live-lane-b" "$record" \
+    "returned-slot-rerun: the rerun disturbed the new occupant's ownership record"
+  pass "a rerun after a successful return finishes cleanup and never touches the returned slot"
+}
+
+test_record_without_an_ownership_token_refuses_with_a_stated_way_out() {
+  local case_dir rc
+  case_dir=$(make_case pre-token-record)
+  # A task recorded before ownership proof existed: no token, no record.
+  write_meta "$case_dir" no-mistakes ship unowned
+  wt_commit "$case_dir" "landed work"
+  add_fork_with_pushed_branch "$case_dir"
+  add_destructive_call_log "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "pre-token-record: a record with no ownership token must refuse, not pass"
+  assert_grep "no worktree ownership token" "$case_dir/stderr" \
+    "pre-token-record: refusal did not say the token was missing"
+  assert_grep "bin/fm-worktree-claim.sh task-x1" "$case_dir/stderr" \
+    "pre-token-record: refusal stated no way out"
+  assert_nothing_was_destroyed "$case_dir" pre-token-record
+  pass "an older record with no ownership token refuses and names the operator's way out"
+}
+
+test_the_claim_command_the_refusal_names_actually_unblocks_teardown() {
+  local case_dir rc
+  # A stated exit that does not work is still a trap. Walk the operator's whole
+  # path: refuse, claim, tear down.
+  case_dir=$(make_case pre-token-claim)
+  write_meta "$case_dir" no-mistakes ship unowned
+  wt_commit "$case_dir" "landed work"
+  add_fork_with_pushed_branch "$case_dir"
+  add_destructive_call_log "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "pre-token-claim: the untokened record should refuse first"
+
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$TEST_FM_HOME" \
+  FM_STATE_OVERRIDE="$case_dir/state" FM_CONFIG_OVERRIDE="$case_dir/config" \
+    "$ROOT/bin/fm-worktree-claim.sh" task-x1 --confirm > "$case_dir/claim.out" 2>&1 \
+    || fail "pre-token-claim: the claim the refusal named failed: $(cat "$case_dir/claim.out")"
+
+  run_teardown "$case_dir" > "$case_dir/stdout2" 2> "$case_dir/stderr2" \
+    || fail "pre-token-claim: teardown still refused after the claim: $(cat "$case_dir/stderr2")"
+  assert_grep "treehouse return --force $case_dir/wt" "$case_dir/destructive.log" \
+    "pre-token-claim: teardown reported success without returning the worktree"
+  pass "the claim command the refusal names is a real way out, not a dead end"
+}
+
+test_force_does_not_override_a_recycled_worktree_slot() {
+  local case_dir rc
+  case_dir=$(make_landed_case recycled-slot-force)
+  fm_write_worktree_owner "$TEST_FM_HOME" live-lane-b "$case_dir/wt" >/dev/null
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "recycled-slot-force: --force must not authorize touching another lane's worktree"
+  assert_grep "names task live-lane-b" "$case_dir/stderr" \
+    "recycled-slot-force: refusal did not name the identity that disagreed"
+  assert_nothing_was_destroyed "$case_dir" recycled-slot-force
+  pass "discard authority does not extend to a worktree that is no longer the task's"
+}
+
+test_scout_teardown_refuses_a_recycled_worktree_slot() {
+  local case_dir rc
+  case_dir=$(make_case recycled-slot-scout)
+  write_meta "$case_dir" no-mistakes scout
+  add_destructive_call_log "$case_dir"
+  mkdir -p "$case_dir/state"
+  fm_write_worktree_owner "$TEST_FM_HOME" live-lane-b "$case_dir/wt" >/dev/null
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "recycled-slot-scout: a scout's waived landed-work check must not waive ownership"
+  assert_grep "names task live-lane-b" "$case_dir/stderr" \
+    "recycled-slot-scout: refusal did not name the identity that disagreed"
+  assert_nothing_was_destroyed "$case_dir" recycled-slot-scout
+  pass "a scout's scratch worktree is scratch for the scout, not for whoever holds the slot now"
+}
+
+test_second_task_recording_the_same_worktree_refuses() {
+  local case_dir rc
+  case_dir=$(make_landed_case double-claimed-slot)
+  # Exactly the 2026-08-04 shape: two tasks' records naming one pool slot. This
+  # is caught even for records that predate ownership tokens entirely.
+  fm_write_meta "$case_dir/state/live-lane-b.meta" \
+    "window=firstmate:fm-live-lane-b" \
+    "endpoint_task_id=live-lane-b" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=no-mistakes"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "double-claimed-slot: two tasks recording one worktree must refuse"
+  assert_grep "also recorded as task live-lane-b's worktree" "$case_dir/stderr" \
+    "double-claimed-slot: refusal did not name the conflicting task"
+  assert_nothing_was_destroyed "$case_dir" double-claimed-slot
+  pass "a worktree recorded by two tasks is refused and the conflicting task is named"
+}
+
+test_ownership_record_from_another_home_refuses() {
+  local case_dir rc other_home
+  case_dir=$(make_landed_case foreign-home-slot)
+  other_home="$case_dir/other-home"
+  mkdir -p "$other_home"
+  # Same task id, different home: a sibling firstmate's lane in the same pool.
+  fm_write_worktree_owner "$other_home" task-x1 "$case_dir/wt" >/dev/null
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "foreign-home-slot: a record written by another home must refuse"
+  assert_grep "names home" "$case_dir/stderr" \
+    "foreign-home-slot: refusal did not name the identity that disagreed"
+  assert_nothing_was_destroyed "$case_dir" foreign-home-slot
+  pass "a worktree owned by another firstmate home is refused"
 }
 
 test_local_only_fork_remote_allows() {
@@ -1550,10 +1850,15 @@ configure_secondmate_with_herdr_child() {  # <case-dir>
   mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
   printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
   printf '%s\n' "home=$home" >> "$case_dir/state/task-x1.meta"
+  # The child gets its OWN worktree and its own ownership record, written in the
+  # CHILD home the way that child's spawn writes it. One path can belong to one
+  # task only, so a fixture that pointed the child at the parent's worktree could
+  # never carry a proof for both.
+  git -C "$case_dir/project" worktree add -q -b fm/child-herdr "$case_dir/child-wt" main
   fm_write_meta "$home/state/child-herdr.meta" \
     "window=childsession:wC:p1" \
     "endpoint_task_id=child-herdr" \
-    "worktree=$case_dir/wt" \
+    "worktree=$case_dir/child-wt" \
     "project=$case_dir/project" \
     "kind=ship" \
     "mode=local-only" \
@@ -1562,6 +1867,8 @@ configure_secondmate_with_herdr_child() {  # <case-dir>
     "herdr_workspace_id=wC" \
     "herdr_tab_id=wC:t1" \
     "herdr_pane_id=wC:p1"
+  fm_write_worktree_owner "$home" child-herdr "$case_dir/child-wt" \
+    "$home/state/child-herdr.meta" >/dev/null
   : > "$home/state/child-herdr.status"
   : > "$home/state/child-herdr.turn-ended"
   cat > "$case_dir/fakebin/herdr" <<SH
@@ -1661,10 +1968,13 @@ configure_nested_secondmate_with_herdr_grandchild() {  # <case-dir>
     "kind=secondmate" \
     "mode=local-only" \
     "home=$nested_home"
+  # Its own worktree, proven in the NESTED home, for the same reason the child
+  # above needs one: the ownership record names exactly one task per path.
+  git -C "$case_dir/project" worktree add -q -b fm/grandchild-herdr "$case_dir/grandchild-wt" main
   fm_write_meta "$nested_home/state/grandchild-herdr.meta" \
     "window=grandchildsession:wG:p1" \
     "endpoint_task_id=grandchild-herdr" \
-    "worktree=$case_dir/wt" \
+    "worktree=$case_dir/grandchild-wt" \
     "project=$case_dir/project" \
     "kind=ship" \
     "mode=local-only" \
@@ -1673,6 +1983,8 @@ configure_nested_secondmate_with_herdr_grandchild() {  # <case-dir>
     "herdr_workspace_id=wG" \
     "herdr_tab_id=wG:t1" \
     "herdr_pane_id=wG:p1"
+  fm_write_worktree_owner "$nested_home" grandchild-herdr "$case_dir/grandchild-wt" \
+    "$nested_home/state/grandchild-herdr.meta" >/dev/null
   : > "$nested_home/state/grandchild-herdr.status"
   : > "$nested_home/state/grandchild-herdr.turn-ended"
   cat > "$case_dir/fakebin/herdr" <<SH
@@ -2063,6 +2375,9 @@ test_forced_secondmate_teardown_retires_children_as_their_own_home() {
     "kind=ship" \
     "mode=local-only" \
     "browser_session=$child_name"
+  # The child's own spawn, in the child's home, established this record.
+  fm_write_worktree_owner "$home" child-tmux "$case_dir/wt" \
+    "$home/state/child-tmux.meta" >/dev/null
   seed_browser_session "$case_dir" "$child_name" "$dead"
   # Same child task id, but named under the PARENT's identity: the parent must
   # reclaim the child through the child's home, never through its own.
@@ -2127,3 +2442,14 @@ test_transient_index_lock_clears_after_first_attempt_and_retry_succeeds
 test_persistent_index_lock_exhausts_retries_and_refuses_loudly
 test_empty_retry_wait_uses_default_without_aborting
 test_fractional_legacy_retry_wait_refuses_without_arithmetic_error
+test_recycled_worktree_slot_refuses_before_touching_the_live_lane
+test_owned_worktree_with_the_same_landed_work_still_tears_down
+test_successful_teardown_leaves_no_ownership_claim_on_the_returned_slot
+test_failed_return_restores_the_ownership_record_so_a_rerun_can_prove_itself
+test_rerun_after_a_successful_return_finishes_and_never_touches_the_slot_again
+test_record_without_an_ownership_token_refuses_with_a_stated_way_out
+test_the_claim_command_the_refusal_names_actually_unblocks_teardown
+test_force_does_not_override_a_recycled_worktree_slot
+test_scout_teardown_refuses_a_recycled_worktree_slot
+test_second_task_recording_the_same_worktree_refuses
+test_ownership_record_from_another_home_refuses

@@ -4,7 +4,8 @@
 # A confused no-mistakes gate agent runs inside a firstmate checkout, adopts the
 # captain identity from AGENTS.md, and reaches for fm-spawn/fm-send/fm-teardown.
 # bin/fm-gate-refuse-lib.sh is the firstmate capability-removal half: sourced at
-# the top of those three entrypoints and called before any fleet mutation, it
+# the top of those entrypoints - and of fm-worktree-claim, which re-arms a
+# cleanup - and called before any fleet mutation, it
 # fails closed on either of two independent signals:
 #   1. NO_MISTAKES_GATE set in the environment (the marker no-mistakes stamps);
 #   2. the current worktree's git-common-dir resolves under a no-mistakes gate
@@ -34,6 +35,7 @@ GATE_LIB="$ROOT/bin/fm-gate-refuse-lib.sh"
 SPAWN="$ROOT/bin/fm-spawn.sh"
 SEND="$ROOT/bin/fm-send.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
+CLAIM="$ROOT/bin/fm-worktree-claim.sh"
 
 TMP=$(fm_test_tmproot fm-gate-refuse)
 fm_git_identity fmtest fmtest@example.invalid
@@ -321,6 +323,10 @@ SH
     "window=firstmate:fm-task-x1" "endpoint_task_id=task-x1" \
     "worktree=$case_dir/wt" "project=$case_dir/project" \
     "kind=ship" "mode=no-mistakes"
+  # Ownership proof a real spawn writes; without it teardown refuses before it
+  # can reach the gate-lifecycle behavior this suite is about.
+  fm_write_worktree_owner "$ROOT" task-x1 "$case_dir/wt" \
+    "$case_dir/state/task-x1.meta" >/dev/null
   touch "$case_dir/state/.last-watcher-beat"
   printf '%s\n' "$case_dir"
 }
@@ -329,9 +335,26 @@ SH
 run_teardown() {
   local cwd=$1 case_dir=$2; shift 2
   ( cd "$cwd" && env -u NO_MISTAKES_GATE -u FM_GATE_REFUSE_BYPASS \
-      "FM_ROOT_OVERRIDE=$ROOT" "FM_STATE_OVERRIDE=$case_dir/state" \
+      "FM_ROOT_OVERRIDE=$ROOT" "FM_HOME=$ROOT" "FM_STATE_OVERRIDE=$case_dir/state" \
       "FM_CONFIG_OVERRIDE=$case_dir/config" "PATH=$case_dir/fakebin:$PATH" "$@" \
       "$TEARDOWN" task-x1 ) 2>&1
+}
+
+# run_worktree_claim <cwd> <case_dir> [ASSIGN... | --confirm] -> combined output
+run_worktree_claim() {
+  local cwd=$1 case_dir=$2; shift 2
+  local assigns=() args=() a
+  for a in "$@"; do
+    case "$a" in
+      --*) args+=("$a") ;;
+      *) assigns+=("$a") ;;
+    esac
+  done
+  ( cd "$cwd" && env -u NO_MISTAKES_GATE -u FM_GATE_REFUSE_BYPASS \
+      "FM_ROOT_OVERRIDE=$ROOT" "FM_HOME=$ROOT" "FM_STATE_OVERRIDE=$case_dir/state" \
+      "FM_CONFIG_OVERRIDE=$case_dir/config" "PATH=$case_dir/fakebin:$PATH" \
+      ${assigns[@]+"${assigns[@]}"} \
+      "$CLAIM" task-x1 ${args[@]+"${args[@]}"} ) 2>&1
 }
 
 test_teardown_refuses_and_admits() {
@@ -361,6 +384,29 @@ test_teardown_refuses_and_admits() {
   pass "fm-teardown: refuses on marker and gate-worktree backstop; a normal teardown is unaffected"
 }
 
+# A claim re-arms a cleanup that resets a worktree and terminates what runs in
+# it, so it is a fleet mutation and carries the same refusal as the three older
+# entrypoints (bin/fm-worktree-claim.sh, bin/fm-gate-refuse-lib.sh).
+test_worktree_claim_refuses_and_admits() {
+  local case_dir out rc
+
+  case_dir=$(make_teardown_case claim-envmark)
+  out=$(run_worktree_claim "$NORMAL_CWD" "$case_dir" NO_MISTAKES_GATE=1); rc=$?
+  expect_code 3 "$rc" "claim: NO_MISTAKES_GATE must refuse"
+  assert_contains "$out" "$ENV_MSG" "claim: env-marker refusal message"
+
+  case_dir=$(make_teardown_case claim-backstop)
+  out=$(run_worktree_claim "$GATE_WT" "$case_dir"); rc=$?
+  expect_code 3 "$rc" "claim: gate-worktree cwd must refuse with the marker unset"
+  assert_contains "$out" "$PATH_MSG" "claim: path-backstop refusal message"
+
+  case_dir=$(make_teardown_case claim-ok)
+  out=$(run_worktree_claim "$NORMAL_CWD" "$case_dir" --confirm); rc=$?
+  expect_code 0 "$rc" "claim: a normal session must still be able to claim"$'\n'"$out"
+  assert_contains "$out" "claimed: task task-x1" "claim: a normal claim must report the claim"
+  pass "fm-worktree-claim.sh: refuses on marker and gate-worktree backstop; a normal claim is unaffected"
+}
+
 test_helper_env_marker_refuses
 test_helper_empty_env_marker_refuses
 test_helper_path_backstop_refuses
@@ -368,3 +414,4 @@ test_helper_normal_is_noop
 test_spawn_refuses_and_admits
 test_send_refuses_and_admits
 test_teardown_refuses_and_admits
+test_worktree_claim_refuses_and_admits

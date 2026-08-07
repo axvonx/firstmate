@@ -284,6 +284,23 @@ fm_write_meta() {
   done
 }
 
+# fm_write_worktree_owner <home> <task-id> <worktree> [meta]: establish the
+# worktree ownership record a real bin/fm-spawn.sh writes, so cleanup can prove
+# the worktree is still that task's (bin/fm-worktree-owner-lib.sh). When <meta>
+# is given, the matching worktree_token= is recorded there too - both halves are
+# needed, exactly as in production. Echoes the token.
+fm_write_worktree_owner() {
+  local home=$1 id=$2 worktree=$3 meta=${4:-} token
+  # shellcheck source=bin/fm-worktree-owner-lib.sh disable=SC1091
+  . "$ROOT/bin/fm-worktree-owner-lib.sh"
+  token=$(fm_worktree_owner_mint) || return 1
+  fm_worktree_owner_write "$home" "$id" "$worktree" "$token" || return 1
+  if [ -n "$meta" ]; then
+    printf 'worktree_token=%s\n' "$token" >> "$meta"
+  fi
+  printf '%s\n' "$token"
+}
+
 # fm_write_secondmate_meta <file> <home> [window] [projects] [harness]: write the
 # standard kind=secondmate meta block used across the secondmate suites. Window
 # defaults to firstmate:fm-<id>, projects defaults to alpha, and harness defaults

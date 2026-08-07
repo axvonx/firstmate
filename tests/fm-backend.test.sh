@@ -147,7 +147,10 @@ resolve_permissive_tmux_kill_ref() {
 # after the per-task browser session change, which includes the deliberate
 # BASE_REF=HEAD case below and every default-branch run once it lands - aborts
 # under set -eu without it. It defines functions only and sources nothing.
-OLD_BIN_UNCHANGED_SIBLINGS="fm-gate-refuse-lib.sh fm-guard.sh fm-lock-lib.sh fm-tasks-axi-lib.sh fm-pr-lib.sh fm-tangle-lib.sh fm-tmux-lib.sh fm-composer-lib.sh fm-wake-lib.sh fm-classify-lib.sh fm-supervision-lib.sh fm-ff-lib.sh fm-config-inherit-lib.sh fm-project-mode.sh fm-harness.sh fm-crew-state.sh fm-decision-hold.sh fm-backend.sh fm-operational-input.sh fm-public-followup-lib.sh fm-secondmate-registry-lib.sh fm-x-lib.sh fm-browser-lib.sh"
+# fm-worktree-owner-lib.sh is on this list for exactly the same reason, from the
+# worktree-ownership change onward: fm-spawn.sh and fm-teardown.sh both source
+# it, and it too defines functions only and sources nothing.
+OLD_BIN_UNCHANGED_SIBLINGS="fm-gate-refuse-lib.sh fm-guard.sh fm-lock-lib.sh fm-tasks-axi-lib.sh fm-pr-lib.sh fm-tangle-lib.sh fm-tmux-lib.sh fm-composer-lib.sh fm-wake-lib.sh fm-classify-lib.sh fm-supervision-lib.sh fm-ff-lib.sh fm-config-inherit-lib.sh fm-project-mode.sh fm-harness.sh fm-crew-state.sh fm-decision-hold.sh fm-backend.sh fm-operational-input.sh fm-public-followup-lib.sh fm-secondmate-registry-lib.sh fm-x-lib.sh fm-browser-lib.sh fm-worktree-owner-lib.sh"
 # A pull-request merge may add a new main-only dependency that the branch's older baseline does not have yet.
 OLD_BIN_OPTIONAL_SIBLINGS="fm-pending-reply-lib.sh"
 OLD_BIN_REFACTORED="fm-send.sh fm-peek.sh fm-watch.sh fm-spawn.sh fm-teardown.sh fm-marker-lib.sh"
@@ -1002,8 +1005,14 @@ test_teardown_conformance_old_vs_new() {
   touch "$state_old/.last-watcher-beat" "$state_new/.last-watcher-beat"
 
   log_old="$TMP_ROOT/teardown-old.log"; log_new="$TMP_ROOT/teardown-new.log"
+  # Both runs share one worktree, which real cleanup never does: the first run
+  # returns it. Each run therefore needs its own worktree ownership proof, and
+  # the second must be re-established because a successful return drops the
+  # record so the pool slot carries no stale claim.
+  fm_write_worktree_owner "$old_bin" "$id" "$wt" "$state_old/$id.meta" >/dev/null
   out_old=$(run_teardown_case "$old_bin/bin/fm-teardown.sh" "$old_bin" "$fb" "$log_old" "$state_old" "$data" "$config_old" "$id" 2>&1)
   rc_old=$?
+  fm_write_worktree_owner "$old_bin" "$id" "$wt" "$state_new/$id.meta" >/dev/null
   out_new=$(run_teardown_case "$ROOT/bin/fm-teardown.sh" "$old_bin" "$fb" "$log_new" "$state_new" "$data" "$config_new" "$id" 2>&1)
   rc_new=$?
 
