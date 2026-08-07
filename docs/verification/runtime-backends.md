@@ -120,8 +120,9 @@ Claude, Codex, OpenCode, Pi, pi-signed, Grok, and Kimi share that backend cleanu
 ## Herdr
 
 The compatibility floor is protocol 14.
-The latest active verification uses Herdr 0.7.5 protocol 17 on macOS aarch64, with earlier 0.7.5 protocol-16, 0.7.4, protocol-14, and 0.7.3 evidence retained where they define current behavior or fallbacks.
+Apart from the two Herdr 0.8.0 sections named below, the latest active verification uses Herdr 0.7.5 protocol 17 on macOS aarch64, with earlier 0.7.5 protocol-16, 0.7.4, protocol-14, and 0.7.3 evidence retained where they define current behavior or fallbacks.
 Protocol 17 keeps every protocol-16 feature gate satisfied; the event and workspace-move floors remain 16.
+The read-only composer sweep and the Pi agent-name measurement below are the sections recorded against Herdr 0.8.0.
 
 Core read-only probes:
 
@@ -153,6 +154,75 @@ The CLI matrix was checked directly:
 
 All destructive verification used `bin/fm-herdr-lab.sh` with a non-default `fm-lab-` name and a byte-identical default-session tripwire.
 No ambient `herdr server stop` command is a supported test operation.
+
+### Composer classification against live Claude panes
+
+Read-only sweep on 2026-08-07, Herdr 0.8.0, Claude Code 2.x, macOS aarch64.
+It needs no lab session because it only reads.
+
+```sh
+for p in $(herdr --session default pane list | jq -r '.result.panes[].pane_id'); do
+  printf '%s\t%s\t%s\n' "$p" \
+    "$(herdr --session default agent get "$p" 2>/dev/null | jq -r '.result.agent.agent // "<none>"')" \
+    "$(HERDR_SESSION=default bash -c '. bin/fm-backend.sh; fm_backend_composer_state herdr "default:'"$p"'"')"
+done
+```
+
+```text
+w8:p1	claude	empty
+wJ:p1	claude	empty
+wJ:p42	<none>	unknown
+wJ:p4A	claude	empty
+wJ:p4B	claude	empty
+wJ:p4C	claude	empty
+wJ:p4D	claude	empty
+wJ:p4E	claude	empty
+wJ:p4F	claude	empty
+```
+
+Every one of those eight Claude panes read `unknown` before the identity scoping described in [`../herdr-backend.md`](../herdr-backend.md) "Composer and injection safety", and the agent-less pane `wJ:p42` reads `unknown` in both directions.
+The composer rows that produced it are a decorated opening rule, the prompt row, and a plain closing rule:
+
+```text
+─────────────────────────────────────── ↯ ─
+❯
+───────────────────────────────────────────
+```
+
+Composer states were also exercised directly against one live pane, which read `empty` while idle, `pending` for typed text, `pending` for a long steer collapsed to `❯ [Pasted text #1]` with `paste again to expand` in the status area, and `empty` again once cleared.
+The collapsed placeholder is rendered at normal intensity after the styled prompt glyph, so the shared ghost stripper keeps it.
+
+### Reported agent name for a signed Pi target
+
+Read-only measurement on 2026-08-07, Herdr 0.8.0, macOS aarch64, bounding what `agent get` can name a Pi pane.
+The direct experiment was not available: `command -v pi-signed` printed nothing and exited non-zero, and no Pi pane of any kind was live in the session, so no live Pi target could be read.
+
+`herdr agent start --help` documents a closed agent-kind vocabulary under the heading `Supported agent kind and canonical executable`, listing exactly these kinds:
+
+```text
+pi, claude, codex, gemini, cursor, devin, agy, cline, omp, mastracode,
+opencode, copilot, kimi, kiro, droid, amp, grok, hermes, kilo, qodercli, maki
+```
+
+`pi` is in that vocabulary and `pi-signed` is not.
+The reported name is a detection-manifest id, not an executable name:
+
+```sh
+herdr agent explain wJ:p4C
+```
+
+```text
+agent: claude
+manifest: remote:/Users/axvon/.local/state/herdr/agent-detection/remote/claude.toml 2026.08.04.1
+rule: osc_title_working
+```
+
+Nineteen manifests exist on disk and their ids are exactly those kind names, with no `pi-signed` manifest.
+`pi.toml` matches on terminal content only (`contains = ["Working..."]`) with no executable-name rule, so an executable's filename cannot by itself change the reported id.
+
+This bounds but does not prove the answer.
+A `pi-signed` pane most likely reports `pi`, or is not detected at all and reads as an empty identity, and both of those already refuse.
+Because the manifests are remote and versioned, the adapter's Pi predicate accepts the whole `pi`, `pi-signed`, `pi-launcher`, `Pi` family rather than the single measured spelling.
 
 ### Prune and respawn
 
