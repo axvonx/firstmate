@@ -424,15 +424,31 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
   esac
 }
 
-# busy_turn_age: seconds since <task> last completed a turn. Ages the per-task
-# turn-ended marker, the harness-neutral signal every verified harness's turn-end
-# hook touches; before any turn has completed, ages the task's spawn record
-# instead so a fresh task still gets a bound.
+# busy_turn_anchor: the file whose mtime both DATES and IDENTIFIES <task>'s
+# current turn - the per-task turn-ended marker, the harness-neutral signal every
+# verified harness's turn-end hook touches; before any turn has completed, the
+# task's spawn record instead so a fresh task still gets a bound. One owner for
+# both readings below, so an age and an identity can never be taken from
+# different files.
+busy_turn_anchor() {  # <task>
+  local f="$STATE/$1.turn-ended"
+  [ -e "$f" ] || f="$STATE/$1.meta"
+  printf '%s\n' "$f"
+}
+
+# busy_turn_age: seconds since <task> last completed a turn.
 busy_turn_age() {  # <task>
-  local task=$1 f
-  f="$STATE/$task.turn-ended"
-  [ -e "$f" ] || f="$STATE/$task.meta"
-  age_of "$f"
+  age_of "$(busy_turn_anchor "$1")"
+}
+
+# busy_turn_anchor_id: that same anchor's mtime, which is the IDENTITY of the turn
+# the age above measures. A completed turn touches turn-ended, so this changes
+# exactly and only when the busy ladder should start over - which is what lets the
+# rung record invalidate itself rather than needing a reset placed somewhere in the
+# poll loop. Empty when the anchor is unreadable; the caller substitutes a sentinel
+# that no real mtime can equal.
+busy_turn_anchor_id() {  # <task>
+  stat_mtime "$(busy_turn_anchor "$1")"
 }
 
 # busy_turn_over_age: 0 iff that age has reached BUSY_TURN_MAX_SECS. The caller
@@ -487,15 +503,22 @@ busy_turn_over_age() {  # <task>
 # rung fires once and the next one waits for the turn age to earn it. That is the
 # whole point of the derivation, and it is not merely a bug fixed: while this
 # ladder was being built the shipped rung and the stated latency drifted apart
-# three separate times, and every time the cause was the same shape - the ladder's
-# position lived in a mutable marker that other code paths reset, so what the
-# ladder promised and what it did could disagree without anything noticing. Turn
-# age is monotonic, and the only thing that resets it is a completed turn, which
-# is exactly the event that SHOULD reset the ladder. So the documented latency now
+# four separate times, and every time the cause was the same shape - the ladder's
+# position lived in mutable state whose reset some other code path owned, or
+# failed to run, so what the ladder promised and what it did could disagree
+# without anything noticing. Turn age is monotonic, so the documented latency now
 # holds by construction rather than by assertion: the rung cannot disagree with
-# the turn age, whatever else in the state dir is cleared. An absent or corrupt
-# rung marker reads as 0 and self-heals into the rung the turn age has actually
-# reached, never a replay of the earlier ones.
+# the turn age, whatever else in the state dir is cleared.
+#
+# The record is KEYED ON THE TURN IT DESCRIBES for the same reason. It stores the
+# turn anchor's mtime alongside the rung, and a record whose anchor is not this
+# turn's anchor is simply not a record for this turn, so its high-water mark reads
+# 0. There is therefore no reset to place anywhere in the poll loop and none to
+# forget in a branch: a completed turn moves the anchor, and the old record stops
+# applying by itself. An absent, malformed, or foreign record all read as 0, which
+# is safe in one direction only because the rung is derived from the age - reading
+# 0 can never replay an earlier rung, only emit the one the current turn age has
+# actually reached.
 #
 # The old "the escalation count survives an advancing window" property now holds
 # automatically, with no counter left to preserve: a lane that advances for three
@@ -510,7 +533,7 @@ busy_turn_over_age() {  # <task>
 # as untested in docs/verification/step-progress-signals.md.
 busy_turn_check() {  # <window> <task> <hash>
   local win=$1 task=$2 h=$3
-  local key memo rung_file turn_age rung surfaced n reason
+  local key memo rung_file turn_age anchor record rung surfaced n reason
   key=$(printf '%s' "$win" | tr ':/.' '___')
   memo="$STATE/.step-activity-$key"
   rung_file="$STATE/.busy-turn-rung-$key"
@@ -519,9 +542,14 @@ busy_turn_check() {  # <window> <task> <hash>
     return
   fi
   turn_age=$(busy_turn_age "$task")
+  anchor=$(busy_turn_anchor_id "$task")
+  case "$anchor" in ''|*[!0-9]*) anchor=unreadable ;; esac
   rung=$(( 1 + (turn_age - BUSY_TURN_MAX_SECS) / BUSY_TURN_RENOTICE_SECS ))
-  surfaced=$(cat "$rung_file" 2>/dev/null || true)
-  case "$surfaced" in ''|*[!0-9]*) surfaced=0 ;; esac
+  surfaced=0
+  record=$(cat "$rung_file" 2>/dev/null || true)
+  if [ "${record%% *}" = "$anchor" ]; then
+    case "${record#* }" in ''|*[!0-9]*) ;; *) surfaced=${record#* } ;; esac
+  fi
   [ "$rung" -gt "$surfaced" ] || return
   if crew_step_is_advancing "$task" "$memo"; then
     reason="stale: $win (busy ${turn_age}s, LONG-RUNNING not wedged: the run reported an advancing step while this turn stayed open with no completion - glance at whether it is worth continuing, do not treat it as stuck)"
@@ -540,7 +568,7 @@ busy_turn_check() {  # <window> <task> <hash>
   # exits the cycle, so a write placed after it would never run and the cadence
   # would collapse back to one wake per poll.
   fm_wake_append stale "$win" "$reason" || exit 1
-  printf '%s\n' "$rung" > "$rung_file"
+  printf '%s %s\n' "$anchor" "$rung" > "$rung_file"
   wake "$reason"
 }
 
@@ -1207,7 +1235,6 @@ EOF
     ewf="$STATE/.wedge-escalations-$key"
     saf="$STATE/.step-activity-$key"   # wedge ladder: last step-activity digest seen
     spf="$STATE/.step-progress-$key"   # wedge ladder: confirmed-progress absorb count
-    btrf="$STATE/.busy-turn-rung-$key" # busy ladder: highest rung surfaced for the current turn
     pf="$STATE/.paused-$key"   # flag: this key's stale is using the bounded pause cadence
     prev=$(cat "$hf" 2>/dev/null || true)
     # Busy match: a backend's native semantic state when available (herdr), else
@@ -1332,11 +1359,9 @@ EOF
         else
           rm -f "$ssf" "$ewf" "$saf" "$spf"
         fi
-        # Deliberately OUTSIDE that else: only a completed turn may reset the busy
-        # ladder, and a single non-busy poll is not a completed turn. Clearing the
-        # rung there instead is exactly the reachable-by-accident off switch that
-        # let the ladder re-base on wall clock and re-emit its first rung.
-        busy_turn_over_age "$task" || rm -f "$btrf"
+        # No rung reset belongs here, or anywhere else in this loop: the busy
+        # ladder's record is keyed on the turn's own anchor, so a completed turn
+        # invalidates it without any branch having to remember to.
       fi
     else
       printf '%s' "$h" > "$hf"
@@ -1346,9 +1371,6 @@ EOF
       else
         rm -f "$ssf" "$ewf" "$saf" "$spf"
       fi
-      # Same reason as the stable-hash branch above: the busy ladder's rung is
-      # reset only by a completed turn, never by one non-busy poll.
-      busy_turn_over_age "$task" || rm -f "$btrf"
       # Same rule as the stable-hash branch: a busy pane never withdraws a
       # standing declaration, so only the idle case reconciles the pause here
       # and the top of the loop owns clearing a withdrawn one.

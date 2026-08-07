@@ -1179,6 +1179,26 @@ BUSY_TURN_W=240
 # Ages the same marker busy_turn_age does, the turn-ended file when the fixture has
 # one and the spawn record when it does not, and re-primes the .seen-* suppressor so
 # a just-backdated marker cannot fire an unrelated "signal:" wake of its own.
+# The rung the busy ladder last recorded as surfaced for <key>, or empty when it has
+# recorded none. The record also carries the anchor mtime of the turn that rung was
+# surfaced against, which is what stops it applying to any later turn, so the tests
+# read and write it through this pair and its shape lives in one place.
+busy_recorded_rung() {  # <state> <key>
+  local rec
+  rec=$(cat "$1/.busy-turn-rung-$2" 2>/dev/null || true)
+  printf '%s\n' "${rec##* }"
+}
+
+# Record <rung> as already surfaced for <task>'s CURRENT turn, so a fixture can start
+# mid-ladder without driving every earlier rung through the watcher. Call it after
+# set_busy_turn_windows, which moves the anchor this record is keyed on.
+seed_busy_rung() {  # <state> <task> <key> <rung>
+  local f
+  f="$1/$2.turn-ended"
+  [ -e "$f" ] || f="$1/$2.meta"
+  printf '%s %s\n' "$(file_mtime "$f")" "$4" > "$1/.busy-turn-rung-$3"
+}
+
 set_busy_turn_windows() {  # <state> <task> <window-secs> <windows>
   local state=$1 task=$2 w=$3 windows=$4 f
   f="$state/$task.turn-ended"
@@ -1248,7 +1268,7 @@ test_busy_pane_stable_hash_escalates_past_turn_age_bound() {
     || fail "the bound crossing was not reported as a long-running notice: $(cat "$out")"
   grep -F "possible wedge" "$out" >/dev/null \
     && fail "the bound crossing called a busy worker a possible wedge: $(cat "$out")"
-  [ "$(cat "$state/.busy-turn-rung-$key" 2>/dev/null || true)" = 1 ] \
+  [ "$(busy_recorded_rung "$state" "$key")" = 1 ] \
     || fail "the bound crossing did not record rung 1 as surfaced"
 
   # Phase B: a whole further window of the same uncompleted turn - now it is a
@@ -1316,7 +1336,7 @@ test_busy_pane_changing_hash_escalates_past_turn_age_bound() {
     || fail "the bound crossing (changing hash) was not a long-running notice: $(cat "$out")"
   grep -F "possible wedge" "$out" >/dev/null \
     && fail "the bound crossing (changing hash) called a busy worker a possible wedge: $(cat "$out")"
-  [ "$(cat "$state/.busy-turn-rung-$key" 2>/dev/null || true)" = 1 ] \
+  [ "$(busy_recorded_rung "$state" "$key")" = 1 ] \
     || fail "the bound crossing (changing hash) did not record rung 1 as surfaced"
 
   # Phase B: another tick (still a fresh, never-before-seen hash) a whole window
@@ -1365,11 +1385,9 @@ test_busy_pane_turn_end_touch_resets_age() {
   pane_hash=$(hash_text "Working...")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
-  # Both ladders are already mid-climb, as if several over-age polls already ran:
-  # the idle ladder's timer and count, plus the busy ladder's own rung marker.
+  # The idle ladder is already mid-climb, as if several over-age polls already ran.
   echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
   printf '1\n' > "$state/.wedge-escalations-$key"
-  printf '2\n' > "$state/.busy-turn-rung-$key"
   # The worker's most recent turn just completed: touching turn-ended resets age.
   touch "$state/busy-reset.turn-ended"
   prime_turnend_seen "$state/busy-reset.turn-ended"
@@ -1385,7 +1403,6 @@ test_busy_pane_turn_end_touch_resets_age() {
   [ ! -s "$out" ] || fail "a freshly completed turn on a busy pane printed a wake reason"
   [ ! -e "$state/.stale-since-$key" ] || fail "a freshly completed turn did not clear the wedge timer"
   [ ! -e "$state/.wedge-escalations-$key" ] || fail "a freshly completed turn did not clear the escalation counter"
-  [ ! -e "$state/.busy-turn-rung-$key" ] || fail "a completed turn did not reset the busy ladder's rung"
   reap "$pid"
   pass "touching a busy worker's completed-turn marker resets the age and prevents an old-age escalation"
 }
@@ -1436,7 +1453,7 @@ test_busy_pane_repeated_escalation_reaches_demand_deep_inspection() {
     fi
     n=$((n + 1))
   done
-  [ "$(cat "$state/.busy-turn-rung-$key" 2>/dev/null || echo 0)" = 4 ] || fail "the busy ladder did not record reaching rung 4"
+  [ "$(busy_recorded_rung "$state" "$key")" = 4 ] || fail "the busy ladder did not record reaching rung 4"
   pass "an unbroken busy turn is noticed at the bound, then escalates once per further window and demands deep inspection at the threshold"
 }
 
@@ -1487,7 +1504,7 @@ test_busy_pane_default_turn_age_bound_is_3600s() {
     || fail "crossing the default bound was not reported as a long-running notice: $(cat "$out")"
   grep -F "possible wedge" "$out" >/dev/null \
     && fail "crossing the default bound called a busy worker a possible wedge: $(cat "$out")"
-  [ "$(cat "$state/.busy-turn-rung-$key" 2>/dev/null || true)" = 1 ] \
+  [ "$(busy_recorded_rung "$state" "$key")" = 1 ] \
     || fail "crossing the default bound did not record rung 1 as surfaced"
   pass "the production default busy-turn-age bound is 3600s (5min under is silent, 66min over is noticed)"
 }
@@ -1562,8 +1579,8 @@ test_busy_ladder_rungs_land_one_window_apart() {
     floor=$(( k * w ))
     { [ "$reported" -ge "$floor" ] && [ "$reported" -lt $(( floor + w )) ]; } \
       || fail "rung $k reported a turn age of ${reported}s, outside window $k (${floor}s to $(( floor + w ))s): $(cat "$out")"
-    [ "$(cat "$state/.busy-turn-rung-$key" 2>/dev/null || true)" = "$k" ] \
-      || fail "rung $k was not the rung recorded as surfaced: $(cat "$state/.busy-turn-rung-$key" 2>/dev/null || true)"
+    [ "$(busy_recorded_rung "$state" "$key")" = "$k" ] \
+      || fail "rung $k was not the rung recorded as surfaced: $(busy_recorded_rung "$state" "$key")"
     if [ "$k" -eq 1 ]; then
       grep -F "LONG-RUNNING not wedged" "$out" >/dev/null \
         || fail "rung 1 (the bound crossing) was not the long-running notice: $(cat "$out")"
@@ -1639,8 +1656,8 @@ test_busy_rung_ignores_an_erased_idle_ladder_timer() {
     || fail "an erased idle-ladder timer re-based the busy ladder onto its first rung: $(cat "$out")"
   grep -F "escalation 1" "$out" >/dev/null \
     || fail "the second window did not carry escalation 1 after the erasure: $(cat "$out")"
-  [ "$(cat "$state/.busy-turn-rung-$key" 2>/dev/null || true)" = 2 ] \
-    || fail "the surfaced rung was not recorded: $(cat "$state/.busy-turn-rung-$key" 2>/dev/null || true)"
+  [ "$(busy_recorded_rung "$state" "$key")" = 2 ] \
+    || fail "the surfaced rung was not recorded: $(busy_recorded_rung "$state" "$key")"
 
   # Erase them again and re-run: the rung marker, not the timer, is what holds the
   # cadence, so the same window stays silent.
@@ -1659,9 +1676,9 @@ test_busy_rung_ignores_an_erased_idle_ladder_timer() {
   [ ! -s "$out" ] || fail "erasing the idle-ladder markers re-fired a rung already surfaced: $(cat "$out")"
   reap "$pid"
 
-  # The one reset that IS allowed: the turn completes. That drops the rung, and the
-  # next long turn starts the ladder again at its first rung rather than resuming
-  # mid-climb.
+  # And the record belongs to the turn it was surfaced against, so completing the
+  # turn retires it with no reset step anywhere: the next long turn starts the ladder
+  # again at its first rung rather than resuming mid-climb.
   touch "$state/busy-erased.turn-ended"
   prime_turnend_seen "$state/busy-erased.turn-ended"
   : > "$out"
@@ -1675,7 +1692,6 @@ test_busy_rung_ignores_an_erased_idle_ladder_timer() {
   if ! wait_live "$pid" 30; then
     reap "$pid"; fail "a completed turn on a busy pane still surfaced a rung: $(cat "$out")"
   fi
-  [ ! -e "$state/.busy-turn-rung-$key" ] || fail "a completed turn did not reset the busy ladder's rung"
   reap "$pid"
 
   set_busy_turn_windows "$state" busy-erased "$BUSY_TURN_W" 1
@@ -1694,7 +1710,110 @@ test_busy_rung_ignores_an_erased_idle_ladder_timer() {
   grep -F "possible wedge" "$out" >/dev/null \
     && fail "the restarted ladder resumed mid-climb as a possible wedge: $(cat "$out")"
   unset FM_FAKE_CREW_STATE
-  pass "the busy ladder's rung comes from the turn age, so erasing the idle ladder's timer neither re-fires nor re-bases it, and only a completed turn resets it"
+  pass "the busy ladder's rung comes from the turn age, so erasing the idle ladder's timer neither re-fires nor re-bases it, and a completed turn retires the record"
+}
+
+# The rung record used to be cleared by a line at each busy call-site tail, which
+# meant the clear ran in two of the loop's three branches and never in the
+# idle-stale one - the branch a hash-stable non-busy pane sits in. A turn that
+# completed there left the record holding the PREVIOUS turn's high-water mark, and
+# the next long turn then had its first rungs suppressed: with a recorded rung of 2
+# the new turn's notice and its first escalation are both swallowed and the first
+# wake is escalation 2, a suppressed wedge alarm. The record is now keyed on the
+# turn anchor it was surfaced against, so there is no clear to place in a branch and
+# none to miss. This drives the whole sequence through the watcher rather than
+# seeding a record by hand, so it asserts the behaviour and not the record's format.
+test_busy_rung_restarts_after_a_turn_completes_while_idle_stale() {
+  local dir state fakebin out capture_file window key pane_hash sig pid
+  dir=$(make_case busy-rung-new-turn); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-busy-newturn"
+  printf 'Working...' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/busy-newturn.meta"
+  record_pi_busy "$state" busy-newturn
+  printf 'working: long local work\n' > "$state/busy-newturn.status"
+  sig=$(seen_sig "$state/busy-newturn.status"); printf '%s' "$sig" > "$state/.seen-busy-newturn_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "Working...")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  touch "$state/busy-newturn.turn-ended"
+  # A busy pane with no run attributed, so nothing absorbs a rung as advancing.
+  export FM_FAKE_CREW_STATE='state: working · source: pane · harness busy (pi-ext)'
+
+  # Turn A climbs to its second rung, so the watcher itself records a high-water
+  # mark against turn A's anchor.
+  set_busy_turn_windows "$state" busy-newturn "$BUSY_TURN_W" 2
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_BROWSER_STATE_ROOT="$state/.cda-root" \
+    FM_BUSY_TURN_MAX_SECS="$BUSY_TURN_W" FM_BUSY_TURN_RENOTICE_SECS="$BUSY_TURN_W" \
+    FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "turn A never reached its second rung: $(cat "$out")"
+  grep -F "escalation 1" "$out" >/dev/null \
+    || fail "turn A did not climb to its first wedge escalation: $(cat "$out")"
+
+  # Turn A completes while the pane is hash-stable and reads NOT busy, so the poll
+  # that observes the completion lands in the idle-stale branch. That branch never
+  # ran the old clear, and it does not need to: backdating turn-ended both completes
+  # turn A and starts turn B one window past the bound.
+  rm -f "$state/busy-newturn.busy-state" "$state/busy-newturn.busy-gen"
+  set_busy_turn_windows "$state" busy-newturn "$BUSY_TURN_W" 1
+  : > "$out"
+  rm -f "$state/.wake-queue"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_BROWSER_STATE_ROOT="$state/.cda-root" \
+    FM_BUSY_TURN_MAX_SECS="$BUSY_TURN_W" FM_BUSY_TURN_RENOTICE_SECS="$BUSY_TURN_W" \
+    FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "an idle-stale pane on a fresh turn surfaced a busy ladder rung: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "an idle-stale pane on a fresh turn printed a wake reason: $(cat "$out")"
+  [ -s "$state/.busy-turn-rung-$key" ] \
+    || fail "the idle-stale branch cleared the rung record, so this arm no longer covers the gap"
+  reap "$pid"
+
+  # Turn B is a different turn, so the record left over from turn A does not apply
+  # to it and the ladder starts again at its long-running notice rather than
+  # resuming mid-climb.
+  record_pi_busy "$state" busy-newturn
+  : > "$out"
+  rm -f "$state/.wake-queue"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_BROWSER_STATE_ROOT="$state/.cda-root" \
+    FM_BUSY_TURN_MAX_SECS="$BUSY_TURN_W" FM_BUSY_TURN_RENOTICE_SECS="$BUSY_TURN_W" \
+    FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 \
+    || fail "a new turn inherited the previous turn's rung and stayed silent: $(cat "$out")"
+  grep -F "LONG-RUNNING not wedged" "$out" >/dev/null \
+    || fail "the new turn did not start at its long-running notice: $(cat "$out")"
+  grep -F "possible wedge" "$out" >/dev/null \
+    && fail "the new turn resumed the previous turn's climb as a possible wedge: $(cat "$out")"
+
+  # And the record still does its job within a turn: the same rung does not repeat.
+  : > "$out"
+  rm -f "$state/.wake-queue"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_BROWSER_STATE_ROOT="$state/.cda-root" \
+    FM_BUSY_TURN_MAX_SECS="$BUSY_TURN_W" FM_BUSY_TURN_RENOTICE_SECS="$BUSY_TURN_W" \
+    FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "the new turn's first rung repeated inside its own window: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "the new turn's first rung repeated inside its own window: $(cat "$out")"
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "a turn that completes while the pane is idle-stale does not leave its rung behind, so the next long turn starts at its first rung and still repeats none"
 }
 
 test_nonterminal_stale_repairs_missing_or_corrupt_timer() {
@@ -2434,7 +2553,7 @@ test_busy_turn_age_absorbed_while_step_advancing() {
   # No completed turn for the whole run: age the spawn record one window past the
   # bound, with that window's rung already surfaced.
   set_busy_turn_windows "$state" busy-advancing "$BUSY_TURN_W" 1
-  printf '1\n' > "$state/.busy-turn-rung-$key"
+  seed_busy_rung "$state" busy-advancing "$key" 1
   export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (fixing) · activity: 25s · activity-id: busystep1'
 
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
@@ -2475,7 +2594,7 @@ test_busy_turn_age_absorbed_while_step_advancing() {
     && fail "an advancing busy worker was reported as a possible wedge: $(cat "$out")"
   [ ! -e "$state/.wedge-escalations-$key" ] \
     || fail "an advancing busy window touched the idle ladder's escalation count"
-  [ "$(cat "$state/.busy-turn-rung-$key" 2>/dev/null || true)" = 2 ] \
+  [ "$(busy_recorded_rung "$state" "$key")" = 2 ] \
     || fail "the advancing notice did not record the rung its turn age had reached"
   unset FM_FAKE_CREW_STATE
   pass "a busy worker past the completed-turn bound is absorbed while its pipeline step advances, and its window boundary is a long-running notice"
@@ -2594,7 +2713,7 @@ test_frozen_step_under_long_local_work_notices_then_can_be_declared_out() {
   fi
   [ ! -s "$out" ] || fail "a busy crew that declared its wait still printed a wake reason: $(cat "$out")"
   [ -e "$state/.paused-$key" ] || fail "the declaration did not move the busy crew onto the pause cadence"
-  [ "$(cat "$state/.busy-turn-rung-$key" 2>/dev/null || true)" = 1 ] \
+  [ "$(busy_recorded_rung "$state" "$key")" = 1 ] \
     || fail "the absorbed pause consumed the next busy ladder rung"
   reap "$pid"
   unset FM_FAKE_CREW_STATE
@@ -3116,6 +3235,7 @@ test_busy_pane_repeated_escalation_reaches_demand_deep_inspection
 test_busy_pane_default_turn_age_bound_is_3600s
 test_busy_ladder_rungs_land_one_window_apart
 test_busy_rung_ignores_an_erased_idle_ladder_timer
+test_busy_rung_restarts_after_a_turn_completes_while_idle_stale
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
