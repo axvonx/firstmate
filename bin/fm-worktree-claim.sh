@@ -14,7 +14,7 @@
 # What it verifies for you:
 #   - the task has a metadata record naming an existing, inspectable worktree
 #   - the task has not already returned that worktree to the pool, in which case
-#     there is nothing left to claim and cleanup never touches it again
+#     there is nothing left to claim and cleanup never acts on it again
 #   - no other task in the same home records that same worktree
 #   - the worktree does not already carry another home's or task's ownership
 #     record (that is a proven foreign occupant, and is never overwritten here)
@@ -87,7 +87,7 @@ if ! RECORD=$(fm_worktree_owner_record_path "$WT"); then
   exit 1
 fi
 # A task whose cleanup already returned this worktree has nothing left to claim:
-# the path is the pool's, cleanup deliberately never touches it again, and
+# the path is the pool's, cleanup deliberately never acts on it again, and
 # writing a record onto a pooled slot would leave exactly the stale claim the
 # record's location was chosen to prevent (docs/verification/worktree-ownership.md).
 if [ "$(fm_meta_get "$META" worktree_returned)" = 1 ]; then

@@ -57,7 +57,8 @@ Three facts follow, and together they select the git directory:
 - A file under the worktree's own git directory is invisible to `git status` and unreachable by `git add -A`, and survives the return exactly as the excluded marker does.
 
 The git directory therefore removes the commit and dirty-checkout hazards outright, and `bin/fm-teardown.sh` closes the survival hazard itself by removing the record immediately before the return and restoring it if the return fails.
-A return that succeeds is recorded instead, in the task's own metadata, and from then on cleanup neither reads nor writes that path: the slot is the pool's again, so the correct behavior on a rerun is not to prove ownership a second time but never to touch the worktree again.
+A return that succeeds is recorded instead, in the task's own metadata, and from then on cleanup never returns, resets, or removes that path again: the slot is the pool's, so the correct behavior on a rerun is not to prove ownership a second time but never to act on the worktree again.
+That covers the destructive steps rather than every read, and [`bin/fm-teardown.sh`](../../bin/fm-teardown.sh)'s header owns the exact list, including the two read-only child-path walks left ungated on purpose.
 That marker covers every pooled path a task can hold, including a secondmate home's durable treehouse lease, which is exempt from the ownership record only while the lease is held and not for the window after teardown's own return releases it.
 `tests/fm-worktree-owner.test.sh` pins the git-invisibility half of this as a regression.
 

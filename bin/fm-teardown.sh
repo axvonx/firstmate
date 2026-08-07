@@ -34,7 +34,18 @@
 # Once the proof has passed and the pooled path has been RETURNED - a crew
 # worktree, a child's worktree, or a secondmate home's lease - teardown records
 # worktree_returned=1 in that task's own metadata, and every later run skips
-# every step that reads or writes that path. The task stopped owning it the
+# every step that returns, resets, removes, or otherwise ACTS ON that path: at
+# the top level the home validation, the child preflight and forced child
+# cleanup, the content inspection, and the return of the worktree or of the
+# home's lease; in the child pass, that child's worktree reclaim and its nested
+# home removal. The guarantee is about destructive steps, not
+# about every read. Two walks deliberately still READ a child path whose own
+# marker is set: preflight_firstmate_home_children recursing into a returned
+# nested child home, and validate_firstmate_home_children_removal validating a
+# returned child home or child worktree. Both only inspect and validate - neither
+# returns a slot, resets a checkout, nor kills an endpoint - and nothing about a
+# path having gone back to the pool makes reading it unsafe, so those two are
+# left ungated on purpose rather than overlooked. The task stopped owning it the
 # moment the return succeeded, so that skip is a safety property and not merely
 # an unblocked rerun: the exits that follow a successful return (an unconfirmed
 # Herdr pane, PR-poll or busy-state retirement) retain every durable record and
@@ -213,7 +224,8 @@ T=$FM_BACKEND_VALIDATED_TARGET
 WT=$(fm_meta_get "$META" worktree)
 PROJ=$(fm_meta_get "$META" project)
 # Recorded by this script the moment a worktree return succeeds: from then on the
-# path is the pool's, not this task's, and no rerun may read or write it again.
+# path is the pool's, not this task's, and no rerun may return, reset, or remove
+# it again (see the header for the two read-only walks that still inspect one).
 WORKTREE_RETURNED=$(fm_meta_get "$META" worktree_returned)
 T_ORCA=
 [ "$BACKEND" != orca ] || T_ORCA=$T
@@ -384,7 +396,7 @@ fi
 # while their durable treehouse lease is held, which the pool never hands out to
 # another holder, so their path cannot be recycled underneath them; the window
 # after teardown returns that lease is covered by the returned marker instead,
-# which is what stops a rerun from touching the freed path. Orca
+# which is what stops a rerun from acting on the freed path. Orca
 # worktrees are excluded because they are per-task and never pooled; the
 # id-to-path match required further below is their own occupancy proof. A task
 # that already returned this worktree is excluded because it no longer owns the
@@ -1851,7 +1863,7 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ] && [ "$WORKTREE_RETURNED" != 1 ];
   # The slot is the pool's again, and may be reissued before this run finishes.
   # Record that transition in the task's own metadata, immediately and durably,
   # because several steps below still exit while deliberately retaining every
-  # record and asking for a rerun. The rerun must never touch this path again:
+  # record and asking for a rerun. The rerun must never act on this path again:
   # its ownership record is gone by design, so proving ownership would refuse,
   # and returning the slot a second time - what a rerun did before this marker
   # existed - would reset whatever lane the pool has since handed it to.
