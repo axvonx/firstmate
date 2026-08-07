@@ -133,6 +133,9 @@ The no-progress escalation count is not cleared by an intervening absorb, so `de
 And `FM_STEP_PROGRESS_SURFACE_COUNT` bounds the absorbs themselves: because an absorb can happen at most once per `FM_STALE_ESCALATE_SECS` per pane, its default of 15 puts a first human glance at roughly one hour at the 240s bound, then roughly hourly.
 That notice is worded as long-running rather than wedged, because the lane is healthy; it exists because progressing and finishing are different things, and only a human can judge that a run has been advancing for longer than the work is worth.
 
+Both bounds above describe the idle-pane ladder, which is the only ladder `crew_step_is_advancing`'s thresholds were measured for.
+A pane the harness reports as authoritatively busy is on `busy_turn_check`'s separate hour-scale ladder in `bin/fm-watch.sh`, which consults this same predicate once per `FM_BUSY_TURN_RENOTICE_SECS` and reaches its first human glance on the same roughly-hourly cadence by that route instead.
+
 ## Where change detection does not apply
 
 The changed-digest rule exists to catch a looping AGENT, so it is scoped to steps that have one.
