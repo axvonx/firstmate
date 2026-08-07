@@ -300,21 +300,99 @@ When a running home advances and its loaded instruction surface (`AGENTS.md`, `b
 If that send fails, bootstrap keeps an idempotent retry marker and emits `NUDGE_SECONDMATES:` with the failure reason.
 The same bootstrap run emits `SECONDMATE_LIVENESS:` only when a registered secondmate is skipped or its relaunch fails; already-live and successfully relaunched secondmates are handled silently.
 For a mid-session inherited local-material edit where tracked-file sync is not needed, run `bin/fm-config-push.sh`.
-It uses the same live secondmate discovery and propagation helper as bootstrap, prints each live home's `crew-dispatch.json`, `crew-harness`, `backlog-backend`, `backend`, `herdr-presentation-spaces`, `startup-memory-budget`, and `data/captain-shared.md` result as `pushed`, `unchanged`, `skipped`, or `error`, and exits non-zero for real propagation errors or config-reread send failures.
+It uses the same live secondmate discovery and propagation helper as bootstrap, prints each live home's result for every declared inherited config item and `data/captain-shared.md` as `pushed`, `unchanged`, `skipped`, or `error`, and exits non-zero for real propagation errors or config-reread send failures.
 When an allowlisted config item changes for an already-running home, it sends the literal-content reread pointer described in [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md); unchanged allowlisted config sends no pointer unless a previous delivery is pending.
 The locked bootstrap inheritance pass uses the same per-home changed-set and reread path for already-running homes; see `secondmate-provisioning` for the single contract owner.
 That live discovery starts from `state/*.meta` records with `kind=secondmate`; `data/secondmates.md` only backfills `home=` for older or incomplete meta records.
 Skipped items, such as a destination checkout that does not yet gitignore the item, are visible warnings but not hard failures.
 
+## Worker credentials (.env)
+
+A firstmate home's gitignored `.env` is where that home's worker credentials live, alongside the X-mode pairing token described in the next section.
+Keep it mode `600`, and never commit it or copy its contents into a project, a fixture, or an image.
+
+Every spawn runs the worker's launch command under `bin/fm-worker-env-exec.sh`, which loads the home's `.env` and then execs the launch, so the agent and every child it starts inherit the home's credentials.
+Values never appear on a command line, in the pane text, in `ps` output, or in a task's metadata record, and nothing on this path prints a value under any condition.
+A home with no delivering `.env` and no primary to fall back to loads nothing and is not an error; a worker that lacks a key it needs reports the missing credential through its brief's stop-and-report path.
+
+A secondmate home has no `.env` of its own, because nothing seeds one - so a home whose own file delivers no worker credential reads its primary's instead, and `bin/fm-spawn.sh` announces that path on stderr at spawn.
+A per-home `.env` remains the supported alternative for anyone who wants a secondmate's workers isolated from the primary's credentials: write one in that home and it wins whole whenever it actually delivers at least one worker credential, with the primary's never consulted.
+That test is delivery rather than existence on purpose, and one function - `fm_worker_env_resolve` in [`bin/fm-worker-env-lib.sh`](../bin/fm-worker-env-lib.sh) - is the single owner of the answer, so the file a spawn loads is the file a crewmate brief describes.
+An X-mode home's `.env` can hold only `FMX_PAIRING_TOKEN`, which is never exported, and a comment-only or empty file reads the same way: treating any of those as "the home has its own credentials" would strand every crewmate on that lane silently.
+A primary whose own `.env` delivers nothing is not used either, because announcing a source that supplies no credential is the same misleading claim one level over.
+The `FM_*`/`FMX_*` exclusion below applies on the inherited path exactly as it does on the local one, and matters more there: `FMX_PAIRING_TOKEN` is the primary home's relay consent and must not reach a secondmate's crewmate.
+
+A secondmate runs `bin/fm-spawn.sh` from its own checkout, so this fallback reaches that lane's crewmates only once the secondmate home has fast-forwarded to a `bin/fm-spawn.sh` that carries it - which the guarded tracked-file fast-forward does at launch and in the locked bootstrap sweep, except for a home it reports as dirty, diverged, or in-flight, which is left unchanged.
+Confirming that is an ordered step before any machine-wide credential copies are cleared, and it runs through the fleet's own live discovery so a record whose `home=` lives in `data/secondmates.md` rather than in its meta is answered for rather than skipped:
+
+```sh
+bash <<'SH'
+. bin/fm-ff-lib.sh
+records=$(live_secondmate_meta_records state data/secondmates.md)
+[ -n "$records" ] || echo 'no secondmate records: nothing to confirm'
+printf '%s\n' "$records" | while IFS='|' read -r id home _; do
+  [ -n "$id" ] || continue
+  grep -q '^home=' "state/$id.meta" || echo "$id: no home= in meta, read from data/secondmates.md"
+  [ -n "$home" ] || { echo "$id: STOP, no home in meta or data/secondmates.md"; continue; }
+  grep -q fm_worker_env_resolve "$home/bin/fm-spawn.sh" 2>/dev/null \
+    && echo "$id: carries the fallback" || echo "$id: STOP, $home has not advanced"
+done
+SH
+```
+
+Every outcome prints, so nothing passes by printing nothing; each `STOP` is a lane to settle first - clear whatever the sweep warned about so that home's fast-forward can land, or record the home it has none for - and the ambient copies come out only once every line reads `carries the fallback`.
+For a secondmate that relies on the primary's file, the stderr line naming that `.env` path at its next crewmate spawn is the per-home confirmation that it picked the fallback up; a secondmate whose own `.env` delivers credentials needs none and prints none.
+
+This exists so credentials do not have to be set machine-wide.
+A `launchctl setenv` value is inherited by every process on the machine, which is both a broad exposure and a silent one - a worker gets the key whether or not firstmate intended it to.
+`launchctl` is not the only such source: a login-shell rc file that exports the same names reaches every worker pane just as widely, so confirm a cleared name is unset in a fresh pane rather than concluding it from the absence of a `launchctl` entry.
+The pane's own long-lived provider daemon does not inherit firstmate's environment, so a per-home file has to be delivered explicitly, and this is that delivery.
+
+[`bin/fm-worker-env-lib.sh`](../bin/fm-worker-env-lib.sh) owns the parser and the eligibility rules.
+Two exclusions are contractual rather than incidental.
+`FM_*` and `FMX_*` names are never exported into a worker: `.env` also carries firstmate's own configuration, and `FMX_PAIRING_TOKEN` in particular is X mode's relay consent, which AGENTS.md section 14 reserves to the home that holds it rather than to its workers.
+Names that would rewrite the shell the values load into - `PATH`, `BASH_ENV`, `LD_PRELOAD`, `DYLD_*`, and similar - are refused outright, along with the interpreter-level equivalents: `GIT_SSH_COMMAND`, the whole `GIT_CONFIG_*` family plus the bare `GIT_CONFIG`, `PERL5LIB` and `PERL5OPT`, `PYTHONSTARTUP` and `PYTHONPATH`, `RUBYOPT` and `RUBYLIB`, `NODE_PATH`, and `ZDOTDIR`.
+Each interpreter name is refused with its stronger sibling rather than on its own, because refusing only the weaker one refuses nothing: `PYTHONPATH` reaches every python run where `PYTHONSTARTUP` only fires for an interactive one, `PERL5OPT` injects `-M<module>` into every perl run where `PERL5LIB` only adds a search path, and `GIT_CONFIG_COUNT` with `GIT_CONFIG_KEY_<n>`/`GIT_CONFIG_VALUE_<n>` sets arbitrary config - `credential.helper` included - on every git call.
+`NODE_OPTIONS` is allowed only when every whitespace-separated token is `--max-old-space-size=<digits>`, and the whole value is refused otherwise, so the deliberate heap-size setting keeps working while `--require`, `--import`, and `--experimental-loader` cannot load a file into every node process a worker starts.
+A refused value is reported on stderr by the name it was declared for and never by its content.
+A declared value wins over an already-set ambient one, so a stale machine-wide copy cannot silently shadow the file.
+
+The wrapper covers the launch, so an agent relaunched by hand in its own pane does not pass through it and starts without credentials once machine-wide values are gone.
+Respawning through `bin/fm-spawn.sh` does not have that gap.
+
+See [verification/worker-credentials.md](verification/worker-credentials.md) for the current maintainer evidence.
+
+## Vault-only credentials (config/vault-only-keys)
+
+`config/vault-only-keys` declares which credential names a home keeps in Automic Vault rather than in its environment, one environment variable name per line, with `#` comments and blank lines ignored.
+It is LOCAL and gitignored, and it is inherited by secondmate homes under the contract in [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md).
+
+The file is what scopes the vault discipline in the credential rule that [`bin/fm-brief.sh`](../bin/fm-brief.sh) generates into every crewmate brief.
+Absent, the rule applies to every credential, which is the original unnarrowed contract and remains the default for any home that has not declared a split.
+Present, the rule names exactly those keys, applies the full vault discipline to them, and tells the worker to read every other credential straight from its environment with no vault call.
+That includes the trigger conditions: an authentication failure or an unset value means `av inject` only for the declared names, while an unset credential outside them is reported as the missing credential it is, named against whichever `.env` would have delivered it - this home's, the primary's when this home reads that one, or no file at all when nothing delivers - from the same `fm_worker_env_resolve` answer the spawn loads.
+That last part is why the scoping matters: a worker told to reach through the vault for a key the vault does not hold stops on a blocker it can never clear, and because every lane reads the same generated rule they would all stop the same way at once.
+
+A present-but-empty file and an unusable name are both refused, and no brief is written.
+Either one would drop a credential out of vault discipline without anyone reading a diff, so narrowing is always explicit.
+Delete the file to return to covering every credential.
+
+The vault half of the rule still renders only where Automic Vault is actually installed, so a machine without it is never told to reach for a tool it does not have.
+Where that half renders unnarrowed - Automic Vault installed and no file here - the brief omits the paragraph that says where the `.env` values live, because that rule already tells the worker credentials are not in its environment and that falling back to the environment is the exposure being removed.
+One brief carries one position, so an unnarrowed home's credential rule reads exactly as it did before that paragraph existed, and declaring a split here is what turns it on.
+`bin/fm-brief.sh --help` owns the generated rule's full contract and reasoning.
+
 ## X mode (.env)
 
 X mode lets a firstmate instance answer public `@myfirstmate` mentions and act on normal reversible mention requests through firstmate's normal lifecycle.
 It is off unless the firstmate home's gitignored `.env` contains a non-empty `FMX_PAIRING_TOKEN`.
+That is the same `.env` described under "Worker credentials" above, and the pairing token is one of the `FMX_*` names deliberately excluded from what a worker inherits.
 The pairing token both identifies the relay tenant and records opt-in consent for autonomous public replies and eligible lifecycle actions.
 Destructive, irreversible, or security-sensitive asks are flagged for trusted-channel confirmation instead of being executed from a public mention.
 The relay uses owner-only routing: a mention delivered to a home is from that home's owner/captain, while parent-thread context may still include other public accounts.
 `FMX_RELAY_URL` is optional and defaults to `https://myfirstmate.io`, mainly for developers pointing at a local relay.
-For direct client invocations, environment values override `.env`; bootstrap activation still keys off `.env` presence so watcher artifacts are explicit local opt-in state.
+For direct client invocations, environment values override `.env`; bootstrap activation still keys off the token written in `.env` and ignores an ambient one, so watcher artifacts are explicit local opt-in state.
+Since that file also holds the home's worker credentials, its presence never activates anything: a `.env` with credentials and no `FMX_PAIRING_TOKEN` leaves X mode off and writes no artifacts.
 `FMX_ENV_FILE` can point direct poll/reply client invocations at another `.env`-style file, but it does not change bootstrap activation.
 
 The locked session-start bootstrap step turns the token into local generated state.

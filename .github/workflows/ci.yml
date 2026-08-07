@@ -196,6 +196,9 @@ jobs:
           set -eu
           # Several real-herdr-gated E2E scripts require treehouse for spawn
           # worktree acquisition (presentation, workspace-per-home, autodetect).
+          # worker-env-spawn-e2e is in that family for this install alone - it
+          # drives a real spawn over tmux and needs no herdr - so this step is
+          # what keeps the .env credential delivery proof running in CI.
           bin/fm-install-treehouse.sh "$RUNNER_TEMP/bin"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - name: Assert Herdr pin and protocol floor
@@ -203,8 +206,14 @@ jobs:
           set -eu
           command -v herdr >/dev/null || { echo "::error::herdr not on PATH after install"; exit 1; }
           command -v treehouse >/dev/null || { echo "::error::treehouse not on PATH after install"; exit 1; }
+          # tmux is image-provided rather than installed above, and this lane's
+          # suites gate on it: the .env credential-delivery proof and the AFK
+          # launch e2e both drive a real pane. Without this assertion its absence
+          # would reach them as a `skip:`, which the runner counts as a success.
+          command -v tmux >/dev/null || { echo "::error::tmux is required for the real-pane e2e suites in this lane"; exit 1; }
           herdr --version
           treehouse --version
+          tmux -V
           status=$(herdr status --json)
           printf '%s\n' "$status"
           version=$(printf '%s' "$status" | jq -r '.client.version // empty')

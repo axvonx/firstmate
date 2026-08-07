@@ -332,6 +332,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/worker-credentials.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/stow-memory.md",
       "audience": "maintainer-verification"
     },
