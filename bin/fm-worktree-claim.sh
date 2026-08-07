@@ -39,6 +39,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-worktree-owner-lib.sh
 . "$SCRIPT_DIR/fm-worktree-owner-lib.sh"
+# shellcheck source=bin/fm-gate-refuse-lib.sh
+. "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 
 usage() {
   sed -n '2,29p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
@@ -61,6 +63,11 @@ if ! fm_task_id_path_safe "$ID"; then
   echo "error: invalid task id $ID" >&2
   exit 2
 fi
+# Fail closed before any fleet mutation: a claim re-arms a cleanup that would
+# reset a worktree and terminate what runs in it, so a no-mistakes gate agent
+# must no more be able to claim one than to tear one down
+# (see bin/fm-gate-refuse-lib.sh).
+fm_refuse_if_gate_agent
 
 META="$STATE/$ID.meta"
 [ -f "$META" ] && [ ! -L "$META" ] || {
