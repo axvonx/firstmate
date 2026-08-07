@@ -136,6 +136,10 @@ That notice is worded as long-running rather than wedged, because the lane is he
 Both bounds above describe the idle-pane ladder, which is the only ladder `crew_step_is_advancing`'s thresholds were measured for.
 A pane the harness reports as authoritatively busy is on `busy_turn_check`'s separate hour-scale ladder in `bin/fm-watch.sh`, which consults this same predicate once per `FM_BUSY_TURN_RENOTICE_SECS` and reaches its first human glance on the same roughly-hourly cadence by that route instead.
 
+That busy ladder's measured latency, at the production defaults where `FM_BUSY_TURN_MAX_SECS` is 3600s and `FM_BUSY_TURN_RENOTICE_SECS` defaults to it, is a long-running notice at a completed-turn age of 1h, `possible wedge, escalation 1` at 2h, escalation 2 at 3h, and escalation 3 plus `demand-deep-inspection` at 4h.
+Those are measured from the completed-turn bound crossing, which counts as the first of those windows rather than being spent anchoring a timer in silence; that is what puts the notice at the bound and the first wedge naming one window after it.
+This number drifted from the shipped behaviour twice while the ladder was being built, because the suite asserted the ORDER of the rungs and never their TIMING, so prose was the only place the latency lived and nothing in the tests could contradict a wrong claim - check it against `test_busy_ladder_rungs_land_one_window_apart`, which pins every rung to a turn age measured in whole windows past the bound, rather than trusting this paragraph.
+
 ## Where change detection does not apply
 
 The changed-digest rule exists to catch a looping AGENT, so it is scoped to steps that have one.
@@ -156,4 +160,5 @@ The recency-only path stays bounded, because such a step has no live-agent tier 
 - `tests/fm-crew-state.test.sh` pins pipeline-owned attribution, its stale-submitted-head and wrong-run rejections, the duration parsing including prefixed renderings, agent-pid liveness publication from both quoted and unquoted renderings, `step-agent: none` for a genuinely empty pid column, no step-agent field at all for an unreadable one, and the activity digest (stable for identical text, different for changed text).
 - `tests/fm-watch-triage.test.sh` pins both escalation directions through the watcher: an advancing step, a quiet-but-live agent, and a step reporting no agent while logging recently are absorbed, while a stopped activity age, an unchanged activity message with a dead agent, an unchanged message whose pid column was unreadable, and a live agent past the stall ceiling all escalate.
 - `tests/fm-watch-triage.test.sh` also pins the two bounds: an absorb no longer clears the no-progress count, and a lane that keeps changing its log text without progressing surfaces one long-running notice per `FM_STEP_PROGRESS_SURFACE_COUNT` absorbs.
+- `tests/fm-watch-triage.test.sh` also pins the busy ladder's timing rather than only its order: `test_busy_ladder_rungs_land_one_window_apart` drives an explicit bound and window and asserts that the notice lands at the bound and each escalation exactly one window later, so shifting any rung by a window fails.
 - `tests/fm-daemon.test.sh` pins the same recheck and the same absorb ladder in away mode.

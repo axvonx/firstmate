@@ -62,8 +62,9 @@
 #                          A declared pause or captain hold is honoured there and
 #                          takes the bounded pause cadence, even though the busy
 #                          pane still outranks it as CURRENT STATE. Otherwise one
-#                          wake surfaces per BUSY_TURN_RENOTICE_SECS window: the
-#                          first is a long-running-turn notice explicitly not a
+#                          wake surfaces per BUSY_TURN_RENOTICE_SECS window,
+#                          starting at the bound itself: the first is a
+#                          long-running-turn notice explicitly not a
 #                          wedge report, and only a turn still open a whole
 #                          further window later escalates as a possible wedge,
 #                          with the escalation count and demand-deep-inspection
@@ -178,11 +179,16 @@ SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trai
 # (fm-classify-lib.sh) backs the away-mode daemon; while state/.afk exists the
 # daemon owns triage, so this watcher reverts to one-shot (enqueue + exit on every
 # wake) and never double-triages - and never runs the costly provably-working read
-# on the wake paths the daemon owns. The wedge timer is the one exception: a busy
-# pane past BUSY_TURN_MAX_SECS still routes through wedge_timer_check in away
-# mode, so the watcher may spend one bounded crew-state read at escalation time
+# on the wake paths the daemon owns. The busy-turn ladder is the one exception: a
+# busy pane past BUSY_TURN_MAX_SECS still routes through busy_turn_check in away
+# mode, so the watcher may spend one bounded crew-state read at a window boundary
 # there, and the daemon spends its own for the same lane. Deliberate: a false
-# busy-turn escalation is worth suppressing in away mode too.
+# busy-turn escalation is worth suppressing in away mode too. That route is also
+# the one non-secondmate path that can reach handle_paused_stale while state/.afk
+# exists: a busy pane whose status line declares paused: or captain-held: takes
+# that absorb and its bounded PAUSE_RESURFACE_SECS cadence in away mode too, where
+# it previously escalated on STALE_ESCALATE_SECS. Same rationale, and it stays
+# bounded, so a forgotten hold still cannot rot invisibly.
 # Idle secs before a provably-working stale is RECHECKED as a possible wedge.
 # Reaching it no longer escalates on its own: pane silence is not evidence of a
 # wedge while a pipeline step is running, and pipeline steps routinely run 10-55
@@ -212,6 +218,10 @@ BUSY_TURN_MAX_SECS=${FM_BUSY_TURN_MAX_SECS:-3600}
 # an hour on healthy workers, each costing a manual inspection that could only
 # ever conclude the worker was mid-command. Defaults to the bound itself, and is
 # separately overridable so the gate and the cadence can be moved independently.
+# The bound crossing counts as the first such window rather than being spent
+# anchoring a timer, so at the defaults the ladder reads: notice at a turn age of
+# 1h, escalation 1 at 2h, escalation 2 at 3h, escalation 3 plus
+# demand-deep-inspection at 4h.
 BUSY_TURN_RENOTICE_SECS=${FM_BUSY_TURN_RENOTICE_SECS:-$BUSY_TURN_MAX_SECS}
 # A crew that declared a pause is idling on a known external wait, so its stale
 # pane is absorbed rather than wedge-escalated.
@@ -451,10 +461,17 @@ busy_turn_over_age() {  # <task>
 #     whether an over-long turn is suspicious, and a declared external wait is
 #     precisely the innocent explanation for one.
 #   run step advancing -> a long-running notice, never a wedge report.
-#   first window -> a long-running notice: the turn is long, and nothing observed
-#     says it is stuck.
+#   the bound crossing itself -> a long-running notice: the turn is long, and
+#     nothing observed says it is stuck. The crossing already cost
+#     BUSY_TURN_MAX_SECS of an uncompleted turn, so it counts as a whole window
+#     and is not spent anchoring a timer in silence.
 #   every further window -> a possible-wedge escalation carrying the escalation
 #     count, reaching demand-deep-inspection at FM_WEDGE_DEMAND_INSPECT_COUNT.
+# At the production defaults (bound and window both an hour, threshold 3) that is
+# a notice at a turn age of 1h, escalation 1 at 2h, escalation 2 at 3h, and
+# escalation 3 plus demand-deep-inspection at 4h; tests/fm-watch-triage.test.sh's
+# test_busy_ladder_rungs_land_one_window_apart pins each of those rungs to its
+# window rather than merely to its place in the order.
 # So the hung foreground call the bound exists for is still caught and still
 # escalates without limit; it is named a wedge one window later than before
 # rather than four minutes in. The escalation count survives an advancing window
@@ -476,18 +493,21 @@ busy_turn_check() {  # <window> <task> <hash> <since-file> <escalation-count-fil
   since=$(cat "$since_file" 2>/dev/null || true)
   case "$since" in
     ''|*[!0-9]*)
-      date +%s > "$since_file"
-      triage_log "absorbed busy (no completed turn) timer reset: $win"
-      return
+      # No window is running yet: either this is the first poll past the bound
+      # (every under-bound poll erases the timer) or the timer was lost or
+      # corrupted. Either way the crossing IS the end of a window - getting here
+      # already cost BUSY_TURN_MAX_SECS of an uncompleted turn - so fall through
+      # and say so now instead of buying a silent window first. A hung foreground
+      # call is the most common way a busy worker actually dies, and an hour of
+      # one has to be named at the bound rather than an hour past it. The
+      # fall-through re-anchors below, so a lost or corrupt timer still self-heals.
+      ;;
+    *)
+      age=$(( $(date +%s) - since ))
+      [ "$age" -ge "$BUSY_TURN_RENOTICE_SECS" ] || return
       ;;
   esac
-  age=$(( $(date +%s) - since ))
-  [ "$age" -ge "$BUSY_TURN_RENOTICE_SECS" ] || return
   turn_age=$(busy_turn_age "$task")
-  # Anchor the next window BEFORE anything can wake: wake() exits the cycle, so
-  # a write placed after it would never run and the cadence would collapse back
-  # to one wake per poll.
-  date +%s > "$since_file"
   if crew_step_is_advancing "$task" "$memo"; then
     reason="stale: $win (busy ${turn_age}s, LONG-RUNNING not wedged: the run reported an advancing step while this turn stayed open with no completion - glance at whether it is worth continuing, do not treat it as stuck)"
   else
@@ -503,7 +523,13 @@ busy_turn_check() {  # <window> <task> <hash> <since-file> <escalation-count-fil
       fi
     fi
   fi
+  # Queue before the detector advances, like every sibling ladder here: a failed
+  # append must not consume the window and leave a genuinely wedged worker silent
+  # for the whole next one. The anchor still lands before wake(), which exits the
+  # cycle, so a write placed after it would never run and the cadence would
+  # collapse back to one wake per poll.
   fm_wake_append stale "$win" "$reason" || exit 1
+  date +%s > "$since_file"
   wake "$reason"
 }
 
