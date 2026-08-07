@@ -154,11 +154,19 @@ family_for_basename() {
     fm-watcher-lock.test.sh)
       printf '%s\n' watcher-wake-lock
       ;;
+    # This family is "runs in the required real-Herdr lane", which is the only
+    # lane that installs the pinned Treehouse build - so a suite that drives a
+    # real crewmate spawn belongs here whether or not it needs herdr itself.
+    # fm-worker-env-spawn-e2e is the tmux-only member: it needs `treehouse get`
+    # for the worktree fm-spawn.sh acquires, and in a portable lane it can only
+    # burn a minute per case waiting for a worktree that never arrives. Keeping
+    # it here is also what keeps the portable serial halves off their budget,
+    # where the repo deliberately keeps real-tool E2E out.
     fm-afk-inject-herdr-e2e.test.sh|fm-afk-launch.test.sh|fm-backend-autodetect-smoke.test.sh|\
     fm-backend-herdr-eventwait-smoke.test.sh|fm-backend-herdr-presentation-e2e.test.sh|\
     fm-backend-herdr-launcher-workspace-e2e.test.sh|\
     fm-backend-herdr-prune-safety-e2e.test.sh|fm-backend-herdr-respawn-idem-e2e.test.sh|\
-    fm-herdr-session-cleanup-e2e.test.sh|\
+    fm-herdr-session-cleanup-e2e.test.sh|fm-worker-env-spawn-e2e.test.sh|\
     fm-backend-herdr-smoke.test.sh|fm-backend-herdr-workspace-per-home-e2e.test.sh)
       printf '%s\n' real-herdr-gated
       ;;

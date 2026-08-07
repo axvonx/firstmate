@@ -37,6 +37,15 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 command -v tmux >/dev/null 2>&1 || { echo "skip: tmux not found"; exit 0; }
+# A crewmate spawn acquires its worktree with `treehouse get`, so without
+# treehouse a real fm-spawn.sh cannot finish: the pane's cwd never leaves the
+# project and every case dies on fm-spawn's own 60s worktree wait, one minute at
+# a time, proving only that a binary is absent. Gate on it exactly as the other
+# suites that drive a real spawn do. bin/fm-test-run.sh therefore maps this suite
+# to the real-herdr-gated family - the one CI lane that installs the pinned
+# Treehouse build - so the delivery guarantee is still proven in CI rather than
+# skipped everywhere.
+command -v treehouse >/dev/null 2>&1 || { echo "skip: treehouse not found (required by fm-spawn.sh)"; exit 0; }
 
 TMP_ROOT=$(fm_test_tmproot fm-worker-env-spawn-e2e)
 # A tmux socket is a UNIX socket, whose path is capped near 104 bytes, and the

@@ -37,6 +37,9 @@ It also points the pane shell at an empty `XDG_CONFIG_HOME`, without which the "
 
 ## Delivery, ablation, inheritance, and the empty-home case
 
+A real crewmate spawn takes its worktree from `treehouse get`, so the suite needs tmux and treehouse and prints `skip:` without them - read the first line before reading the run as a proof.
+CI runs it in the real-Herdr lane, the only lane that installs the pinned Treehouse build (`bin/fm-test-run.sh` maps it to that family for exactly that reason).
+
 ```sh
 bash tests/fm-worker-env-spawn-e2e.test.sh
 ```

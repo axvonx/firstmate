@@ -196,6 +196,9 @@ jobs:
           set -eu
           # Several real-herdr-gated E2E scripts require treehouse for spawn
           # worktree acquisition (presentation, workspace-per-home, autodetect).
+          # worker-env-spawn-e2e is in that family for this install alone - it
+          # drives a real spawn over tmux and needs no herdr - so this step is
+          # what keeps the .env credential delivery proof running in CI.
           bin/fm-install-treehouse.sh "$RUNNER_TEMP/bin"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - name: Assert Herdr pin and protocol floor
