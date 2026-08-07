@@ -405,8 +405,15 @@ SM2_WS=$(workspace_of_pane "$SM2_PANE")
 pass "real herdr E2E: a --secondmate launch still stands up that secondmate's own workspace instead of inheriting the launcher's"
 
 # --- 8. teardown closes only the worker's own pane --------------------------
+# Cleanup names the SAME home dupC was spawned under, exactly as every real
+# caller does (fm-spawn.sh puts FM_HOME in the task's own launch env, and
+# fm-bootstrap.sh/fm-fleet-snapshot.sh always pass FM_HOME beside the state
+# override). The worktree ownership record fm-spawn.sh writes names the spawning
+# home, so a cleanup run under a different FM_HOME cannot prove the worktree is
+# still this task's and refuses (bin/fm-worktree-owner-lib.sh).
 
-FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$PRIMARY_HOME/state" FM_DATA_OVERRIDE="$PRIMARY_HOME/data" \
+FM_HOME="$PRIMARY_HOME" \
+  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$PRIMARY_HOME/state" FM_DATA_OVERRIDE="$PRIMARY_HOME/data" \
   FM_CONFIG_OVERRIDE="$PRIMARY_HOME/config" \
   "$ROOT/bin/fm-teardown.sh" dupC >"$TMP_ROOT/teardown.out" 2>&1
 status=$?
