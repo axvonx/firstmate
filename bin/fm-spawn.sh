@@ -113,11 +113,13 @@
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
-# Every non-secondmate spawn also records WORKTREE OWNERSHIP: a per-spawn token
-# written both into state/<id>.meta as worktree_token= and into the worktree
-# itself, so cleanup can later prove the worktree it is about to reset is still
-# this task's and not a pool slot that was returned and reissued to a live lane.
-# bin/fm-worktree-owner-lib.sh owns the record; a spawn that cannot write it fails.
+# Every spawn into a POOLED worktree also records WORKTREE OWNERSHIP: a
+# per-spawn token written both into state/<id>.meta as worktree_token= and into
+# the worktree itself, so cleanup can later prove the worktree it is about to
+# reset is still this task's and not a pool slot that was returned and reissued
+# to a live lane. bin/fm-worktree-owner-lib.sh owns the record; a spawn that
+# cannot write it fails. Secondmate homes and Orca worktrees are exempt, exactly
+# as they are in the cleanup that reads it (bin/fm-teardown.sh's header).
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
@@ -1376,8 +1378,13 @@ fi
 # record's location, format, and verification; bin/fm-teardown.sh refuses when
 # it disagrees. Failing here is deliberate: a task whose ownership cannot be
 # recorded is a task cleanup would later have to refuse, so it must not launch.
+# Written for exactly the worktrees teardown proves, and no others: an Orca
+# worktree is exempt for the same reason teardown exempts it - it is per-task,
+# never pooled, and already carries an id-to-path occupancy proof - so recording
+# a token teardown never reads would only turn an unreadable path into a spawn
+# failure that buys nothing.
 WORKTREE_TOKEN=
-if [ "$KIND" != secondmate ] && [ -n "${WT:-}" ]; then
+if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ -n "${WT:-}" ]; then
   WORKTREE_TOKEN=$(fm_worktree_owner_mint) || {
     echo "error: could not mint a worktree ownership token for $ID" >&2
     exit 1

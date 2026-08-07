@@ -25,6 +25,7 @@
 #   (k) claim --confirm                                  -> record written, meta updated
 #   (l) claim over another task's record                 -> REFUSE, never overwritten
 #   (m) claim while a second task records the worktree   -> REFUSE
+#   (n) claim a worktree the task already returned        -> REFUSE, names the rerun
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -267,6 +268,30 @@ test_claim_refuses_while_two_tasks_record_the_worktree() {
   pass "a claim refuses while two tasks record the same worktree"
 }
 
+test_claim_refuses_a_worktree_the_task_already_returned() {
+  local case_dir out rc record
+  case_dir=$(make_case claim-returned)
+  write_task_meta "$case_dir" task-x1
+  # What cleanup records the moment its worktree return succeeds. The pool may
+  # already have reissued the slot, so a claim here would put a stale claim on
+  # someone else's worktree and re-arm a cleanup that deliberately skips it.
+  printf 'worktree_returned=1\n' >> "$case_dir/home/state/task-x1.meta"
+  record=$(fm_worktree_owner_record_path "$case_dir/wt")
+
+  set +e
+  out=$(run_claim "$case_dir" task-x1 --confirm 2>&1)
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "claim-returned: claiming an already-returned worktree must refuse"
+  assert_contains "$out" "already returned worktree" \
+    "claim-returned: refusal did not say the worktree had gone back to the pool"
+  assert_contains "$out" "rerun bin/fm-teardown.sh task-x1" \
+    "claim-returned: refusal stated no way to finish the cleanup"
+  assert_absent "$record" "claim-returned: the refused claim still wrote an ownership record"
+  pass "a claim refuses a worktree this task already returned to the pool"
+}
+
 test_matching_identity_is_accepted
 test_another_tasks_record_is_refused_by_name
 test_another_homes_record_is_refused_by_name
@@ -280,3 +305,4 @@ test_claim_without_confirm_writes_nothing
 test_claim_with_confirm_establishes_ownership
 test_claim_never_overwrites_another_tasks_record
 test_claim_refuses_while_two_tasks_record_the_worktree
+test_claim_refuses_a_worktree_the_task_already_returned

@@ -29,6 +29,16 @@
 # holds them and the pool never reissues a leased path; Orca worktrees are exempt
 # because they are per-task and never pooled, and their recorded id-to-path match
 # below is their own occupancy proof.
+# Once the proof has passed and the worktree return has SUCCEEDED, teardown
+# records worktree_returned=1 in the task's own metadata, and every later run
+# skips the proof and every step that reads or writes that worktree. The task
+# stopped owning the slot the moment the return succeeded, so that skip is a
+# safety property and not merely an unblocked rerun: the exits that follow a
+# successful return (an unconfirmed Herdr pane, PR-poll or busy-state
+# retirement) retain every durable record and ask for a rerun, and without the
+# marker such a rerun would both meet this refusal with its own record already
+# dropped and - the older bug - hand the slot to `treehouse return` a second
+# time after the pool may already have reissued it.
 # CONSIDERED AND NOT IMPLEMENTED: detecting a live validation run on the branch
 # about to be cleared. It is defence in depth rather than the fix, and it is a
 # poor discriminator here - the validation pipeline keeps its own custody
@@ -195,6 +205,9 @@ BACKEND=$FM_BACKEND_VALIDATED_BACKEND
 T=$FM_BACKEND_VALIDATED_TARGET
 WT=$(fm_meta_get "$META" worktree)
 PROJ=$(fm_meta_get "$META" project)
+# Recorded by this script the moment a worktree return succeeds: from then on the
+# path is the pool's, not this task's, and no rerun may read or write it again.
+WORKTREE_RETURNED=$(fm_meta_get "$META" worktree_returned)
 T_ORCA=
 [ "$BACKEND" != orca ] || T_ORCA=$T
 "$FM_ROOT/bin/fm-guard.sh" || true
@@ -364,8 +377,12 @@ fi
 # because they are held by a durable treehouse lease, which the pool never hands
 # out to another holder, so their path cannot be recycled underneath them. Orca
 # worktrees are excluded because they are per-task and never pooled; the
-# id-to-path match required further below is their own occupancy proof.
-if [ -n "$WT" ] && [ -d "$WT" ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+# id-to-path match required further below is their own occupancy proof. A task
+# that already returned this worktree is excluded because it no longer owns the
+# slot at all: proving ownership again is the wrong question, and the steps the
+# proof guards are skipped for it below.
+if [ -n "$WT" ] && [ -d "$WT" ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] \
+  && [ "$WORKTREE_RETURNED" != 1 ]; then
   require_worktree_ownership "$FM_HOME" "$STATE" "$ID" "$WT" \
     "$(fm_meta_get "$META" worktree_token)" "worktree" || exit 1
 fi
@@ -1438,7 +1455,18 @@ $session	$lock_path"
   return 1
 }
 
-preflight_firstmate_home_herdr_children() {  # <home>
+# The whole child tree's preflight: every refusal it raises fires before any
+# child is killed, returned, or removed, so it leaves every child's records,
+# isolated copy, and endpoint intact for a plain rerun. A child's pool slot
+# recycles exactly like a parent's, so the ownership proof belongs here too, and
+# for the same reason the top-level one sits before the landed-work checks - an
+# ownership refusal must not arrive after the endpoint it was protecting is dead.
+# Same exemptions as the top-level proof: a secondmate child's home is held by a
+# durable treehouse lease that the pool never reissues, an Orca worktree is
+# per-task and never pooled, and a child that already returned its worktree no
+# longer owns that path at all, so the cleanup below skips it rather than proving
+# a tenancy that has ended.
+preflight_firstmate_home_children() {  # <home>
   local home=$1 sub_state child_meta child_id child_backend child_target child_kind child_home child_wt
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
@@ -1448,22 +1476,28 @@ preflight_firstmate_home_herdr_children() {  # <home>
     fm_backend_validate_task_endpoint "$child_meta" "$child_id" || return 1
     child_backend=$FM_BACKEND_VALIDATED_BACKEND
     child_target=$FM_BACKEND_VALIDATED_TARGET
+    child_kind=$(meta_value "$child_meta" kind)
+    [ -n "$child_kind" ] || child_kind=ship
+    child_wt=$(meta_value "$child_meta" worktree)
+    if [ "$child_kind" != secondmate ] && [ "$child_backend" != orca ] \
+      && [ -n "$child_wt" ] && [ -d "$child_wt" ] \
+      && [ "$(meta_value "$child_meta" worktree_returned)" != 1 ]; then
+      require_worktree_ownership "$home" "$sub_state" "$child_id" "$child_wt" \
+        "$(meta_value "$child_meta" worktree_token)" "child worktree" || return 1
+    fi
     if [ "$child_backend" = herdr ]; then
       teardown_herdr_preflight_target "$child_target" "$child_id" || return 1
     fi
-    child_kind=$(meta_value "$child_meta" kind)
-    [ -n "$child_kind" ] || child_kind=ship
     if [ "$child_kind" = secondmate ]; then
-      child_wt=$(meta_value "$child_meta" worktree)
       child_home=$(meta_value "$child_meta" home)
       [ -n "$child_home" ] || child_home=$child_wt
-      preflight_firstmate_home_herdr_children "$child_home" || return 1
+      preflight_firstmate_home_children "$child_home" || return 1
     fi
   done
 }
 
 cleanup_firstmate_home_children() {
-  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc child_busy_gen child_browser
+  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc child_busy_gen child_browser child_owner_record child_owner_saved
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -1519,16 +1553,26 @@ cleanup_firstmate_home_children() {
           "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
       fi
       fm_backend_remove_worktree "$child_backend" "$child_orca_worktree_id" || return 1
-    elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
+    elif [ -n "$child_wt" ] && [ -d "$child_wt" ] \
+      && [ "$(meta_value "$child_meta" worktree_returned)" != 1 ]; then
       validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
-      # A child's pool slot recycles exactly like a parent's, and discarding a
-      # secondmate's own work never authorizes resetting a slot that now holds
-      # someone else's. Refused here, before the child's worktree is touched.
-      require_worktree_ownership "$home" "$sub_state" "$child_id" "$child_wt" \
-        "$(meta_value "$child_meta" worktree_token)" "child worktree" || return 1
+      # This child's worktree was proven still its own in
+      # preflight_firstmate_home_children, before any child was touched;
+      # discarding a secondmate's own work never authorized resetting a slot
+      # that now holds someone else's.
       rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
         "$child_wt/.opencode/plugins/fm-busy-state.js" \
         "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
+      # The same record lifecycle the parent's own return runs, for the same
+      # reasons: the record goes before the return so the pool never holds a
+      # stale claim, comes back if the return refused without returning
+      # anything, and the completed transition is recorded so a rerun of forced
+      # cleanup skips a path this child no longer owns.
+      child_owner_record=$(fm_worktree_owner_record_path "$child_wt" 2>/dev/null || true)
+      child_owner_saved=
+      if [ -n "$child_owner_record" ] && [ -f "$child_owner_record" ]; then
+        child_owner_saved=$(cat "$child_owner_record")
+      fi
       fm_worktree_owner_remove "$child_wt"
       if [ -n "$child_proj" ] && [ -d "$child_proj" ] && command -v treehouse >/dev/null 2>&1; then
         if teardown_treehouse_return "$child_wt" "$child_proj" "child worktree"; then
@@ -1536,6 +1580,9 @@ cleanup_firstmate_home_children() {
         else
           child_return_rc=$?
           if [ "$child_return_rc" -eq "$TEARDOWN_TREEHOUSE_LOCK_REFUSED" ]; then
+            if [ -n "$child_owner_saved" ] && [ -n "$child_owner_record" ]; then
+              printf '%s\n' "$child_owner_saved" > "$child_owner_record" || true
+            fi
             return "$child_return_rc"
           fi
           safe_rm_rf_child_worktree "$child_wt" "$child_proj"
@@ -1543,6 +1590,8 @@ cleanup_firstmate_home_children() {
       else
         safe_rm_rf_child_worktree "$child_wt" "$child_proj"
       fi
+      printf 'worktree_returned=1\n' >> "$child_meta" \
+        || echo "warning: could not record child $child_id's completed worktree return in $child_meta" >&2
     fi
     remove_grok_turnend_auth "$sub_state" "$child_id"
     remove_kimi_turnend_auth "$sub_state" "$child_id"
@@ -1585,7 +1634,7 @@ if [ "$KIND" = secondmate ]; then
     if [ "$BACKEND" = herdr ]; then
       teardown_herdr_preflight_target "$T" "$ID" || exit 1
     fi
-    preflight_firstmate_home_herdr_children "$HOME_PATH" || exit 1
+    preflight_firstmate_home_children "$HOME_PATH" || exit 1
   fi
 fi
 
@@ -1656,7 +1705,10 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] &&
   ORCA_PATH_MATCH_VERIFIED=1
 fi
 
-if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
+# Skipped once the return has succeeded: the directory still exists because the
+# pool keeps the slot, but its contents and its git locks are the next occupant's
+# now, so inspecting them can only refuse this rerun over another lane's work.
+if [ -d "$WT" ] && [ "$FORCE" != "--force" ] && [ "$WORKTREE_RETURNED" != 1 ]; then
   if validate_worktree_teardown_safety; then
     :
   else
@@ -1726,7 +1778,7 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   fi
   [ -z "$T_ORCA" ] || fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
   fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
-elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
+elif [ -d "$WT" ] && [ "$KIND" != secondmate ] && [ "$WORKTREE_RETURNED" != 1 ]; then
   branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
   if [ "$branch" != "HEAD" ]; then
     if git -C "$WT" checkout --detach -q 2>/dev/null; then
@@ -1763,6 +1815,16 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
     echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
     exit 1
   }
+  # The slot is the pool's again, and may be reissued before this run finishes.
+  # Record that transition in the task's own metadata, immediately and durably,
+  # because several steps below still exit while deliberately retaining every
+  # record and asking for a rerun. The rerun must never touch this path again:
+  # its ownership record is gone by design, so proving ownership would refuse,
+  # and returning the slot a second time - what a rerun did before this marker
+  # existed - would reset whatever lane the pool has since handed it to.
+  WORKTREE_RETURNED=1
+  printf 'worktree_returned=1\n' >> "$META" \
+    || echo "warning: could not record the completed worktree return in $META; a rerun may refuse to prove ownership of the returned slot" >&2
 fi
 
 HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"

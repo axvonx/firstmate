@@ -646,6 +646,45 @@ SH
   pass "a failed worktree return restores the ownership record instead of trapping the rerun"
 }
 
+test_rerun_after_a_successful_return_finishes_and_never_touches_the_slot_again() {
+  local case_dir rc record
+  case_dir=$(make_landed_case returned-slot-rerun)
+  record=$(git -C "$case_dir/wt" rev-parse --absolute-git-dir)/fm-task-owner
+  # Fail the first run AFTER its worktree return, the way the exits near the end
+  # of teardown do: the busy-state retirement refuses a gen that no longer
+  # matches the armed sidecar, and every durable record is deliberately kept.
+  printf 'busy_gen=stalegen\n' >> "$case_dir/state/task-x1.meta"
+  printf 'freshgen\n' > "$case_dir/state/task-x1.busy-gen"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "returned-slot-rerun: the seeded post-return failure did not stop the first run"
+  assert_grep "treehouse return --force $case_dir/wt" "$case_dir/destructive.log" \
+    "returned-slot-rerun: the first run never got as far as returning the worktree"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "returned-slot-rerun: the aborted run removed the record a rerun needs"
+  assert_absent "$record" "returned-slot-rerun: the returned slot still carries this task's claim"
+
+  # The pool reissued the slot before the operator reran, so the rerun must
+  # finish this task's cleanup without reading or writing that path again.
+  fm_write_worktree_owner "$TEST_FM_HOME" live-lane-b "$case_dir/wt" >/dev/null
+  rm -f "$case_dir/state/task-x1.busy-gen"
+  : > "$case_dir/destructive.log"
+
+  run_teardown "$case_dir" > "$case_dir/stdout2" 2> "$case_dir/stderr2" \
+    || fail "returned-slot-rerun: the rerun refused instead of finishing: $(cat "$case_dir/stderr2")"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "returned-slot-rerun: the rerun did not finish clearing this task's state"
+  assert_no_grep treehouse "$case_dir/destructive.log" \
+    "returned-slot-rerun: the rerun handed the reissued slot to treehouse a second time"
+  assert_grep "task=live-lane-b" "$record" \
+    "returned-slot-rerun: the rerun disturbed the new occupant's ownership record"
+  pass "a rerun after a successful return finishes cleanup and never touches the returned slot"
+}
+
 test_record_without_an_ownership_token_refuses_with_a_stated_way_out() {
   local case_dir rc
   case_dir=$(make_case pre-token-record)
@@ -1811,10 +1850,15 @@ configure_secondmate_with_herdr_child() {  # <case-dir>
   mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
   printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
   printf '%s\n' "home=$home" >> "$case_dir/state/task-x1.meta"
+  # The child gets its OWN worktree and its own ownership record, written in the
+  # CHILD home the way that child's spawn writes it. One path can belong to one
+  # task only, so a fixture that pointed the child at the parent's worktree could
+  # never carry a proof for both.
+  git -C "$case_dir/project" worktree add -q -b fm/child-herdr "$case_dir/child-wt" main
   fm_write_meta "$home/state/child-herdr.meta" \
     "window=childsession:wC:p1" \
     "endpoint_task_id=child-herdr" \
-    "worktree=$case_dir/wt" \
+    "worktree=$case_dir/child-wt" \
     "project=$case_dir/project" \
     "kind=ship" \
     "mode=local-only" \
@@ -1823,6 +1867,8 @@ configure_secondmate_with_herdr_child() {  # <case-dir>
     "herdr_workspace_id=wC" \
     "herdr_tab_id=wC:t1" \
     "herdr_pane_id=wC:p1"
+  fm_write_worktree_owner "$home" child-herdr "$case_dir/child-wt" \
+    "$home/state/child-herdr.meta" >/dev/null
   : > "$home/state/child-herdr.status"
   : > "$home/state/child-herdr.turn-ended"
   cat > "$case_dir/fakebin/herdr" <<SH
@@ -1922,10 +1968,13 @@ configure_nested_secondmate_with_herdr_grandchild() {  # <case-dir>
     "kind=secondmate" \
     "mode=local-only" \
     "home=$nested_home"
+  # Its own worktree, proven in the NESTED home, for the same reason the child
+  # above needs one: the ownership record names exactly one task per path.
+  git -C "$case_dir/project" worktree add -q -b fm/grandchild-herdr "$case_dir/grandchild-wt" main
   fm_write_meta "$nested_home/state/grandchild-herdr.meta" \
     "window=grandchildsession:wG:p1" \
     "endpoint_task_id=grandchild-herdr" \
-    "worktree=$case_dir/wt" \
+    "worktree=$case_dir/grandchild-wt" \
     "project=$case_dir/project" \
     "kind=ship" \
     "mode=local-only" \
@@ -1934,6 +1983,8 @@ configure_nested_secondmate_with_herdr_grandchild() {  # <case-dir>
     "herdr_workspace_id=wG" \
     "herdr_tab_id=wG:t1" \
     "herdr_pane_id=wG:p1"
+  fm_write_worktree_owner "$nested_home" grandchild-herdr "$case_dir/grandchild-wt" \
+    "$nested_home/state/grandchild-herdr.meta" >/dev/null
   : > "$nested_home/state/grandchild-herdr.status"
   : > "$nested_home/state/grandchild-herdr.turn-ended"
   cat > "$case_dir/fakebin/herdr" <<SH
@@ -2395,6 +2446,7 @@ test_recycled_worktree_slot_refuses_before_touching_the_live_lane
 test_owned_worktree_with_the_same_landed_work_still_tears_down
 test_successful_teardown_leaves_no_ownership_claim_on_the_returned_slot
 test_failed_return_restores_the_ownership_record_so_a_rerun_can_prove_itself
+test_rerun_after_a_successful_return_finishes_and_never_touches_the_slot_again
 test_record_without_an_ownership_token_refuses_with_a_stated_way_out
 test_the_claim_command_the_refusal_names_actually_unblocks_teardown
 test_force_does_not_override_a_recycled_worktree_slot

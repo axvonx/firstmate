@@ -1868,11 +1868,10 @@ kind=ship
 mode=no-mistakes
 yolo=off
 EOF
-  seed_child_worktree_ownership "$subhome" child "$childwt"
   # The child's own spawn, in the child home, established this. Forced discard
   # of a secondmate's work still never authorizes resetting a pool slot that has
   # since been reissued, so the child worktree needs its ownership proof here too.
-  fm_write_worktree_owner "$subhome" child "$childwt" "$subhome/state/child.meta" >/dev/null
+  seed_child_worktree_ownership "$subhome" child "$childwt"
   fakebin=$(make_fake_tmux "$TMP_ROOT/force-teardown-fake")
   log="$TMP_ROOT/force-teardown-fake/tmux.log"
   if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/force-teardown-fake/pane.txt" \
@@ -2033,6 +2032,11 @@ SH
   [ -e "$lock" ] || fail "force teardown removed unproven child index.lock"
   [ -d "$subhome" ] || fail "force teardown removed subhome after child lock refusal"
   [ -e "$subhome/state/child.meta" ] || fail "force teardown cleared child meta after child lock refusal"
+  # Nothing was returned, so this child still owns its worktree: the ownership
+  # record must be back in place, or the rerun this refusal asks for would be
+  # refused for want of a proof.
+  [ -e "$(git -C "$childwt" rev-parse --absolute-git-dir)/fm-task-owner" ] \
+    || fail "force teardown left the child unable to prove its worktree ownership on a rerun"
   grep -F 'not provably stale' "$err" >/dev/null || fail "force teardown did not explain unproven child lock refusal"
   pass "secondmate force teardown preserves child worktree after unproven lock refusal"
 }
@@ -2446,6 +2450,64 @@ EOF
   pass "force teardown refuses unregistered child worktree paths"
 }
 
+test_secondmate_force_teardown_refuses_reissued_child_worktree_with_endpoint_alive() {
+  local home subhome childproj childwt fakebin err log rc
+  home="$TMP_ROOT/child-reissued-home"
+  subhome="$TMP_ROOT/child-reissued-subhome"
+  childproj="$subhome/projects/alpha"
+  childwt="$TMP_ROOT/child-reissued-worktree"
+  err="$TMP_ROOT/child-reissued.err"
+  mkdir -p "$home/state" "$home/data" "$subhome/state"
+  fm_git_worktree "$childproj" "$childwt" child-reissued
+  printf 'domain\n' > "$subhome/.fm-secondmate-home"
+  cat > "$home/state/domain.meta" <<EOF
+window=firstmate:fm-domain
+worktree=$subhome
+project=$subhome
+harness=echo
+kind=secondmate
+mode=secondmate
+yolo=off
+home=$subhome
+projects=alpha
+EOF
+  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
+  cat > "$subhome/state/child.meta" <<EOF
+window=firstmate:fm-child
+worktree=$childwt
+project=$childproj
+harness=echo
+kind=ship
+mode=no-mistakes
+yolo=off
+EOF
+  seed_child_worktree_ownership "$subhome" child "$childwt"
+  # The child's pool slot was returned and reissued: the new lane's own spawn
+  # overwrote the record in the worktree.
+  fm_write_worktree_owner "$subhome" live-lane-b "$childwt" >/dev/null
+  fakebin=$(make_fake_tmux "$TMP_ROOT/child-reissued-fake")
+  log="$TMP_ROOT/child-reissued-fake/tmux.log"
+
+  set +e
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/child-reissued-fake/pane.txt" \
+    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err"
+  rc=$?
+  set -e
+
+  [ "$rc" -ne 0 ] || fail "force teardown reset a child worktree that had been reissued to another lane"
+  grep -F 'names task live-lane-b, not child' "$err" >/dev/null \
+    || fail "force teardown did not name the identity that disagreed about the child worktree"
+  # The whole point of proving this in the preflight: the refusal must arrive
+  # while the child's own agent is still running in that window.
+  grep -F 'kill-window' "$log" >/dev/null && fail "force teardown killed an endpoint before the child ownership refusal"
+  [ -d "$childwt" ] || fail "force teardown removed the reissued child worktree"
+  [ -d "$subhome" ] || fail "force teardown removed subhome after the child ownership refusal"
+  [ -e "$home/state/domain.meta" ] || fail "force teardown cleared parent meta after the child ownership refusal"
+  [ -e "$subhome/state/child.meta" ] || fail "force teardown cleared child meta after the child ownership refusal"
+  pass "force teardown refuses a reissued child worktree with that child's endpoint still alive"
+}
+
 test_secondmate_idle_pane_is_not_stale() {
   local home fakebin out pid window
   home="$TMP_ROOT/watch-home"
@@ -2686,6 +2748,7 @@ test_secondmate_force_teardown_prevalidates_before_child_cleanup
 test_secondmate_force_teardown_refuses_child_active_home_descendant
 test_secondmate_force_teardown_refuses_child_repo_descendant
 test_secondmate_force_teardown_refuses_unregistered_child_worktree
+test_secondmate_force_teardown_refuses_reissued_child_worktree_with_endpoint_alive
 test_secondmate_teardown_path_boundary_matrix
 test_secondmate_idle_pane_is_not_stale
 test_secondmate_charter_brief_is_idle_by_default

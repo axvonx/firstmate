@@ -57,6 +57,7 @@ Three facts follow, and together they select the git directory:
 - A file under the worktree's own git directory is invisible to `git status` and unreachable by `git add -A`, and survives the return exactly as the excluded marker does.
 
 The git directory therefore removes the commit and dirty-checkout hazards outright, and `bin/fm-teardown.sh` closes the survival hazard itself by removing the record immediately before the return and restoring it if the return fails.
+A return that succeeds is recorded instead, in the task's own metadata, and from then on cleanup neither reads nor writes that path: the slot is the pool's again, so the correct behavior on a rerun is not to prove ownership a second time but never to touch the worktree again.
 `tests/fm-worktree-owner.test.sh` pins the git-invisibility half of this as a regression.
 
 ## Ownership refusal, both directions
@@ -73,7 +74,9 @@ ok - a recycled worktree slot is refused, and the live lane is left running
 ok - an owned worktree with identical landed work still tears down (the guard is not an off switch)
 ok - a returned pool slot carries no stale ownership claim
 ok - a failed worktree return restores the ownership record instead of trapping the rerun
+ok - a rerun after a successful return finishes cleanup and never touches the returned slot
 ok - an older record with no ownership token refuses and names the operator's way out
+ok - the claim command the refusal names is a real way out, not a dead end
 ok - discard authority does not extend to a worktree that is no longer the task's
 ok - a scout's scratch worktree is scratch for the scout, not for whoever holds the slot now
 ok - a worktree recorded by two tasks is refused and the conflicting task is named
@@ -82,6 +85,7 @@ ok - a worktree owned by another firstmate home is refused
 
 The refusing cases assert more than the word `REFUSED`: their fixture logs every `treehouse` and `tmux` invocation, and the assertion is that the log is empty and the task's records and worktree are still present.
 A refusal that printed correctly but still returned the worktree would fail these.
+The rerun case is the other end of the same lifecycle: it fails a first teardown after its return has already succeeded, then proves the rerun completes, issues no second `treehouse` call, and leaves the record the pool's next occupant wrote untouched.
 
 ## The record's own contract and the operator path back
 
@@ -103,4 +107,5 @@ ok - a claim without --confirm shows the evidence and writes nothing
 ok - a confirmed claim establishes ownership that cleanup can verify
 ok - a claim never overwrites another lane's ownership record
 ok - a claim refuses while two tasks record the same worktree
+ok - a claim refuses a worktree this task already returned to the pool
 ```

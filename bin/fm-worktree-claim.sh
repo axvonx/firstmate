@@ -13,6 +13,8 @@
 #
 # What it verifies for you:
 #   - the task has a metadata record naming an existing, inspectable worktree
+#   - the task has not already returned that worktree to the pool, in which case
+#     there is nothing left to claim and cleanup never touches it again
 #   - no other task in the same home records that same worktree
 #   - the worktree does not already carry another home's or task's ownership
 #     record (that is a proven foreign occupant, and is never overwritten here)
@@ -43,7 +45,7 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 
 usage() {
-  sed -n '2,29p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,31p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 case "${1:-}" in
@@ -82,6 +84,15 @@ WT=$(fm_meta_get "$META" worktree)
 }
 if ! RECORD=$(fm_worktree_owner_record_path "$WT"); then
   echo "error: $WT is not an inspectable git worktree, so ownership cannot be recorded there" >&2
+  exit 1
+fi
+# A task whose cleanup already returned this worktree has nothing left to claim:
+# the path is the pool's, cleanup deliberately never touches it again, and
+# writing a record onto a pooled slot would leave exactly the stale claim the
+# record's location was chosen to prevent (docs/verification/worktree-ownership.md).
+if [ "$(fm_meta_get "$META" worktree_returned)" = 1 ]; then
+  echo "REFUSED: task $ID already returned worktree $WT to the pool, so it is no longer this task's to claim." >&2
+  echo "Cleanup skips that worktree from here on by design; rerun bin/fm-teardown.sh $ID to finish the remaining cleanup." >&2
   exit 1
 fi
 HOME_ABS=$(fm_worktree_owner_canonical_dir "$FM_HOME") || {
