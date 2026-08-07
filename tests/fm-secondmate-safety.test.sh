@@ -1838,6 +1838,74 @@ EOF
   pass "secondmate teardown raw-removes plain-clone homes"
 }
 
+test_secondmate_teardown_rerun_never_returns_an_already_returned_home() {
+  local home subhome subhome_abs fmroot fakebin log err rc
+  home="$TMP_ROOT/returned-home-rerun-home"
+  subhome="$TMP_ROOT/returned-home-rerun-subhome"
+  fmroot="$TMP_ROOT/returned-home-rerun-fmroot"
+  err="$TMP_ROOT/returned-home-rerun.err"
+  make_firstmate_git_root "$fmroot"
+  git -C "$fmroot" worktree add --quiet --detach "$subhome" HEAD
+  mkdir -p "$home/state" "$home/data" "$subhome/state"
+  printf 'domain\n' > "$subhome/.fm-secondmate-home"
+  subhome_abs=$(cd "$subhome" && pwd -P)
+  cat > "$home/state/domain.meta" <<EOF
+window=firstmate:fm-domain
+worktree=$subhome
+project=$subhome
+harness=echo
+kind=secondmate
+mode=secondmate
+yolo=off
+home=$subhome
+projects=alpha
+busy_gen=stalegen
+EOF
+  # A gen the armed sidecar no longer matches: the busy-state retirement near the
+  # end of teardown then fails AFTER the home's lease has been returned, which is
+  # one of the exits that keeps every durable record and asks for a rerun.
+  printf 'freshgen\n' > "$home/state/domain.busy-gen"
+  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
+  fakebin=$(make_fake_tmux "$TMP_ROOT/returned-home-rerun-fake")
+  log="$TMP_ROOT/returned-home-rerun-fake/tmux.log"
+  # A real pool return releases the lease and leaves the slot on disk for its
+  # next holder; the shared fake deletes it, which would hide this hazard.
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf 'treehouse %s\n' "$*" >> "${FM_FAKE_TMUX_LOG:-/dev/null}"
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
+
+  set +e
+  PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$fmroot" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/returned-home-rerun-fake/pane.txt" \
+    "$ROOT/bin/fm-teardown.sh" domain >/dev/null 2>"$err"
+  rc=$?
+  set -e
+
+  [ "$rc" -ne 0 ] || fail "the seeded post-return failure did not stop the first teardown"
+  grep -F "treehouse return --force $subhome_abs" "$log" >/dev/null \
+    || fail "the first teardown never returned the leased home"
+  [ -e "$home/state/domain.meta" ] || fail "the aborted teardown removed the record its rerun needs"
+  grep -Fx 'worktree_returned=1' "$home/state/domain.meta" >/dev/null \
+    || fail "the completed home return was not recorded for the rerun"
+
+  : > "$log"
+  rm -f "$home/state/domain.busy-gen"
+  PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$fmroot" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/returned-home-rerun-fake/pane.txt" \
+    "$ROOT/bin/fm-teardown.sh" domain >/dev/null 2>"$err" \
+    || fail "the rerun refused instead of finishing cleanup: $(cat "$err")"
+
+  grep -F 'treehouse return' "$log" >/dev/null \
+    && fail "the rerun returned a pool slot this task had already given back"
+  [ -d "$subhome" ] || fail "the rerun removed a pool slot this task had already given back"
+  [ ! -e "$home/state/domain.meta" ] || fail "the rerun did not finish clearing the task record"
+  pass "a rerun after a returned secondmate home finishes cleanup and never returns that slot again"
+}
+
 test_secondmate_force_teardown_discards_child_work() {
   local home subhome childproj childwt fakebin log
   home="$TMP_ROOT/force-teardown-home"
@@ -2039,6 +2107,75 @@ SH
     || fail "force teardown left the child unable to prove its worktree ownership on a rerun"
   grep -F 'not provably stale' "$err" >/dev/null || fail "force teardown did not explain unproven child lock refusal"
   pass "secondmate force teardown preserves child worktree after unproven lock refusal"
+}
+
+test_secondmate_force_teardown_never_marks_a_refused_child_reclaim_returned() {
+  local home subhome childproj childwt fakebin log err rc
+  home="$TMP_ROOT/refused-reclaim-home"
+  subhome="$TMP_ROOT/refused-reclaim-subhome"
+  childproj="$subhome/projects/alpha"
+  childwt="$TMP_ROOT/refused-reclaim-child-worktree"
+  err="$TMP_ROOT/refused-reclaim-child.err"
+  mkdir -p "$home/state" "$home/data" "$subhome/state"
+  fm_git_worktree "$childproj" "$childwt" refused-reclaim-child
+  printf 'domain\n' > "$subhome/.fm-secondmate-home"
+  cat > "$home/state/domain.meta" <<EOF
+window=firstmate:fm-domain
+worktree=$subhome
+project=$subhome
+harness=echo
+kind=secondmate
+mode=secondmate
+yolo=off
+home=$subhome
+projects=alpha
+EOF
+  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
+  cat > "$subhome/state/child.meta" <<EOF
+window=firstmate:fm-child
+worktree=$childwt
+project=$childproj
+harness=echo
+kind=ship
+mode=no-mistakes
+yolo=off
+EOF
+  seed_child_worktree_ownership "$subhome" child "$childwt"
+  fakebin=$(make_fake_tmux "$TMP_ROOT/refused-reclaim-fake")
+  log="$TMP_ROOT/refused-reclaim-fake/tmux.log"
+  # A return that fails for a reason retrying cannot clear, and leaves the
+  # recorded path no longer reclaimable, so the rm -rf fallback REFUSES it too.
+  # Nothing was reclaimed, so nothing may be recorded as returned.
+  cat > "$fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+set -u
+printf 'treehouse %s\n' "\$*" >> "\${FM_FAKE_TMUX_LOG:-/dev/null}"
+case "\${1:-}" in
+  return)
+    mv "$childproj/.git" "$childproj/.git-detached"
+    echo 'treehouse: simulated non-lock return failure' >&2
+    exit 17
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
+
+  set +e
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/refused-reclaim-fake/pane.txt" \
+    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err"
+  rc=$?
+  set -e
+
+  [ "$rc" -ne 0 ] || fail "force teardown reported success after a child reclaim was refused"
+  grep -F 'is not a git worktree for' "$err" >/dev/null \
+    || fail "force teardown did not explain the refused child worktree reclaim"
+  [ -d "$childwt" ] || fail "force teardown removed a child worktree whose reclaim was refused"
+  [ -e "$subhome/state/child.meta" ] || fail "force teardown cleared the child record after a refused reclaim"
+  grep -Fx 'worktree_returned=1' "$subhome/state/child.meta" >/dev/null \
+    && fail "force teardown recorded an unreclaimed child worktree as returned"
+  pass "a refused child worktree reclaim is never recorded as a completed return"
 }
 
 test_secondmate_force_teardown_allows_operational_dir_symlinks_inside_home() {
@@ -2737,9 +2874,11 @@ test_secondmate_force_teardown_sweeps_nested_homes
 test_secondmate_force_teardown_preserves_nested_restore_status
 test_secondmate_teardown_refuses_failed_leased_home_return
 test_secondmate_teardown_removes_plain_clone_home_without_treehouse_return
+test_secondmate_teardown_rerun_never_returns_an_already_returned_home
 test_secondmate_force_teardown_discards_child_work
 test_secondmate_force_teardown_refuses_child_quarantine_symlink
 test_secondmate_force_teardown_preserves_child_on_unproven_lock
+test_secondmate_force_teardown_never_marks_a_refused_child_reclaim_returned
 test_secondmate_force_teardown_allows_operational_dir_symlinks_inside_home
 test_secondmate_force_teardown_refuses_operational_dir_symlink_outside_home
 test_secondmate_teardown_refuses_registered_nested_home

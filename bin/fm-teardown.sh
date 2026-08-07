@@ -25,20 +25,27 @@
 # An older record with no ownership token refuses rather than passing; the exit
 # is bin/fm-worktree-claim.sh, which re-checks what a machine can check, shows
 # the operator what only a person can check, and writes the record on
-# confirmation. Secondmate homes are exempt because a durable treehouse lease
-# holds them and the pool never reissues a leased path; Orca worktrees are exempt
-# because they are per-task and never pooled, and their recorded id-to-path match
-# below is their own occupancy proof.
-# Once the proof has passed and the worktree return has SUCCEEDED, teardown
-# records worktree_returned=1 in the task's own metadata, and every later run
-# skips the proof and every step that reads or writes that worktree. The task
-# stopped owning the slot the moment the return succeeded, so that skip is a
-# safety property and not merely an unblocked rerun: the exits that follow a
-# successful return (an unconfirmed Herdr pane, PR-poll or busy-state
-# retirement) retain every durable record and ask for a rerun, and without the
-# marker such a rerun would both meet this refusal with its own record already
-# dropped and - the older bug - hand the slot to `treehouse return` a second
-# time after the pool may already have reissued it.
+# confirmation. Secondmate homes are exempt from the ownership record only while
+# their durable treehouse lease is held, because the pool never reissues a leased
+# path; that exemption stops at the moment teardown's own return releases the
+# lease, and the returned marker below - not the lease - is what covers the home
+# from there on. Orca worktrees are exempt because they are per-task and never
+# pooled, and their recorded id-to-path match below is their own occupancy proof.
+# Once the proof has passed and the pooled path has been RETURNED - a crew
+# worktree, a child's worktree, or a secondmate home's lease - teardown records
+# worktree_returned=1 in that task's own metadata, and every later run skips
+# every step that reads or writes that path. The task stopped owning it the
+# moment the return succeeded, so that skip is a safety property and not merely
+# an unblocked rerun: the exits that follow a successful return (an unconfirmed
+# Herdr pane, PR-poll or busy-state retirement) retain every durable record and
+# ask for a rerun, and without the marker such a rerun would hand the path to
+# `treehouse return` a second time after the pool may already have reissued it.
+# That double return is the older bug, reachable on both paths: for a crew
+# worktree directly, and for a secondmate home whenever the registry-binding
+# check that happens to refuse most reruns does not fire, for instance when the
+# home has no data/secondmates.md at all. A record already dropped by the first
+# return means the rerun would otherwise meet this refusal with nothing left to
+# prove ownership with.
 # CONSIDERED AND NOT IMPLEMENTED: detecting a live validation run on the branch
 # about to be cleared. It is defence in depth rather than the fix, and it is a
 # poor discriminator here - the validation pipeline keeps its own custody
@@ -374,8 +381,10 @@ fi
 # copy, and the endpoint are all still intact. Scout tasks are included even
 # though their landed-work check is waived - their worktree is declared scratch
 # for THEM, not for whoever holds the slot now. Secondmate homes are excluded
-# because they are held by a durable treehouse lease, which the pool never hands
-# out to another holder, so their path cannot be recycled underneath them. Orca
+# while their durable treehouse lease is held, which the pool never hands out to
+# another holder, so their path cannot be recycled underneath them; the window
+# after teardown returns that lease is covered by the returned marker instead,
+# which is what stops a rerun from touching the freed path. Orca
 # worktrees are excluded because they are per-task and never pooled; the
 # id-to-path match required further below is their own occupancy proof. A task
 # that already returned this worktree is excluded because it no longer owns the
@@ -1150,8 +1159,13 @@ EOF
   printf '%s\n' "$abs_home_path"
 }
 
-remove_firstmate_home() {
-  local home=$1 label=$2 expected_id=${3:-} abs_home_path process_event_backup
+# <meta> is the task record that owns this home; when the home is a POOLED
+# treehouse lease, a successful return records the transition there so no later
+# run returns the freed path a second time. Nothing is recorded for the
+# plain-clone branch below, which removes the home outright and hands nothing
+# back to a pool.
+remove_firstmate_home() {  # <home> <label> [expected-id] [meta]
+  local home=$1 label=$2 expected_id=${3:-} meta=${4:-} abs_home_path process_event_backup
   [ -n "$home" ] || return 0
   [ -e "$home" ] || return 0
   abs_home_path=$(validate_firstmate_home_for_removal "$home" "$label" "$expected_id") || return 1
@@ -1172,6 +1186,10 @@ remove_firstmate_home() {
       restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
       return 1
     }
+    if [ -n "$meta" ] && [ -f "$meta" ] \
+      && ! printf 'worktree_returned=1\n' >> "$meta"; then
+      echo "warning: could not record the completed $label return in $meta; a rerun may act on a path this task no longer holds" >&2
+    fi
     [ -z "$process_event_backup" ] || rm -rf -- "$process_event_backup"
     return 0
   fi
@@ -1462,10 +1480,10 @@ $session	$lock_path"
 # for the same reason the top-level one sits before the landed-work checks - an
 # ownership refusal must not arrive after the endpoint it was protecting is dead.
 # Same exemptions as the top-level proof: a secondmate child's home is held by a
-# durable treehouse lease that the pool never reissues, an Orca worktree is
-# per-task and never pooled, and a child that already returned its worktree no
-# longer owns that path at all, so the cleanup below skips it rather than proving
-# a tenancy that has ended.
+# durable treehouse lease that the pool never reissues while it is held, an Orca
+# worktree is per-task and never pooled, and a child that already returned its
+# worktree or its leased home no longer owns that path at all, so the cleanup
+# below skips it rather than proving a tenancy that has ended.
 preflight_firstmate_home_children() {  # <home>
   local home=$1 sub_state child_meta child_id child_backend child_target child_kind child_home child_wt
   sub_state="$home/state"
@@ -1542,9 +1560,10 @@ cleanup_firstmate_home_children() {
     if [ "$child_kind" = secondmate ]; then
       child_home=$(meta_value "$child_meta" home)
       [ -n "$child_home" ] || child_home=$child_wt
-      if [ -n "$child_home" ] && [ -d "$child_home" ]; then
+      if [ -n "$child_home" ] && [ -d "$child_home" ] \
+        && [ "$(meta_value "$child_meta" worktree_returned)" != 1 ]; then
         cleanup_firstmate_home_children "$child_home" || return $?
-        remove_firstmate_home "$child_home" "child firstmate home" "$child_id" || return $?
+        remove_firstmate_home "$child_home" "child firstmate home" "$child_id" "$child_meta" || return $?
       fi
     elif [ "$child_backend" = orca ]; then
       if [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
@@ -1565,30 +1584,33 @@ cleanup_firstmate_home_children() {
         "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
       # The same record lifecycle the parent's own return runs, for the same
       # reasons: the record goes before the return so the pool never holds a
-      # stale claim, comes back if the return refused without returning
-      # anything, and the completed transition is recorded so a rerun of forced
-      # cleanup skips a path this child no longer owns.
+      # stale claim, comes back whenever the reclaim did not actually happen,
+      # and the completed transition is recorded ONLY on a proven return or
+      # removal, so a rerun skips a path this child no longer owns and still
+      # retries - under its ownership proof - one it does.
       child_owner_record=$(fm_worktree_owner_record_path "$child_wt" 2>/dev/null || true)
       child_owner_saved=
       if [ -n "$child_owner_record" ] && [ -f "$child_owner_record" ]; then
         child_owner_saved=$(cat "$child_owner_record")
       fi
       fm_worktree_owner_remove "$child_wt"
+      child_return_rc=0
       if [ -n "$child_proj" ] && [ -d "$child_proj" ] && command -v treehouse >/dev/null 2>&1; then
-        if teardown_treehouse_return "$child_wt" "$child_proj" "child worktree"; then
-          :
-        else
-          child_return_rc=$?
-          if [ "$child_return_rc" -eq "$TEARDOWN_TREEHOUSE_LOCK_REFUSED" ]; then
-            if [ -n "$child_owner_saved" ] && [ -n "$child_owner_record" ]; then
-              printf '%s\n' "$child_owner_saved" > "$child_owner_record" || true
-            fi
-            return "$child_return_rc"
-          fi
-          safe_rm_rf_child_worktree "$child_wt" "$child_proj"
+        teardown_treehouse_return "$child_wt" "$child_proj" "child worktree" || child_return_rc=$?
+        if [ "$child_return_rc" -ne 0 ] \
+          && [ "$child_return_rc" -ne "$TEARDOWN_TREEHOUSE_LOCK_REFUSED" ] \
+          && safe_rm_rf_child_worktree "$child_wt" "$child_proj"; then
+          child_return_rc=0
         fi
       else
-        safe_rm_rf_child_worktree "$child_wt" "$child_proj"
+        safe_rm_rf_child_worktree "$child_wt" "$child_proj" || child_return_rc=1
+      fi
+      if [ "$child_return_rc" -ne 0 ]; then
+        if [ -n "$child_owner_saved" ] && [ -n "$child_owner_record" ]; then
+          printf '%s\n' "$child_owner_saved" > "$child_owner_record" || true
+        fi
+        [ "$child_return_rc" -eq "$TEARDOWN_TREEHOUSE_LOCK_REFUSED" ] || child_return_rc=1
+        return "$child_return_rc"
       fi
       printf 'worktree_returned=1\n' >> "$child_meta" \
         || echo "warning: could not record child $child_id's completed worktree return in $child_meta" >&2
@@ -1626,8 +1648,19 @@ remove_secondmate_registry_entry() {
 
 validate_pr_poll_cleanup "$STATE" "$ID" || exit 1
 
+# Every block below that reads, walks, or removes the secondmate home is skipped
+# once its lease has been returned: the path is the pool's from that moment, its
+# children were all cleaned before the return that recorded this, and both
+# validating it and returning it again are things to do to a home this task still
+# holds. Before the marker existed, a rerun after a post-return exit either
+# returned the freed path a second time or - whenever the home's registry entry
+# had already been removed on the first pass, which is the common case - refused
+# here with "no registry binding" and could never finish the cleanup those
+# retained records were kept for.
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
+fi
+if [ "$KIND" = secondmate ] && [ "$WORKTREE_RETURNED" != 1 ]; then
   validate_firstmate_home_for_removal "$HOME_PATH" "secondmate home" "$ID" >/dev/null || exit 1
   if [ "$FORCE" = "--force" ]; then
     validate_firstmate_home_children_removal "$HOME_PATH" || exit 1
@@ -1638,7 +1671,7 @@ if [ "$KIND" = secondmate ]; then
   fi
 fi
 
-if [ "$KIND" = secondmate ] && [ "$FORCE" != "--force" ]; then
+if [ "$KIND" = secondmate ] && [ "$FORCE" != "--force" ] && [ "$WORKTREE_RETURNED" != 1 ]; then
   SUB_STATE="$HOME_PATH/state"
   if [ -d "$SUB_STATE" ]; then
     for child_meta in "$SUB_STATE"/*.meta; do
@@ -1650,11 +1683,11 @@ if [ "$KIND" = secondmate ] && [ "$FORCE" != "--force" ]; then
   fi
 fi
 
-if [ "$KIND" = secondmate ]; then
+if [ "$KIND" = secondmate ] && [ "$WORKTREE_RETURNED" != 1 ]; then
   preflight_firstmate_home_process_event_tree "$HOME_PATH" "secondmate home" || exit 1
 fi
 
-if [ "$KIND" = secondmate ] && [ "$FORCE" = "--force" ]; then
+if [ "$KIND" = secondmate ] && [ "$FORCE" = "--force" ] && [ "$WORKTREE_RETURNED" != 1 ]; then
   cleanup_firstmate_home_children "$HOME_PATH" || exit $?
 fi
 
@@ -1895,7 +1928,9 @@ if [ "$BACKEND" = herdr ]; then
 fi
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
-  remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID" || exit $?
+  if [ "$WORKTREE_RETURNED" != 1 ]; then
+    remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID" "$META" || exit $?
+  fi
   remove_secondmate_registry_entry "$ID"
 fi
 remove_grok_turnend_auth "$STATE" "$ID"

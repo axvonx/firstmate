@@ -58,6 +58,7 @@ Three facts follow, and together they select the git directory:
 
 The git directory therefore removes the commit and dirty-checkout hazards outright, and `bin/fm-teardown.sh` closes the survival hazard itself by removing the record immediately before the return and restoring it if the return fails.
 A return that succeeds is recorded instead, in the task's own metadata, and from then on cleanup neither reads nor writes that path: the slot is the pool's again, so the correct behavior on a rerun is not to prove ownership a second time but never to touch the worktree again.
+That marker covers every pooled path a task can hold, including a secondmate home's durable treehouse lease, which is exempt from the ownership record only while the lease is held and not for the window after teardown's own return releases it.
 `tests/fm-worktree-owner.test.sh` pins the git-invisibility half of this as a regression.
 
 ## Ownership refusal, both directions
