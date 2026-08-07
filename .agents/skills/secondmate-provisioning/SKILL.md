@@ -185,4 +185,5 @@ Raw deletion is unsupported because a blocking process-event child can outlive i
 
 With `--force`, teardown is the explicit discard path.
 It kills child windows, discards child work and state inside the secondmate home, removes the route, releases the lease, and removes the retired secondmate home.
+It still refuses first, with every child intact, when it cannot prove a child's worktree is still that child's; `bin/fm-teardown.sh`'s header owns that ownership proof and the way past it.
 Never use `--force` unless the captain explicitly said to discard the work.
