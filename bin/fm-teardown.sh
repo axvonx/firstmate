@@ -4,6 +4,40 @@
 # clear volatile state, refresh/prune the project's clone for PR-based ship
 # tasks, then print a backlog-refresh reminder for ship and scout teardowns
 # (a secondmate teardown prints none, since secondmates are not backlog items).
+# REFUSES, before anything else, if it cannot prove the recorded worktree still
+# BELONGS to this task. A treehouse pool slot is reusable: once returned, the
+# same path is reissued to the next lane, so a task's recorded worktree= can
+# outlive its tenancy in it. Every check below answers "has THIS task's work
+# landed"; none of them answers "does this task still occupy this worktree", and
+# a recycled slot makes those two different questions. On 2026-08-04 the landed-
+# work test passed correctly on a stale record and cleanup then reset a live
+# lane's checkout and terminated its session - a hard rule 3 violation reached
+# through a path the rule's own enforcement point could not see.
+# Ownership is proven from the record bin/fm-spawn.sh writes into the worktree
+# and the matching worktree_token= in the task's metadata, plus a check that no
+# other task in this home records the same worktree. Not a branch comparison:
+# two lanes can share a base and a returned slot is reset to the default branch,
+# so a branch match proves nothing. bin/fm-worktree-owner-lib.sh owns the record,
+# its location, and the comparison. This refusal is NOT waived by --force, which
+# authorizes discarding THIS task's work and never authorizes touching a worktree
+# that is no longer this task's, and not waived for a scout, whose worktree is
+# declared scratch for the scout and not for whoever holds the slot now.
+# An older record with no ownership token refuses rather than passing; the exit
+# is bin/fm-worktree-claim.sh, which re-checks what a machine can check, shows
+# the operator what only a person can check, and writes the record on
+# confirmation. Secondmate homes are exempt because a durable treehouse lease
+# holds them and the pool never reissues a leased path; Orca worktrees are exempt
+# because they are per-task and never pooled, and their recorded id-to-path match
+# below is their own occupancy proof.
+# CONSIDERED AND NOT IMPLEMENTED: detecting a live validation run on the branch
+# about to be cleared. It is defence in depth rather than the fix, and it is a
+# poor discriminator here - the validation pipeline keeps its own custody
+# worktree, so a run being live says nothing about who occupies this path, while
+# a task's own agent is routinely still alive at cleanup, which is exactly what
+# `treehouse return --force` exists to terminate. It would also couple this
+# safety path to another tool's CLI being installed and answering. The ownership
+# proof addresses the failure that actually occurred; the landed-work checks
+# below still cover the task's own unlanded work.
 # REFUSES if the worktree holds work that has not LANDED, because cleanup
 # hard-resets/removes the worktree and kills its processes. Work has landed when it is
 # reachable from any remote-tracking branch (a fork counts as a remote, so
@@ -35,9 +69,12 @@
 # it removes the task's check, trust record, PR sidecar, publication record, and
 # quarantine entries with the rest of the volatile state.
 # Teardown also retires the task's private browser session unconditionally,
-# best-effort, after every state-preserving refusal and before the destructive
-# sequence, so a task whose worker died without cleaning up still has its bridge
-# reclaimed.
+# best-effort, after every state-preserving refusal that inspects the worktree's
+# contents and before the destructive sequence, so a task whose worker died
+# without cleaning up still has its bridge reclaimed. The one refusal that
+# precedes it is the worktree-ownership proof above, which fires when the
+# worktree may not be this task's at all; that leaves the bridge for the watcher
+# sweep rather than acting on a task whose identity is in doubt.
 # It never refuses, never changes the exit status, and prints nothing on stdout
 # unless something was actually reclaimed; a missing chrome-devtools-axi, an
 # absent browser_session= (the name is then derived from the task id), a foreign
@@ -135,6 +172,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
 # shellcheck source=bin/fm-browser-lib.sh
 . "$SCRIPT_DIR/fm-browser-lib.sh"
+# shellcheck source=bin/fm-worktree-owner-lib.sh
+. "$SCRIPT_DIR/fm-worktree-owner-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2
@@ -261,6 +300,36 @@ meta_value() {
   fm_meta_get "$meta" "$key"
 }
 
+# Prove a worktree still BELONGS to the task before anything destructive touches
+# it. Distinct from, and prior to, validate_worktree_teardown_safety below: that
+# one answers "has this task's work landed", which a recycled pool slot turns
+# into a different question from "is this still this task's worktree". Answering
+# only the first - correctly - is how cleanup reset a live lane's checkout on
+# 2026-08-04. bin/fm-worktree-owner-lib.sh owns the record and the comparison.
+# Not conditional on --force: --force authorizes discarding THIS task's work, and
+# never authorizes touching a worktree that is no longer this task's.
+require_worktree_ownership() {  # <home> <state-dir> <task-id> <worktree> <token> <label>
+  local home=$1 state=$2 id=$3 worktree=$4 token=$5 label=$6 other record claim
+  claim="bin/fm-worktree-claim.sh $id"
+  [ "$home" = "$FM_HOME" ] || claim="FM_HOME=$home $claim"
+  if other=$(fm_worktree_owner_conflicting_task "$state" "$id" "$worktree"); then
+    echo "REFUSED: $label $worktree is also recorded as task $other's worktree, so it cannot be proven to still be $id's." >&2
+    echo "A pool slot that was returned and reissued looks identical to the task's own worktree, and cleanup resets that checkout and terminates the session running in it." >&2
+    echo "Confirm which task actually occupies it before cleaning up either one." >&2
+    return 1
+  fi
+  if fm_worktree_owner_verify "$home" "$id" "$worktree" "$token"; then
+    return 0
+  fi
+  record=$(fm_worktree_owner_record_path "$worktree" 2>/dev/null || printf '%s' '<unresolvable>')
+  echo "REFUSED: cannot prove $label $worktree still belongs to task $id: $FM_WORKTREE_OWNER_REASON." >&2
+  echo "A pool slot that was returned and reissued looks identical to the task's own worktree, and cleanup resets that checkout and terminates the session running in it." >&2
+  echo "Check by hand that this worktree is still this task's - its branch, the agent running in it, and whether any other task records the same path - then re-establish the proof with:" >&2
+  echo "  $claim" >&2
+  echo "and rerun cleanup. That claim writes $record; it is the only way past this refusal, because --force does not authorize touching another lane's worktree." >&2
+  return 1
+}
+
 require_orca_worktree_id() {
   local meta=$1 id
   id=$(meta_value "$meta" orca_worktree_id)
@@ -285,6 +354,20 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   ORCA_WORKTREE_ID=$(require_orca_worktree_id "$META") || exit 1
   T_ORCA=$(meta_value "$META" terminal)
   [ -z "$T_ORCA" ] || T=$T_ORCA
+fi
+
+# Ownership before landed-work: a worktree that is no longer this task's must be
+# refused whatever its contents say, and refused while every record, the isolated
+# copy, and the endpoint are all still intact. Scout tasks are included even
+# though their landed-work check is waived - their worktree is declared scratch
+# for THEM, not for whoever holds the slot now. Secondmate homes are excluded
+# because they are held by a durable treehouse lease, which the pool never hands
+# out to another holder, so their path cannot be recycled underneath them. Orca
+# worktrees are excluded because they are per-task and never pooled; the
+# id-to-path match required further below is their own occupancy proof.
+if [ -n "$WT" ] && [ -d "$WT" ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+  require_worktree_ownership "$FM_HOME" "$STATE" "$ID" "$WT" \
+    "$(fm_meta_get "$META" worktree_token)" "worktree" || exit 1
 fi
 
 remove_grok_turnend_auth() {
@@ -1438,9 +1521,15 @@ cleanup_firstmate_home_children() {
       fm_backend_remove_worktree "$child_backend" "$child_orca_worktree_id" || return 1
     elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
       validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
+      # A child's pool slot recycles exactly like a parent's, and discarding a
+      # secondmate's own work never authorizes resetting a slot that now holds
+      # someone else's. Refused here, before the child's worktree is touched.
+      require_worktree_ownership "$home" "$sub_state" "$child_id" "$child_wt" \
+        "$(meta_value "$child_meta" worktree_token)" "child worktree" || return 1
       rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
         "$child_wt/.opencode/plugins/fm-busy-state.js" \
         "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
+      fm_worktree_owner_remove "$child_wt"
       if [ -n "$child_proj" ] && [ -d "$child_proj" ] && command -v treehouse >/dev/null 2>&1; then
         if teardown_treehouse_return "$child_wt" "$child_proj" "child worktree"; then
           :
@@ -1598,8 +1687,8 @@ if [ "$BACKEND" = herdr ]; then
 fi
 
 # Retire this task's private browser session. Cleanup, never a gate: it sits
-# after every state-preserving refusal above and before the destructive
-# sequence below, so an aborted teardown (a failed treehouse return, a herdr
+# after every content-inspecting state-preserving refusal above and before the
+# destructive sequence below, so an aborted teardown (a failed treehouse return, a herdr
 # pane that will not confirm gone) has still reclaimed the bridge, and a rerun
 # retires again harmlessly. The bridge is a DETACHED process group, so neither
 # treehouse return nor the pane kill reaps it - that is the leak.
@@ -1655,7 +1744,22 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   if [ "$FORCE" != "--force" ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ]; then
     post_lock_cleanup_check=validate_worktree_teardown_safety
   fi
+  # Drop this task's ownership record so the slot goes back to the pool carrying
+  # no claim: `treehouse return --force` runs `git clean -fd`, which never
+  # reaches the git directory the record lives in. Removed BEFORE the return, so
+  # the pool cannot hand the slot out while a stale claim is still on it, and
+  # restored if the return fails, so a rerun can still prove its own ownership
+  # instead of being trapped behind the refusal this record exists to raise.
+  WORKTREE_OWNER_RECORD=$(fm_worktree_owner_record_path "$WT" 2>/dev/null || true)
+  WORKTREE_OWNER_SAVED=
+  if [ -n "$WORKTREE_OWNER_RECORD" ] && [ -f "$WORKTREE_OWNER_RECORD" ]; then
+    WORKTREE_OWNER_SAVED=$(cat "$WORKTREE_OWNER_RECORD")
+    rm -f "$WORKTREE_OWNER_RECORD"
+  fi
   teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" || {
+    if [ -n "$WORKTREE_OWNER_SAVED" ] && [ -n "$WORKTREE_OWNER_RECORD" ]; then
+      printf '%s\n' "$WORKTREE_OWNER_SAVED" > "$WORKTREE_OWNER_RECORD" || true
+    fi
     echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
     exit 1
   }

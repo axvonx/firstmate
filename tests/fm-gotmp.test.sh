@@ -81,6 +81,10 @@ make_fake_root() {
   # session; the FM_BROWSER_STATE_ROOT export above keeps that reclaim inside
   # the fixture.
   ln -s "$ROOT/bin/fm-browser-lib.sh" "$fake/bin/fm-browser-lib.sh"
+  # fm-worktree-owner-lib.sh: teardown sources it to prove the worktree it is
+  # about to reset is still the task's own. Inert in this fixture, whose
+  # worktree path deliberately does not exist, but a required sibling.
+  ln -s "$ROOT/bin/fm-worktree-owner-lib.sh" "$fake/bin/fm-worktree-owner-lib.sh"
   # fm-guard.sh: stub (teardown calls it with `|| true`).
   cat > "$fake/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
@@ -158,6 +162,10 @@ test_teardown_skips_gracefully_without_tasktmp() {
   # session; the FM_BROWSER_STATE_ROOT export above keeps that reclaim inside
   # the fixture.
   ln -s "$ROOT/bin/fm-browser-lib.sh" "$fake/bin/fm-browser-lib.sh"
+  # fm-worktree-owner-lib.sh: teardown sources it to prove the worktree it is
+  # about to reset is still the task's own. Inert in this fixture, whose
+  # worktree path deliberately does not exist, but a required sibling.
+  ln -s "$ROOT/bin/fm-worktree-owner-lib.sh" "$fake/bin/fm-worktree-owner-lib.sh"
   cat > "$fake/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
 exit 0

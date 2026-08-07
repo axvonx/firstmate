@@ -953,6 +953,10 @@ test_teardown_reclaims_the_browser_of_a_worker_killed_without_cleanup() {
     "kind=ship" \
     "mode=local-only" \
     "browser_session=$name"
+  # The task's own spawn would have established this; without it teardown
+  # cannot prove the worktree is still the task's and refuses before the
+  # browser reclaim this case is about.
+  fm_write_worktree_owner "$home" "$id" "$dir/wt" "$home/state/$id.meta" >/dev/null
 
   rc=0
   out=$(HOME="$home" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \

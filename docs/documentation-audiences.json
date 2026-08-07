@@ -340,6 +340,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/worktree-ownership.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/watcher-continuity.md",
       "audience": "operator-current"
     },

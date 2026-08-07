@@ -321,6 +321,10 @@ SH
     "window=firstmate:fm-task-x1" "endpoint_task_id=task-x1" \
     "worktree=$case_dir/wt" "project=$case_dir/project" \
     "kind=ship" "mode=no-mistakes"
+  # Ownership proof a real spawn writes; without it teardown refuses before it
+  # can reach the gate-lifecycle behavior this suite is about.
+  fm_write_worktree_owner "$ROOT" task-x1 "$case_dir/wt" \
+    "$case_dir/state/task-x1.meta" >/dev/null
   touch "$case_dir/state/.last-watcher-beat"
   printf '%s\n' "$case_dir"
 }
@@ -329,7 +333,7 @@ SH
 run_teardown() {
   local cwd=$1 case_dir=$2; shift 2
   ( cd "$cwd" && env -u NO_MISTAKES_GATE -u FM_GATE_REFUSE_BYPASS \
-      "FM_ROOT_OVERRIDE=$ROOT" "FM_STATE_OVERRIDE=$case_dir/state" \
+      "FM_ROOT_OVERRIDE=$ROOT" "FM_HOME=$ROOT" "FM_STATE_OVERRIDE=$case_dir/state" \
       "FM_CONFIG_OVERRIDE=$case_dir/config" "PATH=$case_dir/fakebin:$PATH" "$@" \
       "$TEARDOWN" task-x1 ) 2>&1
 }
