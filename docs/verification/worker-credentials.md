@@ -107,7 +107,7 @@ This parser reports an unusable line by line number only.
 ## Mutation checks
 
 Each guarantee was confirmed to be load-bearing by breaking it and observing the failure.
-The last two rows are cases in `tests/fm-brief.test.sh`, because the claim they protect is one a generated brief makes rather than one the loader keeps.
+Every row whose failing case names a brief is a case in `tests/fm-brief.test.sh`, because the claim it protects is one a generated brief makes rather than one the loader keeps; every other row is a case in the two suites above.
 
 | Mutation | Failing case |
 | --- | --- |

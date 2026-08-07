@@ -300,7 +300,7 @@ When a running home advances and its loaded instruction surface (`AGENTS.md`, `b
 If that send fails, bootstrap keeps an idempotent retry marker and emits `NUDGE_SECONDMATES:` with the failure reason.
 The same bootstrap run emits `SECONDMATE_LIVENESS:` only when a registered secondmate is skipped or its relaunch fails; already-live and successfully relaunched secondmates are handled silently.
 For a mid-session inherited local-material edit where tracked-file sync is not needed, run `bin/fm-config-push.sh`.
-It uses the same live secondmate discovery and propagation helper as bootstrap, prints each live home's `crew-dispatch.json`, `crew-harness`, `backlog-backend`, `backend`, `herdr-presentation-spaces`, `startup-memory-budget`, and `data/captain-shared.md` result as `pushed`, `unchanged`, `skipped`, or `error`, and exits non-zero for real propagation errors or config-reread send failures.
+It uses the same live secondmate discovery and propagation helper as bootstrap, prints each live home's result for every declared inherited config item and `data/captain-shared.md` as `pushed`, `unchanged`, `skipped`, or `error`, and exits non-zero for real propagation errors or config-reread send failures.
 When an allowlisted config item changes for an already-running home, it sends the literal-content reread pointer described in [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md); unchanged allowlisted config sends no pointer unless a previous delivery is pending.
 The locked bootstrap inheritance pass uses the same per-home changed-set and reread path for already-running homes; see `secondmate-provisioning` for the single contract owner.
 That live discovery starts from `state/*.meta` records with `kind=secondmate`; `data/secondmates.md` only backfills `home=` for older or incomplete meta records.
@@ -345,6 +345,7 @@ For a secondmate that relies on the primary's file, the stderr line naming that 
 
 This exists so credentials do not have to be set machine-wide.
 A `launchctl setenv` value is inherited by every process on the machine, which is both a broad exposure and a silent one - a worker gets the key whether or not firstmate intended it to.
+`launchctl` is not the only such source: a login-shell rc file that exports the same names reaches every worker pane just as widely, so confirm a cleared name is unset in a fresh pane rather than concluding it from the absence of a `launchctl` entry.
 The pane's own long-lived provider daemon does not inherit firstmate's environment, so a per-home file has to be delivered explicitly, and this is that delivery.
 
 [`bin/fm-worker-env-lib.sh`](../bin/fm-worker-env-lib.sh) owns the parser and the eligibility rules.
@@ -368,7 +369,7 @@ It is LOCAL and gitignored, and it is inherited by secondmate homes under the co
 The file is what scopes the vault discipline in the credential rule that [`bin/fm-brief.sh`](../bin/fm-brief.sh) generates into every crewmate brief.
 Absent, the rule applies to every credential, which is the original unnarrowed contract and remains the default for any home that has not declared a split.
 Present, the rule names exactly those keys, applies the full vault discipline to them, and tells the worker to read every other credential straight from its environment with no vault call.
-That includes the trigger conditions: an authentication failure or an unset value means `av inject` only for the declared names, while an unset credential outside them is reported as the missing credential it is, with this home's `.env` named as where it should have come from.
+That includes the trigger conditions: an authentication failure or an unset value means `av inject` only for the declared names, while an unset credential outside them is reported as the missing credential it is, named against whichever `.env` would have delivered it - this home's, the primary's when this home reads that one, or no file at all when nothing delivers - from the same `fm_worker_env_resolve` answer the spawn loads.
 That last part is why the scoping matters: a worker told to reach through the vault for a key the vault does not hold stops on a blocker it can never clear, and because every lane reads the same generated rule they would all stop the same way at once.
 
 A present-but-empty file and an unusable name are both refused, and no brief is written.
