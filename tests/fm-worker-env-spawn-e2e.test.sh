@@ -45,7 +45,23 @@ command -v tmux >/dev/null 2>&1 || { echo "skip: tmux not found"; exit 0; }
 # to the real-herdr-gated family - the one CI lane that installs the pinned
 # Treehouse build - so the delivery guarantee is still proven in CI rather than
 # skipped everywhere.
-command -v treehouse >/dev/null 2>&1 || { echo "skip: treehouse not found (required by fm-spawn.sh)"; exit 0; }
+#
+# That gate is deliberately NOT allowed to fire in CI. This suite is the only
+# proof that a worker still reaches its credentials once the machine-wide copies
+# are cleared, and the runner counts an unrecognised `skip:` as a success
+# (bin/fm-test-run.sh: "Other gate skips ... remain successful"). The herdr lane's
+# --fail-on-gate-skip token is 'herdr not found', which this message would not
+# match, so a trimmed or broken Treehouse install would silently stop proving the
+# claim while CI stayed green - a guard that disables itself, on the one
+# assertion an operator clears their machine-wide keys on. Skipping is a
+# workstation convenience; in CI a missing dependency is a failure.
+if ! command -v treehouse >/dev/null 2>&1; then
+  if [ -n "${CI:-}" ]; then
+    fail "treehouse is missing in CI, so the credential-delivery proof cannot run; this suite must never skip here - restore the Treehouse install step for this lane"
+  fi
+  echo "skip: treehouse not found (required by fm-spawn.sh)"
+  exit 0
+fi
 
 TMP_ROOT=$(fm_test_tmproot fm-worker-env-spawn-e2e)
 # A tmux socket is a UNIX socket, whose path is capped near 104 bytes, and the
@@ -81,9 +97,27 @@ CRED_B=HF_TOKEN
 FAKE_A=fake-openai-value-not-a-real-key
 FAKE_B=fake-hf-value-not-a-real-key
 
-# Kill the scratch tmux server however this run ends, so no pane outlives it.
+# Kill the scratch tmux server however this run ends, so no pane outlives it, and
+# return every pool worktree the real spawns acquired.
+#
+# The worktrees are the easy thing to forget: each case drives a real
+# fm-spawn.sh, which acquires one through `treehouse get`, and nothing in this
+# suite ever tore them down. CI runners are ephemeral so it cost nothing there,
+# but every local run leaked one worktree per case on the developer's machine.
+# The paths are read back from each case's own state/<id>.meta `worktree=` record
+# rather than tracked in a variable, so a case that dies mid-spawn still has its
+# worktree returned as long as fm-spawn got far enough to write the record.
 scratch_cleanup() {
+  local meta wt
   tmux kill-server >/dev/null 2>&1 || true
+  if command -v treehouse >/dev/null 2>&1 && [ -n "${TMP_ROOT:-}" ]; then
+    for meta in "$TMP_ROOT"/home-*/state/*.meta; do
+      [ -f "$meta" ] || continue
+      wt=$(sed -n 's/^worktree=//p' "$meta" | tail -1)
+      [ -n "$wt" ] || continue
+      treehouse return --force "$wt" >/dev/null 2>&1 || true
+    done
+  fi
   [ -n "${TMUX_TMPDIR:-}" ] && rm -rf "$TMUX_TMPDIR"
   fm_test_cleanup
 }
