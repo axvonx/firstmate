@@ -206,8 +206,14 @@ jobs:
           set -eu
           command -v herdr >/dev/null || { echo "::error::herdr not on PATH after install"; exit 1; }
           command -v treehouse >/dev/null || { echo "::error::treehouse not on PATH after install"; exit 1; }
+          # tmux is image-provided rather than installed above, and this lane's
+          # suites gate on it: the .env credential-delivery proof and the AFK
+          # launch e2e both drive a real pane. Without this assertion its absence
+          # would reach them as a `skip:`, which the runner counts as a success.
+          command -v tmux >/dev/null || { echo "::error::tmux is required for the real-pane e2e suites in this lane"; exit 1; }
           herdr --version
           treehouse --version
+          tmux -V
           status=$(herdr status --json)
           printf '%s\n' "$status"
           version=$(printf '%s' "$status" | jq -r '.client.version // empty')

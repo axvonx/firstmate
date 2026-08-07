@@ -194,29 +194,64 @@ done
 # an interpreter or a login shell a file to load, in every project the worker
 # touches. A .env is now read by every future worker, so one appended line would
 # persist across lanes.
+#
+# Every one of those names has a strictly stronger sibling, and a list holding
+# only the weaker one refuses nothing in practice - which is why each sibling is
+# asserted here beside it. PYTHONPATH reaches every python run where
+# PYTHONSTARTUP only fires interactively, PERL5OPT injects `-M<module>` into
+# every perl run where PERL5LIB only adds a search path, and RUBYLIB and
+# NODE_PATH are the same shape one interpreter over. The GIT_CONFIG_* family is
+# the sharpest of them in a rule about credentials: GIT_CONFIG_COUNT with
+# GIT_CONFIG_KEY_<n>/GIT_CONFIG_VALUE_<n> sets arbitrary config on every git
+# call, so it can install a credential.helper that hands the worker's git
+# credentials to a program of the file's choosing. It is refused by prefix, and
+# the enumerated members are asserted so the prefix cannot silently match
+# nothing.
 test_interpreter_hijacking_names_are_refused() {
-  local envfile out shell
+  local envfile out shell name
   envfile="$TMP_ROOT/interpreter.env"
   write_env "$envfile" <<EOF
 GIT_SSH_COMMAND=/definitely/not/a/real/ssh
+GIT_CONFIG=/definitely/not/a/real/gitconfig
+GIT_CONFIG_GLOBAL=/definitely/not/a/real/gitconfig-global
+GIT_CONFIG_SYSTEM=/definitely/not/a/real/gitconfig-system
+GIT_CONFIG_COUNT=1
+GIT_CONFIG_KEY_0=credential.helper
+GIT_CONFIG_VALUE_0=/definitely/not/a/real/credential-helper
 PERL5LIB=/definitely/not/a/real/perl5
+PERL5OPT=-M/definitely/not/a/real/module
 PYTHONSTARTUP=/definitely/not/a/real/startup.py
+PYTHONPATH=/definitely/not/a/real/pythonpath
 RUBYOPT=-r/definitely/not/a/real/hook
+RUBYLIB=/definitely/not/a/real/rubylib
+NODE_PATH=/definitely/not/a/real/node_modules
 ZDOTDIR=/definitely/not/a/real/zdotdir
 OPENAI_API_KEY=$FAKE_A
 EOF
   for shell in $LOADER_SHELLS; do
     command -v "$shell" >/dev/null 2>&1 || continue
     # shellcheck disable=SC2016  # a script for the CHILD shell: it must expand there, not here
-    out=$(probe "$shell" "$envfile" 'for k in GIT_SSH_COMMAND PERL5LIB PYTHONSTARTUP RUBYOPT ZDOTDIR; do
+    out=$(probe "$shell" "$envfile" 'for k in GIT_SSH_COMMAND GIT_CONFIG GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 PERL5LIB PERL5OPT PYTHONSTARTUP PYTHONPATH RUBYOPT RUBYLIB NODE_PATH ZDOTDIR; do
   eval "v=\${$k:-}"
   if [ -n "$v" ]; then echo "$k=set"; else echo "$k=unset"; fi
 done
 [ -n "${OPENAI_API_KEY:-}" ] && echo "OPENAI_API_KEY=set"')
     assert_contains "$out" "GIT_SSH_COMMAND=unset" "$shell: a .env could replace the transport git authenticates over"
+    assert_contains "$out" "GIT_CONFIG=unset" "$shell: a .env could replace the config file every git call reads"
+    assert_contains "$out" "GIT_CONFIG_GLOBAL=unset" "$shell: a .env could replace the worker's global git config"
+    assert_contains "$out" "GIT_CONFIG_SYSTEM=unset" "$shell: a .env could replace the system git config"
+    # The count/key/value trio is the exfiltration path: it needs no file at all.
+    for name in GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0; do
+      assert_contains "$out" "$name=unset" \
+        "$shell: a .env could set a credential.helper on every git call through $name"
+    done
     assert_contains "$out" "PERL5LIB=unset" "$shell: a .env could inject a perl library path"
+    assert_contains "$out" "PERL5OPT=unset" "$shell: a .env could load a module into every perl run"
     assert_contains "$out" "PYTHONSTARTUP=unset" "$shell: a .env could run a file at every python startup"
+    assert_contains "$out" "PYTHONPATH=unset" "$shell: a .env could prepend an import path to every python run"
     assert_contains "$out" "RUBYOPT=unset" "$shell: a .env could require a file into every ruby process"
+    assert_contains "$out" "RUBYLIB=unset" "$shell: a .env could prepend a load path to every ruby process"
+    assert_contains "$out" "NODE_PATH=unset" "$shell: a .env could prepend a module path to every node process"
     assert_contains "$out" "ZDOTDIR=unset" "$shell: a .env could point a login shell at its own rc directory"
     assert_contains "$out" "OPENAI_API_KEY=set" \
       "$shell: refusing interpreter-hijacking names also dropped the credential beside them"

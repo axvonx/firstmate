@@ -1286,6 +1286,122 @@ test_vault_scope_follows_declared_key_list() {
   pass "fm-brief.sh: the vault rule covers exactly the keys a home declares vault-only"
 }
 
+# One brief, one position on where this home's credentials are.
+#
+# The credential rule is assembled from three independent inputs - whether the
+# resolved .env actually delivers, whether `av` is installed, and whether
+# config/vault-only-keys declares a split - and a brief that tells a worker its
+# variables are simply there AND that credentials belong in the vault rather than
+# the ambient environment is worse than either version alone, because a worker
+# follows whichever it read last. Both regressions of that shape arrived in a
+# combination nobody had rendered, so this enumerates the whole matrix instead of
+# spot-checking two configurations, and it pins which way each combination is
+# supposed to resolve rather than only that it does not contradict itself.
+test_credential_rule_states_one_position_in_every_combination() {
+  local home primary fakebin novault delivery vault config id brief label
+  local pathenv expect_location rendered=0
+  local loc_claim vault_all vault_unset_all no_ambient_fallback vault_scope
+  home="$TMP_ROOT/credential-matrix-home"
+  primary="$TMP_ROOT/credential-matrix-primary"
+  write_registry "$home"
+  mkdir -p "$home/config" "$primary"
+  fakebin=$(fm_fakebin "$TMP_ROOT/credential-matrix-vault")
+  fm_fake_exit0 "$fakebin" av
+  unset -f av 2>/dev/null || true
+  novault=$(path_without_av)
+  printf 'PRIMARY_ONLY_NOT_A_REAL_KEY=placeholder\n' > "$primary/.env"
+
+  # The two halves that must never both be asserted, plus the scope preamble that
+  # is what makes the narrowed form coherent rather than contradictory.
+  loc_claim='so the variables are simply there for you to use'
+  vault_all='Credentials belong in Automic Vault rather than the ambient environment'
+  vault_unset_all='An authentication failure or an unset key is the signal'
+  no_ambient_fallback='never fall back to reading the credential out of the ambient environment'
+  vault_scope='applies to those names and to nothing else'
+
+  for delivery in none inert local inherited; do
+    case "$delivery" in
+      local) printf 'PLACEHOLDER_NOT_A_REAL_KEY=placeholder\n' > "$home/.env" ;;
+      inert) printf 'FMX_PAIRING_TOKEN=fake-pairing-token-not-a-real-token\n' > "$home/.env" ;;
+      *) rm -f "$home/.env" ;;
+    esac
+    for vault in installed absent; do
+      if [ "$vault" = installed ]; then
+        pathenv="$fakebin:$PATH"
+      else
+        pathenv="$novault"
+      fi
+      for config in declared undeclared; do
+        if [ "$config" = declared ]; then
+          printf 'STRIPE_SECRET_KEY\n' > "$home/config/vault-only-keys"
+        else
+          rm -f "$home/config/vault-only-keys"
+        fi
+        label="$delivery/$vault/$config"
+        id="brief-matrix-$delivery-$vault-$config"
+        if [ "$delivery" = inherited ]; then
+          PATH="$pathenv" FM_HOME="$home" FM_PUBLIC_FOLLOWUP_PRIMARY_HOME="$primary" \
+            "$ROOT/bin/fm-brief.sh" "$id" no-registry-proj >/dev/null 2>&1
+        else
+          PATH="$pathenv" FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" no-registry-proj >/dev/null 2>&1
+        fi
+        brief="$home/data/$id/brief.md"
+        assert_present "$brief" "$label: no brief was scaffolded for this combination"
+        rendered=$((rendered + 1))
+
+        # The invariant, checked on every combination rather than the ones a
+        # reader expects to be interesting.
+        if grep -F -- "$loc_claim" "$brief" >/dev/null; then
+          assert_no_grep "$vault_all" "$brief" \
+            "$label: brief says the variables are simply there AND that credentials belong in the vault rather than the environment"
+          assert_no_grep "$vault_unset_all" "$brief" \
+            "$label: brief says the variables are simply there AND routes any unset key to the vault"
+          if grep -F -- "$no_ambient_fallback" "$brief" >/dev/null; then
+            assert_grep "$vault_scope" "$brief" \
+              "$label: brief forbids reading a credential from the environment without bounding that to declared vault keys, while telling the worker its credentials are in that environment"
+          fi
+        fi
+
+        # Which way each combination is supposed to resolve. A delivering .env is
+        # described wherever the vault rule is absent or narrowed; under the
+        # unnarrowed rule the vault half is the single position and the location
+        # paragraph is withheld, which is how an unnarrowed home reads exactly as
+        # it did before that paragraph existed.
+        expect_location=no
+        case "$delivery" in
+          local|inherited)
+            if [ "$vault" = absent ] || [ "$config" = declared ]; then
+              expect_location=yes
+            fi
+            ;;
+        esac
+        if [ "$expect_location" = no ]; then
+          assert_no_grep "mode-600 gitignored" "$brief" \
+            "$label: brief described a .env where it must not - either nothing delivers, or the unnarrowed vault rule already claims every credential"
+          continue
+        fi
+        if [ "$delivery" = inherited ]; then
+          # shellcheck disable=SC2016  # literal brief text: backticks must stay literal
+          assert_grep 'The values live in one mode-600 gitignored `.env` in the primary firstmate home' "$brief" \
+            "$label: brief did not name the primary's .env its worker actually gets credentials from"
+        else
+          # shellcheck disable=SC2016  # literal brief text: backticks must stay literal
+          assert_grep 'The values live in one mode-600 gitignored `.env` in the firstmate home' "$brief" \
+            "$label: brief did not name this home's .env its worker actually gets credentials from"
+        fi
+        assert_grep "Never commit that file, never copy it or its contents into a project" "$brief" \
+          "$label: brief described the .env without the rule that keeps it out of every repo"
+      done
+    done
+  done
+
+  # A combination that silently fails to render proves nothing, and an
+  # unrendered one is exactly how both earlier regressions survived review.
+  [ "$rendered" -eq 16 ] \
+    || fail "credential-rule matrix rendered $rendered briefs, expected all 16 combinations"
+  pass "fm-brief.sh: every credential-rule combination states one position on where credentials live"
+}
+
 # Ship and scout briefs carry ONE browser rule, identical in both variants: the
 # session is private to the task and needs no cleanup. The deleted shared-session
 # parking rule must not survive in either variant.
@@ -1353,4 +1469,5 @@ test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
 test_credential_rule_covers_ship_and_scout
 test_vault_scope_follows_declared_key_list
+test_credential_rule_states_one_position_in_every_combination
 test_browser_teardown_contract

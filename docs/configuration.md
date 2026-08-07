@@ -351,7 +351,8 @@ The pane's own long-lived provider daemon does not inherit firstmate's environme
 [`bin/fm-worker-env-lib.sh`](../bin/fm-worker-env-lib.sh) owns the parser and the eligibility rules.
 Two exclusions are contractual rather than incidental.
 `FM_*` and `FMX_*` names are never exported into a worker: `.env` also carries firstmate's own configuration, and `FMX_PAIRING_TOKEN` in particular is X mode's relay consent, which AGENTS.md section 14 reserves to the home that holds it rather than to its workers.
-Names that would rewrite the shell the values load into - `PATH`, `BASH_ENV`, `LD_PRELOAD`, `DYLD_*`, and similar - are refused outright, along with the interpreter-level equivalents `GIT_SSH_COMMAND`, `PERL5LIB`, `PYTHONSTARTUP`, `RUBYOPT`, and `ZDOTDIR`.
+Names that would rewrite the shell the values load into - `PATH`, `BASH_ENV`, `LD_PRELOAD`, `DYLD_*`, and similar - are refused outright, along with the interpreter-level equivalents: `GIT_SSH_COMMAND`, the whole `GIT_CONFIG_*` family plus the bare `GIT_CONFIG`, `PERL5LIB` and `PERL5OPT`, `PYTHONSTARTUP` and `PYTHONPATH`, `RUBYOPT` and `RUBYLIB`, `NODE_PATH`, and `ZDOTDIR`.
+Each interpreter name is refused with its stronger sibling rather than on its own, because refusing only the weaker one refuses nothing: `PYTHONPATH` reaches every python run where `PYTHONSTARTUP` only fires for an interactive one, `PERL5OPT` injects `-M<module>` into every perl run where `PERL5LIB` only adds a search path, and `GIT_CONFIG_COUNT` with `GIT_CONFIG_KEY_<n>`/`GIT_CONFIG_VALUE_<n>` sets arbitrary config - `credential.helper` included - on every git call.
 `NODE_OPTIONS` is allowed only when every whitespace-separated token is `--max-old-space-size=<digits>`, and the whole value is refused otherwise, so the deliberate heap-size setting keeps working while `--require`, `--import`, and `--experimental-loader` cannot load a file into every node process a worker starts.
 A refused value is reported on stderr by the name it was declared for and never by its content.
 A declared value wins over an already-set ambient one, so a stale machine-wide copy cannot silently shadow the file.
@@ -377,6 +378,8 @@ Either one would drop a credential out of vault discipline without anyone readin
 Delete the file to return to covering every credential.
 
 The vault half of the rule still renders only where Automic Vault is actually installed, so a machine without it is never told to reach for a tool it does not have.
+Where that half renders unnarrowed - Automic Vault installed and no file here - the brief omits the paragraph that says where the `.env` values live, because that rule already tells the worker credentials are not in its environment and that falling back to the environment is the exposure being removed.
+One brief carries one position, so an unnarrowed home's credential rule reads exactly as it did before that paragraph existed, and declaring a split here is what turns it on.
 `bin/fm-brief.sh --help` owns the generated rule's full contract and reasoning.
 
 ## X mode (.env)

@@ -51,8 +51,9 @@
 #    and the interpreters that shell starts. A `.env` reaching a worker is a
 #    fleet-wide input read by every future worker, so it is a new path for PATH,
 #    DYLD_INSERT_LIBRARIES, or BASH_ENV to redirect what the worker executes -
-#    and GIT_SSH_COMMAND, PERL5LIB, PYTHONSTARTUP, RUBYOPT, and ZDOTDIR do the
-#    same one level down. Those names are rejected outright rather than trusted
+#    and GIT_SSH_COMMAND, the GIT_CONFIG_* family, PERL5LIB and PERL5OPT,
+#    PYTHONSTARTUP and PYTHONPATH, RUBYOPT and RUBYLIB, NODE_PATH, and ZDOTDIR do
+#    the same one level down. Those names are rejected outright rather than trusted
 #    to be well-meaning. NODE_OPTIONS is the one name where both outright answers
 #    are wrong, so its VALUE is allowlisted instead; see
 #    fm_worker_env_value_refused.
@@ -75,18 +76,36 @@
 # because exporting it changes what the shell resolves, loads, or executes
 # rather than what a command authenticates with.
 #
-# The last group is the interpreter-level equivalent of the first, and belongs
+# The last groups are the interpreter-level equivalent of the first, and belong
 # here for the same reason: GIT_SSH_COMMAND redirects git-over-ssh exactly the
 # way BASH_ENV redirects the shell, and PERL5LIB, PYTHONSTARTUP, RUBYOPT, and
 # ZDOTDIR each hand an interpreter or a login shell a file of someone else's
 # choosing, in every project a worker touches rather than in one command.
+#
+# Each of those names has a strictly stronger sibling, and refusing one without
+# the other refuses nothing: PYTHONPATH prepends to sys.path for EVERY python
+# run while PYTHONSTARTUP only fires for an interactive one, PERL5OPT injects
+# `-M<module>` into every perl run while PERL5LIB only adds a search path, and
+# RUBYLIB and NODE_PATH are the same shape for ruby and node. They are refused
+# with their siblings rather than beside them.
+#
+# GIT_CONFIG_* is a prefix rather than a list because the family is open-ended by
+# design: GIT_CONFIG_COUNT plus GIT_CONFIG_KEY_<n>/GIT_CONFIG_VALUE_<n> set
+# arbitrary config on every git call, which reaches credential.helper - a
+# credential-exfiltration path in a rule about credentials - as well as
+# core.pager and any alias. The prefix arm covers those and GIT_CONFIG_GLOBAL and
+# GIT_CONFIG_SYSTEM, exactly as the DYLD_* arm covers its family; the bare
+# GIT_CONFIG name is not matched by the prefix and is named alongside it.
 fm_worker_env_forbidden() {
   case "$1" in
     PATH|HOME|SHELL|USER|LOGNAME|IFS|ENV|BASH_ENV) return 0 ;;
     PS1|PS2|PS4|PROMPT_COMMAND|SHELLOPTS|BASHOPTS) return 0 ;;
     GLOBIGNORE|CDPATH|LD_PRELOAD|LD_LIBRARY_PATH) return 0 ;;
     DYLD_*) return 0 ;;
-    GIT_SSH_COMMAND|PERL5LIB|PYTHONSTARTUP|RUBYOPT|ZDOTDIR) return 0 ;;
+    GIT_SSH_COMMAND|ZDOTDIR) return 0 ;;
+    GIT_CONFIG|GIT_CONFIG_*) return 0 ;;
+    PERL5LIB|PERL5OPT|PYTHONSTARTUP|PYTHONPATH) return 0 ;;
+    RUBYOPT|RUBYLIB|NODE_PATH) return 0 ;;
   esac
   return 1
 }

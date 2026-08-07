@@ -36,7 +36,19 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-command -v tmux >/dev/null 2>&1 || { echo "skip: tmux not found"; exit 0; }
+# Both dependency gates below are workstation conveniences and neither is allowed
+# to fire in CI, for the reason spelled out at the treehouse gate below: a pair of gates
+# where one can quietly not run is worse than one gate, because the pair implies a
+# coverage it does not have. A silent tmux skip would stop this proof exactly as a
+# silent treehouse skip would, and the herdr lane's --fail-on-gate-skip token
+# ('herdr not found') matches neither message.
+if ! command -v tmux >/dev/null 2>&1; then
+  if [ -n "${CI:-}" ]; then
+    fail "tmux is missing in CI, so the credential-delivery proof cannot run; this suite must never skip here - restore tmux for this lane"
+  fi
+  echo "skip: tmux not found"
+  exit 0
+fi
 # A crewmate spawn acquires its worktree with `treehouse get`, so without
 # treehouse a real fm-spawn.sh cannot finish: the pane's cwd never leaves the
 # project and every case dies on fm-spawn's own 60s worktree wait, one minute at

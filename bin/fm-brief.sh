@@ -113,6 +113,18 @@
 # its own. It says where the values are, that the file is mode 600 and gitignored,
 # that it is never committed or copied into a project, and that a worker tests a
 # variable rather than opening the file to look at a value.
+# Delivery is necessary but not sufficient: the part is also withheld from the
+# one combination where it would make a single brief hold two positions. A home
+# whose vault half renders UNNARROWED - `av` installed and no
+# config/vault-only-keys declaring a split - is telling its worker that
+# credentials belong in the vault rather than the ambient environment and that it
+# must never fall back to reading one out of that environment. Adding "the
+# variables are simply there for you to use" underneath produces a brief that
+# says both, and a worker follows whichever it read last. So this part renders
+# only where the vault half is absent or narrowed, which leaves an unnarrowed
+# home's brief reading exactly as it did before this part existed - the same
+# invariant config/vault-only-keys carries, that its absence changes nothing for
+# any home that has not declared a split.
 # The third is the vault call pattern, and it renders only when `av` (Automic
 # Vault) is on PATH at scaffold time, so a machine without the vault keeps the
 # first parts and is never told to reach for a tool it does not have.
@@ -440,34 +452,6 @@ IFS= read -r -d '' CREDENTIALS_RULE <<'EOF' || true
    If a value does land in your pane, a file, or a commit despite all of this, stop immediately, append `blocked: {which credential leaked and where}` to the status file, and do not try to scrub it quietly - that key has to be rotated, and an unreported leak costs far more than a reported one.
 EOF
 CREDENTIALS_RULE=${CREDENTIALS_RULE%$'\n'}
-# Where the values actually are, stated only for a home whose .env would really
-# put a name into a worker's environment, so a home without one is never sent
-# looking for it. fm-spawn.sh loads it around the worker's launch
-# (bin/fm-worker-env-lib.sh); this half of the rule is what stops a worker from
-# committing it or reading it out to look at a value.
-# The gate is fm_worker_env_resolve, the same call bin/fm-spawn.sh makes to pick
-# the file it actually loads, so the brief describes the file a worker really
-# gets. It turns on DELIVERY rather than existence: a .env that declares only
-# FM_*/FMX_* names - an X-mode-only file holding just FMX_PAIRING_TOKEN is the
-# documented shape - loads nothing into a worker, and a home whose own file
-# delivers nothing reads its primary's instead, which is what this paragraph then
-# has to name. Telling a worker its variables are simply there, or naming the
-# wrong file, are the same false statement in a generated brief.
-fm_worker_env_resolve "$FM_HOME" "${FM_PUBLIC_FOLLOWUP_PRIMARY_HOME:-}"
-if [ "$FM_WORKER_ENV_ORIGIN" != none ]; then
-  if [ "$FM_WORKER_ENV_ORIGIN" = primary ]; then
-    ENV_LOCATION_SENTENCE="   The values live in one mode-600 gitignored \`.env\` in the primary firstmate home, which this home reads because its own declares no credential, and firstmate loads it into your environment when it launches you, so the variables are simply there for you to use."
-  else
-    ENV_LOCATION_SENTENCE="   The values live in one mode-600 gitignored \`.env\` in the firstmate home, and firstmate loads it into your environment when it launches you, so the variables are simply there for you to use."
-  fi
-  IFS= read -r -d '' CREDENTIALS_LOCATION <<'EOF' || true
-__ENV_LOCATION_SENTENCE__
-   Never commit that file, never copy it or its contents into a project, a fixture, or an image, and never add it to a repository's tracked files - the reason it is safe to keep credentials in your environment at all is that this one file stays out of every repo.
-   Never open it to see what a value is: test the variable instead, the same way you would test any other credential.
-EOF
-  CREDENTIALS_LOCATION=${CREDENTIALS_LOCATION//__ENV_LOCATION_SENTENCE__/$ENV_LOCATION_SENTENCE}
-  CREDENTIALS_RULE="$CREDENTIALS_RULE"$'\n'"${CREDENTIALS_LOCATION%$'\n'}"
-fi
 # Which credentials the vault discipline actually covers. This repo is a shared
 # template and each home's split between vault and environment is a local policy
 # decision, so the names cannot be hard-coded here: config/vault-only-keys is
@@ -480,6 +464,9 @@ fi
 # reading a diff, and deleting the file is the explicit way back to covering all.
 # An unusable name is an error for the same reason - dropping it would quietly
 # route a vaulted credential to the environment instead.
+# This is read before the location paragraph below rather than after it, because
+# whether the vault rule ends up narrowed is half of what decides whether that
+# paragraph may be written at all.
 VAULT_ONLY_KEYS=""
 VAULT_ONLY_FILE="$CONFIG/vault-only-keys"
 if [ -f "$VAULT_ONLY_FILE" ]; then
@@ -505,7 +492,53 @@ if [ -f "$VAULT_ONLY_FILE" ]; then
     exit 1
   fi
 fi
+# The vault half renders only where Automic Vault is actually installed, and
+# UNNARROWED means it is installed with no declared split - the one shape that
+# claims every credential belongs in the vault and nowhere else.
+VAULT_INSTALLED=no
 if command -v av >/dev/null 2>&1; then
+  VAULT_INSTALLED=yes
+fi
+VAULT_RULE_UNNARROWED=no
+if [ "$VAULT_INSTALLED" = yes ] && [ -z "$VAULT_ONLY_KEYS" ]; then
+  VAULT_RULE_UNNARROWED=yes
+fi
+# Where the values actually are, stated only for a home whose .env would really
+# put a name into a worker's environment, so a home without one is never sent
+# looking for it. fm-spawn.sh loads it around the worker's launch
+# (bin/fm-worker-env-lib.sh); this half of the rule is what stops a worker from
+# committing it or reading it out to look at a value.
+# The first gate is fm_worker_env_resolve, the same call bin/fm-spawn.sh makes to
+# pick the file it actually loads, so the brief describes the file a worker
+# really gets. It turns on DELIVERY rather than existence: a .env that declares
+# only FM_*/FMX_* names - an X-mode-only file holding just FMX_PAIRING_TOKEN is
+# the documented shape - loads nothing into a worker, and a home whose own file
+# delivers nothing reads its primary's instead, which is what this paragraph then
+# has to name. Telling a worker its variables are simply there, or naming the
+# wrong file, are the same false statement in a generated brief.
+# The second gate is the unnarrowed vault rule, and it is the same requirement
+# read from the other side: that rule tells the worker credentials are NOT in its
+# environment and that falling back to the environment is the exposure being
+# removed, so this paragraph would contradict it outright. One brief carries one
+# position, and where the two would disagree the vault rule is the one that
+# holds, which is exactly how an unnarrowed home read before this paragraph
+# existed.
+fm_worker_env_resolve "$FM_HOME" "${FM_PUBLIC_FOLLOWUP_PRIMARY_HOME:-}"
+if [ "$FM_WORKER_ENV_ORIGIN" != none ] && [ "$VAULT_RULE_UNNARROWED" = no ]; then
+  if [ "$FM_WORKER_ENV_ORIGIN" = primary ]; then
+    ENV_LOCATION_SENTENCE="   The values live in one mode-600 gitignored \`.env\` in the primary firstmate home, which this home reads because its own declares no credential, and firstmate loads it into your environment when it launches you, so the variables are simply there for you to use."
+  else
+    ENV_LOCATION_SENTENCE="   The values live in one mode-600 gitignored \`.env\` in the firstmate home, and firstmate loads it into your environment when it launches you, so the variables are simply there for you to use."
+  fi
+  IFS= read -r -d '' CREDENTIALS_LOCATION <<'EOF' || true
+__ENV_LOCATION_SENTENCE__
+   Never commit that file, never copy it or its contents into a project, a fixture, or an image, and never add it to a repository's tracked files - the reason it is safe to keep credentials in your environment at all is that this one file stays out of every repo.
+   Never open it to see what a value is: test the variable instead, the same way you would test any other credential.
+EOF
+  CREDENTIALS_LOCATION=${CREDENTIALS_LOCATION//__ENV_LOCATION_SENTENCE__/$ENV_LOCATION_SENTENCE}
+  CREDENTIALS_RULE="$CREDENTIALS_RULE"$'\n'"${CREDENTIALS_LOCATION%$'\n'}"
+fi
+if [ "$VAULT_INSTALLED" = yes ]; then
   # Scoped mode names the covered keys up front, so a worker can tell which world
   # it is in without running anything. Everything else is read from the
   # environment with no vault call and no stop: a worker that blocks waiting for

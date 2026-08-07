@@ -37,7 +37,7 @@ It also points the pane shell at an empty `XDG_CONFIG_HOME`, without which the "
 
 ## Delivery, ablation, inheritance, and the empty-home case
 
-A real crewmate spawn takes its worktree from `treehouse get`, so the suite needs tmux and treehouse and prints `skip:` without them - read the first line before reading the run as a proof.
+A real crewmate spawn takes its worktree from `treehouse get`, so the suite needs tmux and treehouse; on a workstation it prints `skip:` without either - read the first line before reading the run as a proof - and under `CI` both gates fail loudly instead, because a proof that can quietly stop running is not one.
 CI runs it in the real-Herdr lane, the only lane that installs the pinned Treehouse build (`bin/fm-test-run.sh` maps it to that family for exactly that reason).
 
 ```sh
@@ -90,7 +90,8 @@ ok - fm-worker-env-lib.sh: the declared .env value wins over a stale ambient cop
 ok - fm-worker-env-lib.sh: an absent .env loads nothing and reports no error
 ```
 
-The interpreter case is the same rule as the shell one, one level down: `GIT_SSH_COMMAND`, `PERL5LIB`, `PYTHONSTARTUP`, `RUBYOPT`, and `ZDOTDIR` redirect what a worker runs in every project it touches, and a `.env` is now read by every future worker, so one appended line would persist across lanes.
+The interpreter case is the same rule as the shell one, one level down: `GIT_SSH_COMMAND`, the `GIT_CONFIG_*` family, `PERL5LIB`/`PERL5OPT`, `PYTHONSTARTUP`/`PYTHONPATH`, `RUBYOPT`/`RUBYLIB`, `NODE_PATH`, and `ZDOTDIR` redirect what a worker runs in every project it touches, and a `.env` is now read by every future worker, so one appended line would persist across lanes.
+Each name is refused with its stronger sibling, because the weaker one alone is not the reachable path: `PYTHONPATH` reaches every python run and `PERL5OPT` every perl run, and `GIT_CONFIG_COUNT` with `GIT_CONFIG_KEY_<n>`/`GIT_CONFIG_VALUE_<n>` can set `credential.helper` on every git call, which is a credential-exfiltration path in a rule about credentials.
 `NODE_OPTIONS` is the one name where refusing it and allowing it are both wrong - the documented long-run practice sets `--max-old-space-size` deliberately, while `--require=<file>` in the same variable loads a file into every node process - so its VALUE is allowlisted token by token, and a refusal names `NODE_OPTIONS` without printing what it refused.
 
 The count case exists because `bin/fm-brief.sh` has to know whether a home's `.env` would give a worker anything before it tells that worker its variables are simply there.
