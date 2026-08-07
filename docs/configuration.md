@@ -323,8 +323,24 @@ A primary whose own `.env` delivers nothing is not used either, because announci
 The `FM_*`/`FMX_*` exclusion below applies on the inherited path exactly as it does on the local one, and matters more there: `FMX_PAIRING_TOKEN` is the primary home's relay consent and must not reach a secondmate's crewmate.
 
 A secondmate runs `bin/fm-spawn.sh` from its own checkout, so this fallback reaches that lane's crewmates only once the secondmate home has fast-forwarded to a `bin/fm-spawn.sh` that carries it - which the guarded tracked-file fast-forward does at launch and in the locked bootstrap sweep, except for a home it reports as dirty, diverged, or in-flight, which is left unchanged.
-Confirming that is an ordered step before any machine-wide credential copies are cleared: list the registered secondmates with `grep -l '^kind=secondmate$' state/*.meta` - the same record shape the fleet's own live discovery uses - read each record's `home=`, and check that home with `grep -q fm_worker_env_resolve <home>/bin/fm-spawn.sh`.
-A home that fails that check has not advanced yet: clear whatever the sweep warned about so its fast-forward can land, and clear the ambient copies only once every listed home passes.
+Confirming that is an ordered step before any machine-wide credential copies are cleared, and it runs through the fleet's own live discovery so a record whose `home=` lives in `data/secondmates.md` rather than in its meta is answered for rather than skipped:
+
+```sh
+bash <<'SH'
+. bin/fm-ff-lib.sh
+records=$(live_secondmate_meta_records state data/secondmates.md)
+[ -n "$records" ] || echo 'no secondmate records: nothing to confirm'
+printf '%s\n' "$records" | while IFS='|' read -r id home _; do
+  [ -n "$id" ] || continue
+  grep -q '^home=' "state/$id.meta" || echo "$id: no home= in meta, read from data/secondmates.md"
+  [ -n "$home" ] || { echo "$id: STOP, no home in meta or data/secondmates.md"; continue; }
+  grep -q fm_worker_env_resolve "$home/bin/fm-spawn.sh" 2>/dev/null \
+    && echo "$id: carries the fallback" || echo "$id: STOP, $home has not advanced"
+done
+SH
+```
+
+Every outcome prints, so nothing passes by printing nothing; each `STOP` is a lane to settle first - clear whatever the sweep warned about so that home's fast-forward can land, or record the home it has none for - and the ambient copies come out only once every line reads `carries the fallback`.
 For a secondmate that relies on the primary's file, the stderr line naming that `.env` path at its next crewmate spawn is the per-home confirmation that it picked the fallback up; a secondmate whose own `.env` delivers credentials needs none and prints none.
 
 This exists so credentials do not have to be set machine-wide.
