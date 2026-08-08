@@ -284,7 +284,7 @@ test_no_mistakes_dod_wording() {
 # the commit, so a compliant worker spent the terminal verb on a mid-task handoff
 # and firstmate read it as finished work with no PR.
 test_no_mistakes_dod_runs_straight_into_validation() {
-  local home id brief done_appends
+  local home id brief done_appends slash_lines
   home="$TMP_ROOT/straight-through-home"
   mkdir -p "$home/data"
   id="brief-straight-c1"
@@ -312,11 +312,12 @@ test_no_mistakes_dod_runs_straight_into_validation() {
   assert_grep "on opencode, pi, and pi-signed no separate skill invocation is verified" "$brief" \
     "no-mistakes DOD lost the natural-language fallback for the harnesses with no verified form"
   # No sentence about the worker's OWN invocation may respell one harness's form
-  # as if it were universal - the two that used to are the counterexamples.
-  assert_no_grep "it loads when you invoke /no-mistakes" "$brief" \
-    "no-mistakes DOD hard-codes one harness's spelling in the mechanics sentence"
-  assert_no_grep "After /no-mistakes reports CI green" "$brief" \
-    "no-mistakes DOD hard-codes one harness's spelling in the CI-green sentence"
+  # as if it were universal. Counted rather than matched string by string, so a
+  # new sentence reintroducing the claude-only spelling in different words fails
+  # too: exactly one line - the harness-forms sentence - may name a slash form.
+  slash_lines=$(grep -c '/no-mistakes' "$brief" || true)
+  [ "$slash_lines" = "1" ] \
+    || fail "no-mistakes brief names /no-mistakes on $slash_lines lines; only the harness-forms sentence may"$'\n'"$(grep -n '/no-mistakes' "$brief")"
   assert_no_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" \
     "no-mistakes DOD restored the pre-validation stop's firstmate trigger"
   assert_no_grep "When you believe it is complete, append" "$brief" \
@@ -372,6 +373,12 @@ test_no_mistakes_dod_carries_intent_requirements_up_front() {
     "no-mistakes DOD must give the rerun prohibition its reason, not just the rule"
   assert_grep "picked up a DIFFERENT lane's task" "$brief" \
     "no-mistakes DOD must name what the rerun prohibition actually prevented"
+  # The prohibition must not hand back the adjacent power it withholds: AGENTS.md
+  # owns when a run may start over, so the brief routes that to firstmate.
+  assert_grep "Starting a run over is not yours to decide either" "$brief" \
+    "no-mistakes DOD must withhold self-restart, not just the rerun command"
+  assert_grep "append \`needs-decision: {why}\` and stop rather than starting a second one" "$brief" \
+    "no-mistakes DOD must route an unrecoverable-looking run to firstmate instead of a second run"
 
   # Faster paths never had the stop and must not inherit the pipeline's list.
   write_registry "$home"

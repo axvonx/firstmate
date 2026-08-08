@@ -81,7 +81,10 @@
 # stop. What that moment did deliver - the requirements firstmate composed after
 # reading the implementation, and its standing `no-mistakes rerun` prohibition -
 # is stated up front in the no-mistakes DOD instead, because nothing now
-# interrupts there. Those requirements are routed into the run's `--intent`
+# interrupts there. That prohibition routes a run that looks unrecoverable to
+# firstmate rather than to a second run the worker starts itself, because
+# AGENTS.md's Validate section owns when a run may start over and on whose say.
+# Those requirements are routed into the run's `--intent`
 # rather than into the PR body directly: the pipeline owns that body and
 # republishes it, so the intent is the only route a worker is authorized to use.
 # This generator takes no harness argument, so the DOD names every verified
@@ -728,7 +731,8 @@ Three firstmate-specific rules layer on top of that guidance:
   When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
 - Avoid \`--yes\`: it would silently bypass firstmate's authority check and any required captain escalation.
 - Never run \`no-mistakes rerun\`, whatever it looks like it would fix: it re-derives the intent from local agent transcripts instead of the one you wrote, and on this machine those transcripts include other lanes, so it has picked up a DIFFERENT lane's task - after which the review step judged this diff against the wrong contract and returned verdicts that looked exactly as authoritative as correct ones.
-  If a run genuinely has to start over, start it the way you started this one, with your own \`--intent\`.
+  Starting a run over is not yours to decide either: it takes a current, explicit captain instruction that completely invalidates the work being validated, and then one supported abort, a confirmed stop in structured \`axi status\`, and settled branch ownership before any second run.
+  Firstmate owns that sequence, so when a run looks like it has to start over, append \`needs-decision: {why}\` and stop rather than starting a second one.
 
 After the run reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
 EOF
