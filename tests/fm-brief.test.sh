@@ -297,11 +297,26 @@ test_no_mistakes_dod_runs_straight_into_validation() {
   assert_grep "invoke the no-mistakes skill yourself on this branch - do not stop, and do not wait to be told" "$brief" \
     "no-mistakes DOD must send the worker into validation itself, with no stop and no wait"
   # The invocation moved from harness-aware firstmate to a harness-blind
-  # generator, and codex rejects claude's `/<skill>` spelling outright, so the
-  # brief must not hard-code one form as the worker's own action.
-  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks and $ must stay literal
-  assert_grep 'Invoke it the way your own harness invokes a skill (`/no-mistakes` on some, `$no-mistakes` on others)' "$brief" \
+  # generator, so the brief must carry every form `harness-adapters` verifies -
+  # all seven adapters, including the three with no slash form at all. A
+  # hard-coded spelling here is a brief that silently does not fire on some of
+  # them, which is a lane parked at its implementation commit.
+  assert_grep "Invoke it the way your own harness invokes a skill" "$brief" \
     "no-mistakes DOD must let each harness use its own skill invocation form"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+  assert_grep 'On claude, grok, and kimi that is `/no-mistakes`' "$brief" \
+    "no-mistakes DOD lost the slash-form harnesses"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks and $ must stay literal
+  assert_grep 'on codex it is `$no-mistakes`' "$brief" \
+    "no-mistakes DOD lost codex's dollar form"
+  assert_grep "on opencode, pi, and pi-signed no separate skill invocation is verified" "$brief" \
+    "no-mistakes DOD lost the natural-language fallback for the harnesses with no verified form"
+  # No sentence about the worker's OWN invocation may respell one harness's form
+  # as if it were universal - the two that used to are the counterexamples.
+  assert_no_grep "it loads when you invoke /no-mistakes" "$brief" \
+    "no-mistakes DOD hard-codes one harness's spelling in the mechanics sentence"
+  assert_no_grep "After /no-mistakes reports CI green" "$brief" \
+    "no-mistakes DOD hard-codes one harness's spelling in the CI-green sentence"
   assert_no_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" \
     "no-mistakes DOD restored the pre-validation stop's firstmate trigger"
   assert_no_grep "When you believe it is complete, append" "$brief" \
@@ -318,9 +333,13 @@ test_no_mistakes_dod_runs_straight_into_validation() {
   pass "fm-brief.sh: no-mistakes brief runs commit-to-validation with one done: gate"
 }
 
-# Removing the stop removed the moment firstmate supplied intent and PR-body
-# requirements after reading the implementation (28 of 63 measured triggers
-# carried them). The brief must state those requirements up front instead.
+# Removing the stop removed the moment firstmate supplied requirements after
+# reading the implementation (28 of 63 measured triggers carried them) and
+# repeated its standing `no-mistakes rerun` prohibition (8 of 33 prose steers).
+# The brief must state both up front instead, and it must route the
+# requirements through the intent: the pipeline owns and republishes the PR
+# body, so asking the worker to write that body directly asks for a write it
+# does not own.
 test_no_mistakes_dod_carries_intent_requirements_up_front() {
   local home id brief
   home="$TMP_ROOT/intent-upfront-home"
@@ -330,8 +349,8 @@ test_no_mistakes_dod_carries_intent_requirements_up_front() {
   brief="$home/data/$id/brief.md"
   assert_grep "nobody reviews what you found before the run starts" "$brief" \
     "no-mistakes DOD must say why these requirements are stated up front"
-  assert_grep "make each one survive into the PR body" "$brief" \
-    "no-mistakes DOD must carry the requirements through to the PR body, not only the intent"
+  assert_grep "put these in the intent yourself, which is the copy the pipeline carries into the PR body" "$brief" \
+    "no-mistakes DOD must route the requirements to the PR body through the intent the pipeline consumes"
   assert_grep "Every deviation from this brief, named as a deviation" "$brief" \
     "no-mistakes DOD lost the named-deviation requirement"
   assert_grep "The honest limit of your coverage, as a ratio rather than a total" "$brief" \
@@ -343,13 +362,27 @@ test_no_mistakes_dod_carries_intent_requirements_up_front() {
   assert_grep "Any consequence of merging that the diff does not show" "$brief" \
     "no-mistakes DOD lost the merge-consequence requirement"
 
+  # The prohibition firstmate used to repeat at the removed stop, with the
+  # reason attached: a bare rule gets rationalised past by a worker staring at
+  # a run it wants to restart.
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+  assert_grep 'Never run `no-mistakes rerun`' "$brief" \
+    "no-mistakes DOD lost the standing no-mistakes rerun prohibition"
+  assert_grep "re-derives the intent from local agent transcripts instead of the one you wrote" "$brief" \
+    "no-mistakes DOD must give the rerun prohibition its reason, not just the rule"
+  assert_grep "picked up a DIFFERENT lane's task" "$brief" \
+    "no-mistakes DOD must name what the rerun prohibition actually prevented"
+
   # Faster paths never had the stop and must not inherit the pipeline's list.
   write_registry "$home"
   for id_proj in "brief-intent-direct-c2:direct-proj" "brief-intent-local-c2:local-proj"; do
     id=${id_proj%%:*}
     FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" "${id_proj##*:}" >/dev/null 2>&1
-    assert_no_grep "make each one survive into the PR body" "$home/data/$id/brief.md" \
+    assert_no_grep "put these in the intent yourself" "$home/data/$id/brief.md" \
       "$id: non-pipeline brief must not carry the no-mistakes intent list"
+    # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+    assert_no_grep 'Never run `no-mistakes rerun`' "$home/data/$id/brief.md" \
+      "$id: non-pipeline brief must not carry a pipeline-only prohibition"
   done
   pass "fm-brief.sh: no-mistakes brief states the removed gate's intent requirements up front"
 }
