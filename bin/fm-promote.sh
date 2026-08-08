@@ -4,8 +4,10 @@
 # state/<task-id>.meta so fm-teardown.sh applies the full ship-task teardown protection
 # again. After promoting, send the crewmate its ship instructions via fm-send.sh
 # (inventory scratch state, reset to a clean default-branch base, carry over only
-# intended fix changes, create branch fm/<task-id>, implement, then report done
-# according to the project's delivery mode).
+# intended fix changes, create branch fm/<task-id>, implement, then carry it
+# through to the definition of done for the project's delivery mode - which for
+# a no-mistakes project runs on from the implementation commit into the
+# pipeline, so the instructions must not tell it to report and wait there).
 # Usage: fm-promote.sh <task-id>
 set -eu
 
@@ -26,4 +28,4 @@ mv "$TMP" "$META"
 
 HOME_Q=$(printf '%q' "$FM_HOME")
 echo "promoted $ID to ship (teardown protection restored)"
-echo "next: FM_HOME=$HOME_Q bin/fm-send.sh fm-$ID '<ship instructions: review scratch state with git status and git log; reset to a clean default-branch base; carry over only intended fix changes; create branch fm/$ID; implement; report done>'"
+echo "next: FM_HOME=$HOME_Q bin/fm-send.sh fm-$ID '<ship instructions: review scratch state with git status and git log; reset to a clean default-branch base; carry over only intended fix changes; create branch fm/$ID; implement; then carry it through to the definition of done for this project delivery mode>'"

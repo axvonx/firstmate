@@ -73,6 +73,14 @@
 #   direct-PR    implement -> push + open PR via gh-axi (no pipeline) -> captain merge
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
 #                captain approves, firstmate merges to local main
+# The no-mistakes worker runs from its implementation commit straight into the
+# pipeline. The brief deliberately no longer stops it there to be triggered by
+# firstmate: across 70 measured lanes, 63 needed that trigger and all 63 were
+# approved within a median of 60 seconds, and spending `done:` on the handoff
+# made a compliant worker read as a finished one with no PR. Do not restore the
+# stop. What that moment did deliver - intent and PR-body requirements firstmate
+# composed after reading the implementation - is stated up front in the
+# no-mistakes DOD's intent list instead, because nothing now interrupts there.
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
 # Scout tasks ignore mode - their deliverable is a report, not a merge.
 # Every scaffold's status protocol distinguishes the configured
@@ -691,13 +699,20 @@ EOF
     RULE1='1. Never push to the default branch. Never merge a PR.'
     IFS= read -r -d '' DOD <<EOF || true
 # Definition of done
-The task is complete only when committed on your branch.
-When you believe it is complete, append \`done: {summary}\` to the status file and stop.
-Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
+Committing your implementation is the START of the pipeline, not the end of the task.
+When it is implemented and committed, append \`working: implementation committed, starting validation\` and invoke the no-mistakes skill yourself on this branch - do not stop, and do not wait to be told.
+Invoke it the way your own harness invokes a skill (\`/no-mistakes\` on some, \`\$no-mistakes\` on others); firstmate is no longer sending it for you, so use the form that works where you are rather than a spelling your harness rejects.
 
 You drive no-mistakes by responding to its gates, not by implementing fixes.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
 When starting no-mistakes, make \`--intent\` preserve all relevant content from this brief's \`# Task\` section plus every later accepted Firstmate requirement, clarification, constraint, exclusion, and supersession, carrying only each requirement's current accepted form; retain direct requirements instead of substituting a diff summary, and exclude generic operational, status, delivery, and other scaffold boilerplate unless it is task-specific.
+Beyond the brief's own content, nobody reviews what you found before the run starts, so put these in the intent yourself and make each one survive into the PR body:
+- Every deviation from this brief, named as a deviation and given its reason: a file you touched that the task did not name, a design point you changed, a documented posture you departed from. A reviewer who meets one in the diff without having met it in the intent reads it as an oversight.
+- The honest limit of your coverage, as a ratio rather than a total: what you checked against what exists, what you baselined instead of fixing, what your guard does not yet watch. An unqualified number reads as full coverage.
+- Negative, partial, and null results in plain words, neither softened nor buried: an arm that did not run is a finding and must not read as a completed one.
+- The proof that your tests catch the thing rather than merely pass - what you watched fail against the old code, and what each ablation showed.
+- Any consequence of merging that the diff does not show: a recurring cost, a variable or migration that must land first, a published claim the change implies is wrong. If merging in the wrong order would break something live, say so in the first paragraph.
+- The single sentence that is the most valuable thing you learned, verbatim, rather than leaving it to be found in a report.
 Do not hand-edit, commit, or fix findings yourself while a run is active - the pipeline applies every fix.
 
 Two firstmate-specific rules layer on top of that guidance:

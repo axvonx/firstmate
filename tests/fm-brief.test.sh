@@ -278,6 +278,82 @@ test_no_mistakes_dod_wording() {
   pass "fm-brief.sh: no-mistakes DOD keeps its apostrophe prose, now parse-safe"
 }
 
+# The no-mistakes brief must carry a worker from its implementation commit into
+# validation with no stop, and `done:` must mean exactly one thing. Both halves
+# regressed together before: the brief told the worker the task was complete at
+# the commit, so a compliant worker spent the terminal verb on a mid-task handoff
+# and firstmate read it as finished work with no PR.
+test_no_mistakes_dod_runs_straight_into_validation() {
+  local home id brief done_appends
+  home="$TMP_ROOT/straight-through-home"
+  mkdir -p "$home/data"
+  id="brief-straight-c1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "brief was not scaffolded"
+
+  assert_grep "Committing your implementation is the START of the pipeline, not the end of the task." "$brief" \
+    "no-mistakes DOD must tell the worker the commit starts the pipeline"
+  assert_grep "invoke the no-mistakes skill yourself on this branch - do not stop, and do not wait to be told" "$brief" \
+    "no-mistakes DOD must send the worker into validation itself, with no stop and no wait"
+  # The invocation moved from harness-aware firstmate to a harness-blind
+  # generator, and codex rejects claude's `/<skill>` spelling outright, so the
+  # brief must not hard-code one form as the worker's own action.
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks and $ must stay literal
+  assert_grep 'Invoke it the way your own harness invokes a skill (`/no-mistakes` on some, `$no-mistakes` on others)' "$brief" \
+    "no-mistakes DOD must let each harness use its own skill invocation form"
+  assert_no_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" \
+    "no-mistakes DOD restored the pre-validation stop's firstmate trigger"
+  assert_no_grep "When you believe it is complete, append" "$brief" \
+    "no-mistakes DOD restored the pre-validation stop's report-and-wait instruction"
+
+  # `done:` means one thing: exactly one line may instruct appending one, and it
+  # is the PR-checks-green gate. A second one is the overload coming back.
+  done_appends=$(grep -c 'append `done:' "$brief" || true)
+  [ "$done_appends" = "1" ] \
+    || fail "no-mistakes brief instructs $done_appends done: appends; exactly one (PR checks green) is allowed"$'\n'"$(grep -n 'append `done:' "$brief")"
+  # shellcheck disable=SC2016  # single quotes are deliberate: backticks and {url} must stay literal
+  assert_grep 'append `done: PR {url} checks green` and stop' "$brief" \
+    "no-mistakes DOD lost its single PR-checks-green done: gate"
+  pass "fm-brief.sh: no-mistakes brief runs commit-to-validation with one done: gate"
+}
+
+# Removing the stop removed the moment firstmate supplied intent and PR-body
+# requirements after reading the implementation (28 of 63 measured triggers
+# carried them). The brief must state those requirements up front instead.
+test_no_mistakes_dod_carries_intent_requirements_up_front() {
+  local home id brief
+  home="$TMP_ROOT/intent-upfront-home"
+  mkdir -p "$home/data"
+  id="brief-intent-c2"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "nobody reviews what you found before the run starts" "$brief" \
+    "no-mistakes DOD must say why these requirements are stated up front"
+  assert_grep "make each one survive into the PR body" "$brief" \
+    "no-mistakes DOD must carry the requirements through to the PR body, not only the intent"
+  assert_grep "Every deviation from this brief, named as a deviation" "$brief" \
+    "no-mistakes DOD lost the named-deviation requirement"
+  assert_grep "The honest limit of your coverage, as a ratio rather than a total" "$brief" \
+    "no-mistakes DOD lost the coverage-limit requirement"
+  assert_grep "Negative, partial, and null results in plain words" "$brief" \
+    "no-mistakes DOD lost the plain-negative-result requirement"
+  assert_grep "what you watched fail against the old code" "$brief" \
+    "no-mistakes DOD lost the watched-red evidence requirement"
+  assert_grep "Any consequence of merging that the diff does not show" "$brief" \
+    "no-mistakes DOD lost the merge-consequence requirement"
+
+  # Faster paths never had the stop and must not inherit the pipeline's list.
+  write_registry "$home"
+  for id_proj in "brief-intent-direct-c2:direct-proj" "brief-intent-local-c2:local-proj"; do
+    id=${id_proj%%:*}
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" "${id_proj##*:}" >/dev/null 2>&1
+    assert_no_grep "make each one survive into the PR body" "$home/data/$id/brief.md" \
+      "$id: non-pipeline brief must not carry the no-mistakes intent list"
+  done
+  pass "fm-brief.sh: no-mistakes brief states the removed gate's intent requirements up front"
+}
+
 test_ship_project_memory_wording() {
   local home id brief
   home="$TMP_ROOT/project-memory-home"
@@ -1454,6 +1530,8 @@ test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
+test_no_mistakes_dod_runs_straight_into_validation
+test_no_mistakes_dod_carries_intent_requirements_up_front
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
