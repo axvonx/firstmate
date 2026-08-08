@@ -69,10 +69,27 @@
 # For ship tasks, the definition of done is shaped by the project's delivery mode
 # (data/projects.md via fm-project-mode.sh; see the project-management skill
 # and AGENTS.md task lifecycle):
-#   no-mistakes  implement -> /no-mistakes pipeline -> PR -> captain merge (default)
+#   no-mistakes  implement -> no-mistakes pipeline -> PR -> captain merge (default)
 #   direct-PR    implement -> push + open PR via gh-axi (no pipeline) -> captain merge
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
 #                captain approves, firstmate merges to local main
+# The no-mistakes worker runs from its implementation commit straight into the
+# pipeline. The brief deliberately no longer stops it there to be triggered by
+# firstmate: across 70 measured lanes, 63 needed that trigger and all 63 were
+# approved within a median of 60 seconds, and spending `done:` on the handoff
+# made a compliant worker read as a finished one with no PR. Do not restore the
+# stop. What that moment did deliver - the requirements firstmate composed after
+# reading the implementation, and its standing `no-mistakes rerun` prohibition -
+# is stated up front in the no-mistakes DOD instead, because nothing now
+# interrupts there. That prohibition routes a run that looks unrecoverable to
+# firstmate rather than to a second run the worker starts itself, because
+# AGENTS.md's Validate section owns when a run may start over and on whose say.
+# Those requirements are routed into the run's `--intent`
+# rather than into the PR body directly: the pipeline owns that body and
+# republishes it, so the intent is the only route a worker is authorized to use.
+# This generator takes no harness argument, so the DOD names every verified
+# harness's skill-invocation form; `.agents/skills/harness-adapters` owns those
+# forms, and a form must be copied from it rather than derived or guessed.
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
 # Scout tasks ignore mode - their deliverable is a report, not a merge.
 # Every scaffold's status protocol distinguishes the configured
@@ -670,7 +687,7 @@ case "$MODE" in
 This project ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
 When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
-Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
+Do NOT run the no-mistakes validation pipeline here, in whatever form your harness would invoke it. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
     ;;
   local-only)
@@ -691,22 +708,33 @@ EOF
     RULE1='1. Never push to the default branch. Never merge a PR.'
     IFS= read -r -d '' DOD <<EOF || true
 # Definition of done
-The task is complete only when committed on your branch.
-When you believe it is complete, append \`done: {summary}\` to the status file and stop.
-Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
+Committing your implementation is the START of the pipeline, not the end of the task.
+When it is implemented and committed, append \`working: implementation committed, starting validation\` and invoke the no-mistakes skill yourself on this branch - do not stop, and do not wait to be told.
+Invoke it the way your own harness invokes a skill, because firstmate is no longer sending it for you and a spelling your harness rejects leaves this lane parked at its commit.
+On claude, grok, and kimi that is \`/no-mistakes\`; on codex it is \`\$no-mistakes\`, because \`/no-mistakes\` is claude-only there and codex rejects it as "Unrecognized command"; on opencode, pi, and pi-signed no separate skill invocation is verified, so ask for the no-mistakes skill in plain natural language rather than a slash form that will not fire.
 
 You drive no-mistakes by responding to its gates, not by implementing fixes.
-Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
+Follow the guidance no-mistakes itself provides for the mechanics: it loads with the skill you just invoked, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
 When starting no-mistakes, make \`--intent\` preserve all relevant content from this brief's \`# Task\` section plus every later accepted Firstmate requirement, clarification, constraint, exclusion, and supersession, carrying only each requirement's current accepted form; retain direct requirements instead of substituting a diff summary, and exclude generic operational, status, delivery, and other scaffold boilerplate unless it is task-specific.
+Beyond the brief's own content, nobody reviews what you found before the run starts, so put these in the intent yourself, which is the copy the pipeline carries into the PR body:
+- Every deviation from this brief, named as a deviation and given its reason: a file you touched that the task did not name, a design point you changed, a documented posture you departed from. A reviewer who meets one in the diff without having met it in the intent reads it as an oversight.
+- The honest limit of your coverage, as a ratio rather than a total: what you checked against what exists, what you baselined instead of fixing, what your guard does not yet watch. An unqualified number reads as full coverage.
+- Negative, partial, and null results in plain words, neither softened nor buried: an arm that did not run is a finding and must not read as a completed one.
+- The proof that your tests catch the thing rather than merely pass - what you watched fail against the old code, and what each ablation showed.
+- Any consequence of merging that the diff does not show: a recurring cost, a variable or migration that must land first, a published claim the change implies is wrong. If merging in the wrong order would break something live, say so in the first paragraph.
+- The single sentence that is the most valuable thing you learned, verbatim, rather than leaving it to be found in a report.
 Do not hand-edit, commit, or fix findings yourself while a run is active - the pipeline applies every fix.
 
-Two firstmate-specific rules layer on top of that guidance:
+Three firstmate-specific rules layer on top of that guidance:
 - ask-user findings are never yours to answer: escalate to firstmate (rule 6) and stop.
   Firstmate applies the authority contract in its \`AGENTS.md\` and obtains any required captain decision.
   When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
 - Avoid \`--yes\`: it would silently bypass firstmate's authority check and any required captain escalation.
+- Never run \`no-mistakes rerun\`, whatever it looks like it would fix: it re-derives the intent from local agent transcripts instead of the one you wrote, and on this machine those transcripts include other lanes, so it has picked up a DIFFERENT lane's task - after which the review step judged this diff against the wrong contract and returned verdicts that looked exactly as authoritative as correct ones.
+  Starting a run over is not yours to decide either: it takes a current, explicit captain instruction that completely invalidates the work being validated, and then one supported abort, a confirmed stop in structured \`axi status\`, and settled branch ownership before any second run.
+  Firstmate owns that sequence, so when a run looks like it has to start over, append \`needs-decision: {why}\` and stop rather than starting a second one.
 
-After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
+After the run reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
 EOF
     ;;
 esac

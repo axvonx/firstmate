@@ -154,7 +154,8 @@ This preserves launch success instead of passing a known-bad value.
 
 ## no-mistakes skill invocation
 
-Send the validation skill using the target harness's skill invocation form.
+A no-mistakes worker invokes the validation skill itself with the form for its own harness, and the definition of done that `bin/fm-brief.sh` generates copies the forms below, so a corrected or newly verified form has to be carried into that generator too.
+`AGENTS.md`'s Validate section owns when firstmate sends that invocation instead.
 Natural language is acceptable if uncertain.
 
 - claude: `/<skill>`, for example `/no-mistakes`.
@@ -213,7 +214,7 @@ A `$<skill>` invocation opens a `$`-autocomplete (skill) popup, the same hazard 
 `fm-send` handles it the same way it handles `/` - it gives the popup a longer settle (1.2s) between typing and the first Enter, with the target backend's submit retry as the safety net - but the `$` settle is scoped to `harness=codex`, read from the target metadata for exact task ids or legacy `fm-<id>` labels.
 That scope matters because, unlike `/`, a leading `$` commonly starts ordinary text (`$5/month`, `$HOME`), so a universal `$` rule would needlessly slow plain steers to claude/opencode/pi; only a codex target receiving a `$...` message gets the popup-settle.
 An explicit `session:window` target has no meta, so its harness is unknown and treated as non-codex (the safe fast-path default).
-This is why the validation trigger (`$no-mistakes`) to a codex crew now lands on the first Enter instead of biting the popup.
+This is why a `$no-mistakes` steer to a codex crew now lands on the first Enter instead of biting the popup.
 
 Directory trust dialog on first run per repo root: "Do you trust the contents of this directory?"
 Accept with Enter.

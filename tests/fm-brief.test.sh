@@ -278,6 +278,122 @@ test_no_mistakes_dod_wording() {
   pass "fm-brief.sh: no-mistakes DOD keeps its apostrophe prose, now parse-safe"
 }
 
+# The no-mistakes brief must carry a worker from its implementation commit into
+# validation with no stop, and `done:` must mean exactly one thing. Both halves
+# regressed together before: the brief told the worker the task was complete at
+# the commit, so a compliant worker spent the terminal verb on a mid-task handoff
+# and firstmate read it as finished work with no PR.
+test_no_mistakes_dod_runs_straight_into_validation() {
+  local home id brief done_appends slash_lines
+  home="$TMP_ROOT/straight-through-home"
+  mkdir -p "$home/data"
+  id="brief-straight-c1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "brief was not scaffolded"
+
+  assert_grep "Committing your implementation is the START of the pipeline, not the end of the task." "$brief" \
+    "no-mistakes DOD must tell the worker the commit starts the pipeline"
+  assert_grep "invoke the no-mistakes skill yourself on this branch - do not stop, and do not wait to be told" "$brief" \
+    "no-mistakes DOD must send the worker into validation itself, with no stop and no wait"
+  # The invocation moved from harness-aware firstmate to a harness-blind
+  # generator, so the brief must carry every form `harness-adapters` verifies -
+  # all seven adapters, including the three with no slash form at all. A
+  # hard-coded spelling here is a brief that silently does not fire on some of
+  # them, which is a lane parked at its implementation commit.
+  assert_grep "Invoke it the way your own harness invokes a skill" "$brief" \
+    "no-mistakes DOD must let each harness use its own skill invocation form"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+  assert_grep 'On claude, grok, and kimi that is `/no-mistakes`' "$brief" \
+    "no-mistakes DOD lost the slash-form harnesses"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks and $ must stay literal
+  assert_grep 'on codex it is `$no-mistakes`' "$brief" \
+    "no-mistakes DOD lost codex's dollar form"
+  assert_grep "on opencode, pi, and pi-signed no separate skill invocation is verified" "$brief" \
+    "no-mistakes DOD lost the natural-language fallback for the harnesses with no verified form"
+  # No sentence about the worker's OWN invocation may respell one harness's form
+  # as if it were universal. Counted rather than matched string by string, so a
+  # new sentence reintroducing the claude-only spelling in different words fails
+  # too: exactly one line - the harness-forms sentence - may name a slash form.
+  slash_lines=$(grep -c '/no-mistakes' "$brief" || true)
+  [ "$slash_lines" = "1" ] \
+    || fail "no-mistakes brief names /no-mistakes on $slash_lines lines; only the harness-forms sentence may"$'\n'"$(grep -n '/no-mistakes' "$brief")"
+  assert_no_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" \
+    "no-mistakes DOD restored the pre-validation stop's firstmate trigger"
+  assert_no_grep "When you believe it is complete, append" "$brief" \
+    "no-mistakes DOD restored the pre-validation stop's report-and-wait instruction"
+
+  # `done:` means one thing: exactly one line may instruct appending one, and it
+  # is the PR-checks-green gate. A second one is the overload coming back.
+  done_appends=$(grep -c 'append `done:' "$brief" || true)
+  [ "$done_appends" = "1" ] \
+    || fail "no-mistakes brief instructs $done_appends done: appends; exactly one (PR checks green) is allowed"$'\n'"$(grep -n 'append `done:' "$brief")"
+  # shellcheck disable=SC2016  # single quotes are deliberate: backticks and {url} must stay literal
+  assert_grep 'append `done: PR {url} checks green` and stop' "$brief" \
+    "no-mistakes DOD lost its single PR-checks-green done: gate"
+  pass "fm-brief.sh: no-mistakes brief runs commit-to-validation with one done: gate"
+}
+
+# Removing the stop removed the moment firstmate supplied requirements after
+# reading the implementation (28 of 63 measured triggers carried them) and
+# repeated its standing `no-mistakes rerun` prohibition (8 of 33 prose steers).
+# The brief must state both up front instead, and it must route the
+# requirements through the intent: the pipeline owns and republishes the PR
+# body, so asking the worker to write that body directly asks for a write it
+# does not own.
+test_no_mistakes_dod_carries_intent_requirements_up_front() {
+  local home id brief
+  home="$TMP_ROOT/intent-upfront-home"
+  mkdir -p "$home/data"
+  id="brief-intent-c2"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "nobody reviews what you found before the run starts" "$brief" \
+    "no-mistakes DOD must say why these requirements are stated up front"
+  assert_grep "put these in the intent yourself, which is the copy the pipeline carries into the PR body" "$brief" \
+    "no-mistakes DOD must route the requirements to the PR body through the intent the pipeline consumes"
+  assert_grep "Every deviation from this brief, named as a deviation" "$brief" \
+    "no-mistakes DOD lost the named-deviation requirement"
+  assert_grep "The honest limit of your coverage, as a ratio rather than a total" "$brief" \
+    "no-mistakes DOD lost the coverage-limit requirement"
+  assert_grep "Negative, partial, and null results in plain words" "$brief" \
+    "no-mistakes DOD lost the plain-negative-result requirement"
+  assert_grep "what you watched fail against the old code" "$brief" \
+    "no-mistakes DOD lost the watched-red evidence requirement"
+  assert_grep "Any consequence of merging that the diff does not show" "$brief" \
+    "no-mistakes DOD lost the merge-consequence requirement"
+
+  # The prohibition firstmate used to repeat at the removed stop, with the
+  # reason attached: a bare rule gets rationalised past by a worker staring at
+  # a run it wants to restart.
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+  assert_grep 'Never run `no-mistakes rerun`' "$brief" \
+    "no-mistakes DOD lost the standing no-mistakes rerun prohibition"
+  assert_grep "re-derives the intent from local agent transcripts instead of the one you wrote" "$brief" \
+    "no-mistakes DOD must give the rerun prohibition its reason, not just the rule"
+  assert_grep "picked up a DIFFERENT lane's task" "$brief" \
+    "no-mistakes DOD must name what the rerun prohibition actually prevented"
+  # The prohibition must not hand back the adjacent power it withholds: AGENTS.md
+  # owns when a run may start over, so the brief routes that to firstmate.
+  assert_grep "Starting a run over is not yours to decide either" "$brief" \
+    "no-mistakes DOD must withhold self-restart, not just the rerun command"
+  assert_grep "append \`needs-decision: {why}\` and stop rather than starting a second one" "$brief" \
+    "no-mistakes DOD must route an unrecoverable-looking run to firstmate instead of a second run"
+
+  # Faster paths never had the stop and must not inherit the pipeline's list.
+  write_registry "$home"
+  for id_proj in "brief-intent-direct-c2:direct-proj" "brief-intent-local-c2:local-proj"; do
+    id=${id_proj%%:*}
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" "${id_proj##*:}" >/dev/null 2>&1
+    assert_no_grep "put these in the intent yourself" "$home/data/$id/brief.md" \
+      "$id: non-pipeline brief must not carry the no-mistakes intent list"
+    # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+    assert_no_grep 'Never run `no-mistakes rerun`' "$home/data/$id/brief.md" \
+      "$id: non-pipeline brief must not carry a pipeline-only prohibition"
+  done
+  pass "fm-brief.sh: no-mistakes brief states the removed gate's intent requirements up front"
+}
+
 test_ship_project_memory_wording() {
   local home id brief
   home="$TMP_ROOT/project-memory-home"
@@ -1454,6 +1570,8 @@ test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
+test_no_mistakes_dod_runs_straight_into_validation
+test_no_mistakes_dod_carries_intent_requirements_up_front
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path

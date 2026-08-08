@@ -508,11 +508,11 @@ test_terminal_stale_surfaced() {
 
 # --- stale pane, STALE terminal status overridden by an active run: absorbed ---
 # Regression for the 2026-07 herdr false-surface incidents: a crew's own status
-# log gets no new entry once firstmate hands it to a no-mistakes validation
-# (AGENTS.md's sparse status-reporting contract), so the log keeps showing its
-# pre-validation "done:" line as the LAST line for the run's entire (possibly
-# many-minutes) duration. stale_is_terminal alone has no run-step awareness and
-# would treat that leftover as still-current every time the pane goes quiet,
+# log gets no new entry for the whole no-mistakes validation it drives
+# (AGENTS.md's sparse status-reporting contract), so a captain-relevant leftover
+# from earlier in the task keeps showing as the LAST line for the run's entire
+# (possibly many-minutes) duration. stale_is_terminal alone has no run-step
+# awareness and would treat that leftover as still-current whenever the pane is quiet,
 # immediately surfacing a crew that is actively validating. crew_is_provably_working
 # must get a chance to override a captain-relevant-but-stale status line, exactly
 # as it already does for a plain non-terminal one.
@@ -523,9 +523,9 @@ test_stale_terminal_status_overridden_by_active_run() {
   window="test:fm-validating"
   printf 'no-mistakes axi run: validating...' > "$capture_file"
   printf 'window=%s\nkind=ship\n' "$window" > "$state/validating.meta"
-  # The crew reported done BEFORE firstmate triggered no-mistakes validation;
-  # this line never gets superseded by a newer status-log entry while the
-  # pipeline itself runs.
+  # A captain-relevant leftover from earlier in the task, using the strongest
+  # terminal verb so the override is proven against the hardest case; it never
+  # gets superseded by a newer status-log entry while the pipeline itself runs.
   printf 'done: implementation complete, ready to validate\n' > "$state/validating.status"
   sig=$(seen_sig "$state/validating.status"); printf '%s' "$sig" > "$state/.seen-validating_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
