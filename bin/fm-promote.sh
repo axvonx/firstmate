@@ -6,7 +6,7 @@
 # (inventory scratch state, reset to a clean default-branch base, carry over only
 # intended fix changes, create branch fm/<task-id>, implement). That message is the
 # only ship contract a promoted crewmate ever receives, and it keeps the scout
-# brief, which carries no definition of done - so the instructions must STATE the
+# brief, which carries no ship definition of done - so the instructions must STATE the
 # delivery mode's definition of done, taken from its owner `bin/fm-brief.sh
 # --help`, rather than defer to one the worker does not have. Being the only
 # document, it is also the only one that can own the first action, which is the
@@ -54,5 +54,5 @@ esac
 
 HOME_Q=$(printf '%q' "$FM_HOME")
 echo "promoted $ID to ship (teardown protection restored)"
-echo "delivery mode: $MODE - the crewmate keeps the scout brief, which carries no definition of done, so state that mode's own one from bin/fm-brief.sh --help, which owns it, instead of deferring to a document the worker does not have"
+echo "delivery mode: $MODE - the crewmate keeps the scout brief, which carries no ship definition of done, so state that mode's own one from bin/fm-brief.sh --help, which owns it, instead of deferring to a document the worker does not have"
 echo "next: FM_HOME=$HOME_Q bin/fm-send.sh fm-$ID '<ship instructions: this message overrides the scout brief you still hold - its Setup premise that this worktree is scratch discarded at teardown with only the report surviving, and its report done: gate, are both replaced by the delivery mode stated below, and $PUSH_CLAUSE; review scratch state with git status and git log; reset to a clean default-branch base; carry over only intended fix changes; create branch fm/$ID; implement; finish by that delivery mode definition of done, stated here in full>'"
